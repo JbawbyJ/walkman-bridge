@@ -44,7 +44,7 @@ export default function App() {
 
   // Poll active job
   useEffect(() => {
-    if (!activeJob || activeJob.status === 'done' || activeJob.status === 'failed') return
+    if (!activeJob || ['done', 'failed', 'partial'].includes(activeJob.status)) return
     const id = setInterval(async () => {
       try {
         const j = await api.job(activeJob.job_id)

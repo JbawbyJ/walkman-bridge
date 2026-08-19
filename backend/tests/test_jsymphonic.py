@@ -105,7 +105,7 @@ def test_missing_jar_error_is_helpful(monkeypatch, tmp_path):
     monkeypatch.setattr(jsymphonic, "SHIM_CMD_PREFIX", None)
     monkeypatch.setattr(jsymphonic, "JAR_PATH", tmp_path / "vendor" / "jsymphonic.jar")
     monkeypatch.setenv("WALKMAN_BRIDGE_JAVA", "java")  # skip PATH lookup
-    with pytest.raises(JSymphonicError, match="vendor"):
+    with pytest.raises(JSymphonicError, match="JbawbyJ/jsymphonic"):
         jsymphonic.list_tracks(Path("X:/"))
 
 
