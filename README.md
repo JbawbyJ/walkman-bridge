@@ -34,7 +34,7 @@ To stop, close the black console window (or press `Ctrl+C` in it).
 | Java 17/21 JRE | runs the JSymphonic engine | auto-detected: `WALKMAN_BRIDGE_JAVA` env var, a portable JDK in `..\tools\jdk*`, or `java` on PATH |
 | `jsymphonic.jar` | the transfer engine | place at `backend\vendor\jsymphonic.jar` |
 
-**About the jar:** build it from [the companion JSymphonic fork](../jsymphonic) with `mvn package` (use the `jar-with-dependencies` artifact). The fork adds the headless CLI this app drives, plus Windows file-locking fixes. JSymphonic is GPL-3.0, so the jar is not bundled in this repo — you build or download it yourself.
+**About the jar:** build it from [the companion JSymphonic fork](https://github.com/JbawbyJ/jsymphonic) with `mvn package` (use the `jar-with-dependencies` artifact). The fork adds the headless CLI this app drives, plus Windows file-locking fixes. JSymphonic is GPL-3.0, so the jar is not bundled in this repo — you build or download it yourself.
 
 ## Manual start (developers)
 
