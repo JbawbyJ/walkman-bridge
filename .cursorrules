@@ -1,0 +1,63 @@
+# Walkman Bridge — AI assistant context
+
+Local single-user web app that transfers music to a Sony NW-S705F Walkman (2007).
+FastAPI backend on 127.0.0.1:8000 + React dashboard. Audio is normalized with
+ffmpeg, then written to the device by a headless build of JSymphonic (GPL, our
+fork adds the CLI). Read STRUCTURE.md for the module map and docs/PROTOCOL.md
+for the subprocess contract before proposing changes.
+
+## The one thing you must understand about the device
+
+The NW-S705F does NOT play files you copy onto it. It plays what its binary
+OMGAUDIO database says exists. Every mutation (add/delete) must go through the
+JSymphonic engine, which rewrites 17 database files and wraps MP3s in OMA
+containers. Never suggest "just copy the MP3 to the device" — it will never
+appear. The database is the source of truth, not the filesystem.
+
+## Architecture (do not re-invent)
+
+Browser → FastAPI (`backend/main.py`) → subprocess:
+  - `transcode.py` → ffmpeg → MP3 192k CBR / 44.1 kHz / ID3v2.3 (inside both the
+    Sony spec and JSymphonic's pass-through whitelist — no double transcoding)
+  - `jsymphonic.py` → `java -cp vendor/jsymphonic.jar
+    org.naurd.media.jsymphonic.headless.HeadlessCli` → JSON-lines events on
+    stdout (see docs/PROTOCOL.md)
+
+The stock JSymphonic jar is GUI-only; the HeadlessCli class exists only in our
+companion fork. The GUI remains the jar's default main class.
+
+## Hard rules
+
+- Every HeadlessCli invocation is serialized behind the module lock in
+  `jsymphonic.py`. Never run two JAR processes at once — they rewrite the same
+  database.
+- Transfers are BATCHED: one `add` invocation per upload job. Never per-file.
+- `/api/tracks` serves a cache. Polling must never spawn a JVM.
+- The server binds 127.0.0.1 only.
+- Windows file handles: JSymphonic had (and we fixed) file-locking bugs.
+  Any new code touching device files must close handles deterministically.
+
+## Do-not list
+
+No database (SQLite etc.), no auth, no WebSockets, no TypeScript, no Electron,
+no parallel JSymphonic calls, no ATRAC encoding, no new frontend state
+libraries (useState only), no `fetch` outside `api.js`, no subprocess calls
+outside `transcode.py`/`jsymphonic.py`.
+
+## Style
+
+- Python: `from __future__ import annotations`, type hints, pathlib, typed
+  exceptions (`AudioError`, `JSymphonicError`). Match existing comment density.
+- React: functional components only, Tailwind classes, one-screen dashboard.
+- Aesthetic: dark technical instrument. JetBrains Mono + IBM Plex Sans,
+  amber/cyan/crimson on near-black, CRT scanline overlay. No purple gradients,
+  no Inter, no rounded-2xl SaaS cards.
+
+## Verified vs unverified
+
+Mock-device testing (a folder with an empty OMGAUDIO dir, `MOCK_DEVICE_PATH`)
+exercises everything: DB generation, OMA wrapping, add/list/delete round-trips.
+What remains unverified until real hardware is plugged in: whether the actual
+NW-S705F firmware accepts the generated database. Historical S70x reports are
+mixed — the README's backup-first warning exists for a reason. Do not delete
+that warning.

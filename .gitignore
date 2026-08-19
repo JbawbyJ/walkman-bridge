@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Vendored JAR — GPL-3.0, user builds/downloads it (see README)
+backend/vendor/*.jar
+
+# Node / frontend build
+node_modules/
+frontend/dist/
+
+# Runtime work dirs
+uploads/
+work/
+
+# OS junk
+Thumbs.db
+.DS_Store
+.claude/
