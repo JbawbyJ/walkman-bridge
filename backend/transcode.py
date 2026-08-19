@@ -7,6 +7,7 @@ preserve ID3 tags so JSymphonic can read title/artist/album.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -23,6 +24,16 @@ SAFE_PASSTHROUGH = False
 
 
 def _ensure_ffmpeg() -> str:
+    # The installed app ships its own ffmpeg and points here; a dev checkout
+    # falls back to PATH. Mirrors WALKMAN_BRIDGE_JAVA in jsymphonic.py.
+    bundled = os.environ.get("WALKMAN_BRIDGE_FFMPEG")
+    if bundled:
+        if not Path(bundled).is_file():
+            raise AudioError(
+                f"WALKMAN_BRIDGE_FFMPEG points at {bundled}, which does not exist"
+            )
+        return bundled
+
     path = shutil.which("ffmpeg")
     if not path:
         raise AudioError("ffmpeg not found in PATH — install it first")

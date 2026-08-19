@@ -19,3 +19,6 @@ work/
 Thumbs.db
 .DS_Store
 .claude/
+packaging/build/
+packaging/dist/
+packaging/.cache/

@@ -15,16 +15,33 @@ FastAPI server (127.0.0.1:8000)
 Walkman (USB mass storage drive)
 ```
 
-## For non-technical users
+## Install it (recommended)
+
+Download **`WalkmanBridge-Setup-0.1.0.exe`** and run it.
+
+1. Windows may warn about an unknown publisher (the installer isn't code-signed) — choose **More info → Run anyway**.
+2. It installs for your user only: no administrator prompt, nothing added to PATH, no system settings touched.
+3. Launch **Walkman Bridge** from the Start Menu or desktop shortcut. It opens as its own app window.
+4. Plug in the Walkman with its WM-PORT cable, drag songs in, watch them transfer.
+
+**No prerequisites** — the installer bundles its own Java runtime, ffmpeg, and the JSymphonic engine (~80 MB download, ~175 MB installed). Uninstall from Settings → Apps like any other program.
+
+Build the installer yourself with:
+
+```
+powershell -ExecutionPolicy Bypass -File packaginguild.ps1
+```
+
+See [packaging/](packaging) for what it assembles. Logs live at `%LOCALAPPDATA%\Walkman Bridge\walkman-bridge.log`.
+
+## Run from source (developers)
 
 1. Run `scripts\setup.bat` once (double-click). It prepares everything and tells you if anything is missing.
-2. Plug in the Walkman with its WM-PORT cable.
-3. Double-click **`START-WALKMAN-BRIDGE.bat`**. Your browser opens the dashboard.
-4. Drag songs in. Watch them transfer. Done.
+2. Double-click **`START-WALKMAN-BRIDGE.bat`**. Your browser opens the dashboard.
 
-To stop, close the black console window (or press `Ctrl+C` in it).
+To stop, close the console window (or press `Ctrl+C` in it).
 
-## Prerequisites
+## Prerequisites (source checkout only — the installer needs none)
 
 | What | Why | Check |
 |---|---|---|

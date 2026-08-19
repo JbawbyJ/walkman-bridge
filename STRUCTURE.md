@@ -117,3 +117,44 @@ If a refactor would violate one of these, surface that as a tradeoff before doin
 - JSymphonic is GPL-3.0 — the JAR lives in `backend/vendor/` for local use only and is gitignored. Users build it from the companion fork repo (which carries the `HeadlessCli` addition and Windows fixes, GPL like the rest of JSymphonic) per the README.
 - ffmpeg is LGPL/GPL depending on build. Same logic — call it as an external process, do not bundle.
 - This project's own code can be MIT or whatever you choose, but the runtime composition is GPL-touching, so be deliberate before distributing binaries.
+
+## Packaging (`packaging/`)
+
+Turns the repo into an installable Windows program. Nothing here is imported by
+the app at runtime.
+
+**`build.ps1`** — one command, whole pipeline: builds the jar (Maven, from the
+JSymphonic fork), builds the dashboard (npm), trims a JRE (`jlink`, ~48MB from a
+329MB JDK), downloads a slim ffmpeg, stages the app tree, freezes the launcher
+(PyInstaller), and compiles the installer (Inno Setup). ASCII + UTF-8 BOM so it
+runs under both Windows PowerShell 5.1 and PowerShell 7.
+
+**`launcher.py`** — becomes `WalkmanBridge.exe`. Picks a free loopback port,
+points the backend at the bundled `jre/` and `ffmpeg/` via the
+`WALKMAN_BRIDGE_JAVA` / `WALKMAN_BRIDGE_FFMPEG` env vars, starts uvicorn in a
+thread, and shows the dashboard in a native WebView2 window (falls back to the
+browser if WebView2 is absent). Two things it must keep doing: repair
+`sys.stdout`/`sys.stderr`, which PyInstaller sets to `None` in windowed builds
+and which silently kills uvicorn's logging thread; and funnel every failure to a
+message box plus `%LOCALAPPDATA%\Walkman Bridge\walkman-bridge.log`, because a
+windowed app cannot report a crash any other way.
+
+**`installer.iss`** — Inno Setup script. Per-user install to
+`%LOCALAPPDATA%\Programs\Walkman Bridge` (no UAC), Start Menu + optional desktop
+shortcut, Add/Remove Programs entry, and an uninstaller that also removes the
+runtime log directory. Note that `[Code]` is Pascal: string literals need
+explicit `+` concatenation.
+
+**`make_icon.py`** — generates `walkman-bridge.ico` (cassette glyph, app palette,
+six sizes) from pure stdlib, so the icon is reproducible rather than an opaque
+binary.
+
+Installed layout:
+
+```
+%LOCALAPPDATA%\Programs\Walkman Bridge\
+├── WalkmanBridge.exe    # frozen launcher (Python runtime inside)
+├── jre\                 # jlink-trimmed Java
+├── ffmpeg\ffmpeg.exe
+└── app\backend\ + app\frontend\dist\
+```
