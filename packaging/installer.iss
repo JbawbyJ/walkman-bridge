@@ -26,6 +26,7 @@ AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
 VersionInfoVersion={#AppVersion}
+AppMutex=WalkmanBridgeAppMutex
 
 ; Per-user: installs without administrator rights.
 PrivilegesRequired=lowest

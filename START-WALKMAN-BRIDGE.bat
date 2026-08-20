@@ -38,7 +38,7 @@ if not defined JAVA_EXE (
 )
 if defined JAVA_EXE (
     set "WALKMAN_BRIDGE_JAVA=%JAVA_EXE%"
-    echo  [i] Java: %JAVA_EXE%
+    echo  [i] Java: "%JAVA_EXE%"
 ) else (
     echo  [!] No Java found. Music transfers to the Walkman will not work.
     echo      Install a JDK ^(e.g. Temurin 21^) or place a portable one in

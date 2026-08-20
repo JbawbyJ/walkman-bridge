@@ -25,8 +25,22 @@ def _candidates() -> list[Path]:
     if system == "Darwin":
         return [Path(p) for p in glob.glob("/Volumes/*")]
     if system == "Windows":
+        import ctypes
         import string
-        return [Path(f"{d}:\\") for d in string.ascii_uppercase if Path(f"{d}:\\").exists()]
+
+        # Removable drives first: the Walkman is USB mass storage, and a
+        # drive-root backup of it on a fixed disk must not win the scan.
+        # A:/B: are legacy floppy letters — probing them can stall.
+        DRIVE_REMOVABLE = 2
+        removable: list[Path] = []
+        fixed: list[Path] = []
+        for d in string.ascii_uppercase[2:]:
+            root = f"{d}:\\"
+            if not Path(root).exists():
+                continue
+            kind = ctypes.windll.kernel32.GetDriveTypeW(root)
+            (removable if kind == DRIVE_REMOVABLE else fixed).append(Path(root))
+        return removable + fixed
     return []
 
 

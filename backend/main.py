@@ -24,7 +24,7 @@ from jsymphonic import list_tracks, add_tracks, remove_track, JSymphonicError
 from jobs import job_store, Job, JobStatus
 
 
-app = FastAPI(title="Walkman Bridge", version="0.1.0")
+app = FastAPI(title="Walkman Bridge", version="0.1.1")
 
 # CORS: only the Vite dev server and same-origin production build
 app.add_middleware(
@@ -47,27 +47,65 @@ class TrackCache:
     """
     In-process cache of the device track list. Every shim `list` spawns a JVM
     and reads the whole DB, and the frontend polls /api/tracks every 3s — so
-    we refetch only when empty (first call / after invalidation), when the
+    we refetch only when invalid (first call / after a mutation), when the
     mount changes, or on an explicit ?refresh=1.
+
+    Locking: the state lock protects fields and is only ever held briefly —
+    never across a fetch. A refresh can take minutes when a transfer holds the
+    shim lock, so exactly one caller performs it (the refresh lock) while
+    everyone else is served the last-known list immediately. That keeps the
+    dashboard's 3s polling responsive during long transfers, and it makes
+    invalidate() safe to call from the event loop.
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._state = threading.Lock()
+        self._refresh = threading.Lock()
         self._mount: Path | None = None
-        self._tracks: list[dict] | None = None
+        self._tracks: list[dict] = []
+        self._valid = False
 
     def get(self, mount: Path, refresh: bool = False) -> list[dict]:
-        # The lock is held across the fetch on purpose: concurrent polls wait
-        # for one result instead of racing a second JVM into existence.
-        with self._lock:
-            if refresh or self._tracks is None or self._mount != mount:
-                self._tracks = list_tracks(mount)
-                self._mount = mount
-            return self._tracks
+        with self._state:
+            if self._valid and not refresh and self._mount == mount:
+                return list(self._tracks)
+            stale = list(self._tracks) if self._mount == mount else None
+
+        if self._refresh.acquire(blocking=False):
+            try:
+                tracks = list_tracks(mount)  # may block behind the shim lock
+                with self._state:
+                    self._tracks = tracks
+                    self._mount = mount
+                    self._valid = True
+                return list(tracks)
+            finally:
+                self._refresh.release()
+
+        # Another thread is refreshing: serve what we have rather than parking
+        # a second executor thread behind a minutes-long shim run.
+        if stale is not None:
+            return stale
+        # Nothing usable for this mount — wait for the in-flight refresh once.
+        with self._refresh:
+            pass
+        with self._state:
+            if self._valid and self._mount == mount:
+                return list(self._tracks)
+        raise JSymphonicError("track list is unavailable (refresh failed)")
 
     def invalidate(self) -> None:
-        with self._lock:
-            self._tracks = None
+        # Cheap flag flip: keeps the last-known list to serve while the next
+        # poll triggers the actual re-read.
+        with self._state:
+            self._valid = False
+
+    def peek_count(self, mount: Path) -> int | None:
+        """Track count if the cache is fresh for this mount, else None."""
+        with self._state:
+            if self._valid and self._mount == mount:
+                return len(self._tracks)
+            return None
 
 
 track_cache = TrackCache()
@@ -102,6 +140,28 @@ class JobResponse(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# Upload filename hygiene
+# --------------------------------------------------------------------------- #
+
+_RESERVED_NAMES = {
+    "con", "prn", "aux", "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
+
+
+def _safe_upload_name(raw: str | None, idx: int) -> str:
+    """Client filenames are untrusted: strip any directory part (both slash
+    flavors), and refuse empties and Windows reserved device names."""
+    name = Path((raw or "").replace("\\", "/")).name.strip()
+    if not name or name in {".", ".."}:
+        return f"upload-{idx}"
+    if name.split(".")[0].lower() in _RESERVED_NAMES:
+        return f"upload-{idx}-{name}"
+    return name
+
+
+# --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
 
@@ -112,16 +172,22 @@ async def health():
 
 @app.get("/api/device", response_model=DeviceResponse)
 async def get_device():
-    mount = find_walkman()
+    # Drive scanning + rglob are disk I/O — keep them off the event loop.
+    mount = await asyncio.to_thread(find_walkman)
     if not mount:
         return DeviceResponse(connected=False)
-    info = device_info(mount)
+    info = await asyncio.to_thread(device_info, mount)
+    # Prefer the DB-backed count when we have it, so the device panel and the
+    # track list can't disagree.
+    cached = track_cache.peek_count(mount)
+    if cached is not None:
+        info["track_count"] = cached
     return DeviceResponse(connected=True, mount_path=str(mount), **info)
 
 
 @app.get("/api/tracks", response_model=List[TrackResponse])
 async def get_tracks(refresh: int = 0):
-    mount = find_walkman()
+    mount = await asyncio.to_thread(find_walkman)
     if not mount:
         raise HTTPException(status_code=404, detail="No Walkman detected")
     try:
@@ -133,14 +199,16 @@ async def get_tracks(refresh: int = 0):
 
 @app.delete("/api/tracks/{track_id}")
 async def delete_track(track_id: str):
-    mount = find_walkman()
+    mount = await asyncio.to_thread(find_walkman)
     if not mount:
         raise HTTPException(status_code=404, detail="No Walkman detected")
     try:
         await asyncio.to_thread(remove_track, mount, track_id)
     except JSymphonicError as e:
         raise HTTPException(status_code=500, detail=str(e))
-    track_cache.invalidate()  # ids may have shifted — next poll re-reads
+    finally:
+        # Even a failed delete may have touched the DB — force a re-read.
+        track_cache.invalidate()
     return {"ok": True}
 
 
@@ -149,22 +217,36 @@ async def upload(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
 ):
-    mount = find_walkman()
+    mount = await asyncio.to_thread(find_walkman)
     if not mount:
         raise HTTPException(status_code=404, detail="No Walkman detected")
 
     job_id = str(uuid.uuid4())
     job_dir = WORK_DIR / job_id
-    job_dir.mkdir()
 
-    # Persist uploads to disk before kicking off the background task — the
-    # UploadFile handles close when the request ends.
-    saved: list[Path] = []
-    for f in files:
-        target = job_dir / (f.filename or f"upload-{len(saved)}")
-        with target.open("wb") as out:
-            shutil.copyfileobj(f.file, out)
-        saved.append(target)
+    # Persist uploads before kicking off the background task — the UploadFile
+    # handles close when the request ends. Runs in a thread (disk copy of the
+    # whole batch), and a half-written batch is removed rather than leaked.
+    def persist() -> list[Path]:
+        job_dir.mkdir()
+        saved: list[Path] = []
+        try:
+            for idx, f in enumerate(files):
+                target = job_dir / _safe_upload_name(f.filename, idx)
+                if target.exists():  # duplicate names within one batch
+                    target = job_dir / f"{idx}-{target.name}"
+                with target.open("wb") as out:
+                    shutil.copyfileobj(f.file, out)
+                saved.append(target)
+            return saved
+        except Exception:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise
+
+    try:
+        saved = await asyncio.to_thread(persist)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"could not store upload: {e}")
 
     job_store.create(job_id, total_files=len(saved))
     background_tasks.add_task(process_upload_job, job_id, saved, mount)
@@ -189,23 +271,43 @@ async def get_job(job_id: str):
 # Background work
 # --------------------------------------------------------------------------- #
 
-def _shim_event_to_job(job: Job) -> Callable[[dict], None]:
-    """Map shim protocol events into the job's log/progress/message fields."""
+def _shim_event_to_job(job: Job, total_files: int) -> Callable[[dict], None]:
+    """Map shim protocol events into the job's log/progress/message fields.
+
+    The shim reports percent PER FILE and also emits file/progress events for
+    the database-update step — only transfer-step progress moves the bar, and
+    it is scaled across the batch.
+    """
+    state = {"started": 0}
+
     def handle(event: dict) -> None:
         kind = event.get("event")
+        step = event.get("step")
         if kind == "file":
             name = event.get("name") or "?"
-            job.message = f"Transferring {name}"
-            job.log(f"  > {name}")
+            if step == "transfer":
+                state["started"] += 1
+                job.message = f"Transferring {name}"
+                job.log(f"  > {name}")
+            elif step == "update":
+                job.message = "Updating device database"
+                job.log(f"  db > {name}")
+            else:
+                job.log(f"  {step} > {name}")
         elif kind == "progress":
             percent = event.get("percent")
-            if isinstance(percent, (int, float)):
-                # Transfer is the second half of the overall job (see below).
-                job.progress = 0.5 + 0.5 * (float(percent) / 100.0)
+            if step == "transfer" and isinstance(percent, (int, float)) and total_files:
+                done = max(0, state["started"] - 1)
+                pct = min(max(float(percent), 0.0), 100.0) / 100.0
+                frac = min((done + pct) / total_files, 1.0)
+                job.progress = 0.5 + 0.5 * frac
         elif kind == "step":
-            job.log(f"  {event.get('step')}: {event.get('state')}")
+            error = event.get("error")
+            suffix = f"  ! {error}" if error else ""
+            job.log(f"  {step}: {event.get('state')}{suffix}")
         elif kind == "fatal":
             job.log(f"  ! {event.get('message')}")
+
     return handle
 
 
@@ -215,6 +317,7 @@ async def process_upload_job(job_id: str, files: List[Path], mount: Path):
     job.set_status(JobStatus.RUNNING, "Starting transfer")
 
     mp3s: list[Path] = []
+    touched_device = False
     try:
         # Phase 1 — transcode everything up front (progress 0 → 0.5).
         for idx, src in enumerate(files):
@@ -236,24 +339,36 @@ async def process_upload_job(job_id: str, files: List[Path], mount: Path):
         # Per-file adds would rebuild the device DB once per track.
         job.message = "Transferring to Walkman"
         job.log(f"Transferring {len(mp3s)} file(s) to Walkman")
+        touched_device = True
         try:
-            await asyncio.to_thread(add_tracks, mount, mp3s, _shim_event_to_job(job))
+            await asyncio.to_thread(
+                add_tracks, mount, mp3s, _shim_event_to_job(job, len(mp3s))
+            )
         except JSymphonicError as e:
             job.set_status(JobStatus.FAILED, f"Transfer failed: {e}")
             return
 
-        track_cache.invalidate()  # next /api/tracks poll re-reads the device
         job.progress = 1.0
         job.set_status(JobStatus.DONE, "All files processed")
     except Exception as e:  # noqa: BLE001
         job.set_status(JobStatus.FAILED, f"Job crashed: {e}")
     finally:
-        # Cleanup transcoded temps + uploaded originals
+        if touched_device:
+            # Success or failure: the device DB may have changed either way.
+            track_cache.invalidate()
+        # Cleanup transcoded temps + uploaded originals. One stubborn file
+        # (antivirus scan, etc.) must not abort the rest of the cleanup.
         for mp3 in mp3s:
             if mp3 not in files:
-                mp3.unlink(missing_ok=True)
+                try:
+                    mp3.unlink(missing_ok=True)
+                except OSError as e:
+                    job.log(f"  ! could not remove temp {mp3.name}: {e}")
         for f in files:
-            f.unlink(missing_ok=True)
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
         try:
             files[0].parent.rmdir()
         except OSError:

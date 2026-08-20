@@ -15,8 +15,24 @@ export default function App() {
   const [tracks, setTracks] = useState([])
   const [activeJob, setActiveJob] = useState(null)
   const [dragOver, setDragOver] = useState(false)
-  const [error, setError] = useState(null)
+  const [pollError, setPollError] = useState(null)
+  const [actionError, setActionError] = useState(null)
+  const [pendingDeletes, setPendingDeletes] = useState(() => new Set())
   const fileInput = useRef(null)
+
+  const jobBusy = !!activeJob && activeJob.status !== 'done' && activeJob.status !== 'failed'
+
+  // Prevent the browser/webview from navigating away when a file is
+  // dropped outside the dropzone
+  useEffect(() => {
+    const prevent = (e) => e.preventDefault()
+    window.addEventListener('dragover', prevent)
+    window.addEventListener('drop', prevent)
+    return () => {
+      window.removeEventListener('dragover', prevent)
+      window.removeEventListener('drop', prevent)
+    }
+  }, [])
 
   // Poll device + tracks every 3s
   useEffect(() => {
@@ -32,9 +48,9 @@ export default function App() {
         } else {
           setTracks([])
         }
-        setError(null)
+        if (alive) setPollError(null)
       } catch (e) {
-        if (alive) setError(e.message)
+        if (alive) setPollError(e.message)
       }
     }
     tick()
@@ -45,12 +61,19 @@ export default function App() {
   // Poll active job
   useEffect(() => {
     if (!activeJob || activeJob.status === 'done' || activeJob.status === 'failed') return
+    let failures = 0
     const id = setInterval(async () => {
       try {
         const j = await api.job(activeJob.job_id)
+        failures = 0
         setActiveJob(j)
       } catch (e) {
-        setError(e.message)
+        failures += 1
+        if (e.message.startsWith('404') || failures >= 5) {
+          setActiveJob((prev) =>
+            prev ? { ...prev, status: 'failed', message: 'Lost contact with job' } : prev
+          )
+        }
       }
     }, 1000)
     return () => clearInterval(id)
@@ -58,30 +81,44 @@ export default function App() {
 
   const handleFiles = async (files) => {
     if (!files || files.length === 0) return
+    if (jobBusy) return
     if (!device.connected) {
-      setError('No Walkman detected')
+      setActionError('No Walkman detected')
       return
     }
     try {
       const { job_id } = await api.upload(Array.from(files))
       setActiveJob({ job_id, status: 'pending', progress: 0, message: 'Queued', log_tail: [] })
     } catch (e) {
-      setError(e.message)
+      setActionError(e.message)
     }
   }
 
   const onDrop = (e) => {
     e.preventDefault()
     setDragOver(false)
+    if (jobBusy) return
     handleFiles(e.dataTransfer.files)
   }
 
   const onRemove = async (id) => {
+    if (jobBusy || pendingDeletes.has(id)) return
+    setPendingDeletes((prev) => {
+      const next = new Set(prev)
+      next.add(id)
+      return next
+    })
     try {
       await api.deleteTrack(id)
       setTracks((t) => t.filter((x) => x.id !== id))
     } catch (e) {
-      setError(e.message)
+      setActionError(e.message)
+    } finally {
+      setPendingDeletes((prev) => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
     }
   }
 
@@ -107,10 +144,22 @@ export default function App() {
         </div>
       </header>
 
-      {/* Error strip */}
-      {error && (
+      {/* Error strips */}
+      {pollError && (
         <div className="mb-6 border border-crimson/40 bg-crimson/5 px-4 py-3 font-display text-xs text-crimson">
-          ERR · {error}
+          ERR · {pollError}
+        </div>
+      )}
+      {actionError && (
+        <div className="mb-6 flex items-center justify-between gap-4 border border-crimson/40 bg-crimson/5 px-4 py-3 font-display text-xs text-crimson">
+          <span>ERR · {actionError}</span>
+          <button
+            onClick={() => setActionError(null)}
+            aria-label="Dismiss error"
+            className="font-display text-sm leading-none text-crimson hover:opacity-60 transition-opacity"
+          >
+            ×
+          </button>
         </div>
       )}
 
@@ -160,15 +209,15 @@ export default function App() {
         {/* Dropzone + Job */}
         <section className="lg:col-span-2 space-y-6">
           <div
-            onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
+            onDragOver={(e) => { e.preventDefault(); if (!jobBusy) setDragOver(true) }}
             onDragLeave={() => setDragOver(false)}
             onDrop={onDrop}
-            onClick={() => fileInput.current?.click()}
+            onClick={() => { if (!jobBusy) fileInput.current?.click() }}
             className={`border-2 border-dashed p-12 text-center cursor-pointer transition-colors ${
               dragOver
                 ? 'border-amber bg-amber/5 drop-active'
                 : 'border-line hover:border-muted bg-panel'
-            } ${!device.connected ? 'opacity-40 pointer-events-none' : ''}`}
+            } ${!device.connected || jobBusy ? 'opacity-40 pointer-events-none' : ''}`}
           >
             <input
               ref={fileInput}
@@ -176,7 +225,11 @@ export default function App() {
               multiple
               accept="audio/*,.flac,.m4a,.ogg,.wav,.aac,.opus"
               className="hidden"
-              onChange={(e) => handleFiles(e.target.files)}
+              disabled={jobBusy}
+              onChange={(e) => {
+                handleFiles(Array.from(e.target.files))
+                e.target.value = ''
+              }}
             />
             <div className="font-display text-[10px] tracking-[0.3em] text-muted mb-3">
               DROP AUDIO HERE
@@ -186,6 +239,12 @@ export default function App() {
               FLAC · M4A · OGG · WAV · MP3 → normalized to MP3 192k 44.1kHz
             </div>
           </div>
+
+          {jobBusy && (
+            <div className="font-display text-[10px] tracking-[0.2em] text-amber">
+              TRANSFER IN PROGRESS · NEW UPLOADS DISABLED
+            </div>
+          )}
 
           {/* Active job */}
           {activeJob && (
@@ -247,9 +306,17 @@ export default function App() {
                 <span className="col-span-2 font-body text-sm text-muted truncate">{t.album}</span>
                 <button
                   onClick={() => onRemove(t.id)}
-                  className="col-span-1 font-display text-[10px] tracking-[0.2em] text-muted opacity-0 group-hover:opacity-100 hover:text-crimson transition-opacity text-right"
+                  disabled={jobBusy || pendingDeletes.has(t.id)}
+                  title={jobBusy ? 'Removal disabled while a transfer job is running' : undefined}
+                  className={`col-span-1 font-display text-[10px] tracking-[0.2em] text-right transition-opacity ${
+                    pendingDeletes.has(t.id)
+                      ? 'text-muted opacity-60 cursor-wait'
+                      : jobBusy
+                      ? 'text-muted opacity-0 group-hover:opacity-40 cursor-not-allowed'
+                      : 'text-muted opacity-0 group-hover:opacity-100 hover:text-crimson'
+                  }`}
                 >
-                  REMOVE
+                  {pendingDeletes.has(t.id) ? 'REMOVING…' : 'REMOVE'}
                 </button>
               </li>
             ))}

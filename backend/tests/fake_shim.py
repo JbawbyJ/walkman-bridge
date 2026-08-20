@@ -36,20 +36,64 @@ def main() -> int:
 
     if scenario == "happy_add":
         # args: add --device <mount> <file> [<file> ...]
+        # Mirrors the REAL shim's stream: scan + plan first, per-file transfer
+        # progress, then the database-update step with its own file/progress
+        # events (which must NOT move the job's progress bar).
         files = args[3:]
+        emit({"event": "scan", "files": 0})
         emit({"event": "start", "files": len(files)})
+        emit({"event": "plan", "export": 0, "delete": 0, "decode": 0,
+              "encode": 0, "transfer": len(files), "database": 17})
         emit({"event": "step", "step": "transfer", "state": "started", "error": None})
         for path in files:
             emit({"event": "file", "step": "transfer", "name": path})
             emit({"event": "progress", "step": "transfer", "percent": 50.0, "speedKBps": 900.1})
             emit({"event": "progress", "step": "transfer", "percent": 100.0, "speedKBps": 900.1})
         emit({"event": "step", "step": "transfer", "state": "finished", "error": None})
+        emit({"event": "step", "step": "update", "state": "started", "error": None})
+        for name in ("00GTRLST", "04CNTINF"):
+            emit({"event": "file", "step": "update", "name": name})
+            emit({"event": "progress", "step": "update", "percent": 100.0, "speedKBps": 0.0})
+        emit({"event": "step", "step": "update", "state": "finished", "error": None})
         emit({"event": "done"})
         return 0
 
+    if scenario == "add_partial_errors":
+        # The real shim's partial-failure shape: the DB is written, but a step
+        # reported an error -> fatal summary + exit 1 (never a bare done).
+        files = args[3:]
+        emit({"event": "start", "files": len(files)})
+        emit({"event": "step", "step": "transfer", "state": "started", "error": None})
+        emit({"event": "file", "step": "transfer", "name": files[0] if files else "x"})
+        emit({"event": "step", "step": "transfer", "state": "finished",
+              "error": "1 file could not be copied"})
+        emit({"event": "step", "step": "update", "state": "finished", "error": None})
+        emit({"event": "fatal",
+              "message": "Completed with errors: transfer: 1 file could not be copied"})
+        return 1
+
     if scenario == "happy_del":
+        # Real del stream: delete step, then the full DB update step.
+        emit({"event": "scan", "files": 1})
+        emit({"event": "start", "files": 1})
+        emit({"event": "plan", "export": 0, "delete": 1, "decode": 0,
+              "encode": 0, "transfer": 0, "database": 17})
+        emit({"event": "step", "step": "delete", "state": "started", "error": None})
+        emit({"event": "file", "step": "delete", "name": "Some - Track"})
+        emit({"event": "step", "step": "delete", "state": "finished", "error": None})
+        emit({"event": "step", "step": "update", "state": "started", "error": None})
+        emit({"event": "step", "step": "update", "state": "finished", "error": None})
         emit({"event": "done"})
         return 0
+
+    if scenario == "del_failed":
+        # Deletion failed (e.g. file still in use): fatal + exit 1.
+        emit({"event": "start", "files": 1})
+        emit({"event": "step", "step": "delete", "state": "finished",
+              "error": "1 file could not be deleted"})
+        emit({"event": "fatal",
+              "message": "Completed with errors: delete: 1 file could not be deleted"})
+        return 1
 
     if scenario == "fatal":
         emit({"event": "start", "files": 1})

@@ -103,3 +103,97 @@ def test_upload_batches_one_add_call(client, monkeypatch):
     # A successful add invalidates the cache: next poll re-reads the device.
     c.get("/api/tracks")
     assert calls["list"] == 2
+
+
+def test_delete_failure_returns_500_and_invalidates_cache(client, monkeypatch):
+    """A failed delete may still have touched the device DB — the cache must
+    not keep serving the old list (delete_track invalidates in a finally)."""
+    from jsymphonic import JSymphonicError
+
+    c, calls = client
+
+    def failing_remove(mount, track_id):
+        raise JSymphonicError("Completed with errors: delete: file in use")
+
+    monkeypatch.setattr(main, "remove_track", failing_remove)
+
+    c.get("/api/tracks")
+    assert calls["list"] == 1
+
+    r = c.delete("/api/tracks/1")
+    assert r.status_code == 500
+    assert "delete: file in use" in r.json()["detail"]
+
+    c.get("/api/tracks")
+    assert calls["list"] == 2  # cache was invalidated despite the failure
+
+
+def test_failed_add_marks_job_failed_and_invalidates_cache(client, monkeypatch):
+    from jsymphonic import JSymphonicError
+
+    c, calls = client
+
+    def failing_add(mount, files, on_event):
+        on_event({"event": "start", "files": len(files)})
+        on_event({"event": "step", "step": "transfer", "state": "finished",
+                  "error": "1 file could not be copied"})
+        raise JSymphonicError("Completed with errors: transfer: 1 file could not be copied")
+
+    monkeypatch.setattr(main, "add_tracks", failing_add)
+    monkeypatch.setattr(main, "normalize_to_mp3", lambda src: src)
+
+    c.get("/api/tracks")
+    assert calls["list"] == 1
+
+    r = c.post("/api/upload", files=[("files", ("a.mp3", b"aaa", "audio/mpeg"))])
+    assert r.status_code == 200
+    job = job_store.get(r.json()["job_id"])
+    assert job is not None
+    assert job.status.value == "failed"
+    assert "could not be copied" in job.message
+    # The step error also landed in the visible log.
+    assert any("1 file could not be copied" in line for line in job.log_tail(20))
+
+    c.get("/api/tracks")
+    assert calls["list"] == 2  # device may have changed — cache invalidated
+
+
+def test_upload_filename_sanitized(client, monkeypatch):
+    r"""Client-supplied ..\..\ names must not escape the job directory."""
+    c, _calls = client
+
+    received: list = []
+
+    def fake_add(mount, files, on_event):
+        received.extend(files)
+        on_event({"event": "done"})
+
+    monkeypatch.setattr(main, "add_tracks", fake_add)
+    monkeypatch.setattr(main, "normalize_to_mp3", lambda src: src)
+
+    r = c.post("/api/upload", files=[
+        ("files", ("..\\..\\evil.mp3", b"x", "audio/mpeg")),
+        ("files", ("../../../also-evil.mp3", b"y", "audio/mpeg")),
+        ("files", ("NUL.mp3", b"z", "audio/mpeg")),
+    ])
+    assert r.status_code == 200
+    assert len(received) == 3
+    for p in received:
+        assert main.WORK_DIR in p.parents  # nothing escaped the work dir
+        assert ".." not in p.name
+    names = sorted(p.name for p in received)
+    assert "evil.mp3" in names
+    assert "also-evil.mp3" in names
+    assert not any(n.lower().startswith("nul.") for n in names)
+
+
+def test_safe_upload_name_unit():
+    f = main._safe_upload_name
+    assert f("song.mp3", 0) == "song.mp3"
+    assert f("..\\..\\x.mp3", 0) == "x.mp3"
+    assert f("/etc/passwd", 0) == "passwd"
+    assert f("", 3) == "upload-3"
+    assert f(None, 4) == "upload-4"
+    assert f("..", 5) == "upload-5"
+    assert f("CON.mp3", 6).startswith("upload-6")
+    assert f("com1", 7).startswith("upload-7")

@@ -28,7 +28,7 @@ SHIM_MAIN = "org.naurd.media.jsymphonic.headless.HeadlessCli"
 # Timeouts (seconds) per PROTOCOL.md — quick DB reads vs. a long batch import.
 INFO_TIMEOUT = 120
 LIST_TIMEOUT = 120
-DEL_TIMEOUT = 120
+DEL_TIMEOUT = 600
 ADD_TIMEOUT = 3600
 
 # Single-flight: the JAR must never run concurrently — it rewrites OMGAUDIO.
@@ -88,6 +88,7 @@ def _run(
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError as e:
             raise JSymphonicError(f"failed to launch shim ({cmd[0]}): {e}") from e
@@ -137,7 +138,7 @@ def _run(
                 proc.wait()
             drainer.join(timeout=5)
 
-        if timed_out.is_set():
+        if timed_out.is_set() and proc.returncode != 0:
             raise JSymphonicError(
                 f"jsymphonic shim timed out after {timeout:.0f}s: {' '.join(args)}"
             )
@@ -157,6 +158,16 @@ def _run(
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
+
+def wait_for_idle(timeout: float | None = None) -> bool:
+    """Block until no shim invocation is running (True) or the timeout passes
+    (False). The desktop launcher uses this to avoid exiting while a JVM is
+    mid-way through rewriting the device database."""
+    acquired = _shim_lock.acquire(timeout=-1 if timeout is None else timeout)
+    if acquired:
+        _shim_lock.release()
+    return acquired
+
 
 def device_details(mount: Path) -> dict:
     """Validate the mount via the shim and return its `device` event."""

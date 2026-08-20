@@ -52,9 +52,11 @@ def test_add_tracks_streams_events(shim, tmp_path):
     files = [tmp_path / "a.mp3", tmp_path / "b.mp3"]
     jsymphonic.add_tracks(Path("X:/"), files, seen.append)
     kinds = [e["event"] for e in seen]
-    assert kinds[0] == "start"
+    assert "start" in kinds
     assert kinds[-1] == "done"
-    assert kinds.count("file") == 2
+    transfer_files = [e for e in seen
+                      if e["event"] == "file" and e.get("step") == "transfer"]
+    assert len(transfer_files) == 2
     assert "progress" in kinds
 
 
@@ -146,3 +148,24 @@ def test_single_flight_lock_serializes(shim):
     ]
     # Serialized: one run's whole interval precedes the other's.
     assert a_end <= b_start or b_end <= a_start
+
+
+def test_add_partial_errors_raises_with_step_error(shim, tmp_path):
+    """The real shim exits 1 with a fatal summary when any step reported an
+    error — the wrapper must surface that text, never silent success."""
+    shim("add_partial_errors")
+    events: list[dict] = []
+    src = tmp_path / "a.mp3"
+    src.write_bytes(b"x")
+    with pytest.raises(JSymphonicError) as exc:
+        jsymphonic.add_tracks(tmp_path, [src], events.append)
+    assert "1 file could not be copied" in str(exc.value)
+    # The step events streamed out before the failure surfaced.
+    assert any(e.get("event") == "step" and e.get("error") for e in events)
+
+
+def test_del_failed_raises_with_error_text(shim, tmp_path):
+    shim("del_failed")
+    with pytest.raises(JSymphonicError) as exc:
+        jsymphonic.remove_track(tmp_path, "1")
+    assert "could not be deleted" in str(exc.value)

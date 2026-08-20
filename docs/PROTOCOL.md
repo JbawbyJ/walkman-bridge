@@ -43,19 +43,37 @@ Imports the given audio files (already-normalized MP3s) and commits the DB in **
 `applyChanges()` cycle. Events, in order:
 
 ```json
+{"event":"scan","files":0}
 {"event":"start","files":3}
+{"event":"plan","export":0,"delete":0,"decode":0,"encode":0,"transfer":3,"database":17}
 {"event":"step","step":"transfer|decode|encode|delete|update","state":"started|finished","error":null}
-{"event":"file","step":"transfer","name":"song.mp3"}
+{"event":"file","step":"transfer","name":"Artist - Title"}
 {"event":"progress","step":"transfer","percent":42.5,"speedKBps":900.1}
 {"event":"done"}
 ```
 
+Notes the consumer must honor:
+
+- `scan` events also fire during device load (before `start`) — informational.
+- `percent` is **per file**, not per batch; `file`/`progress` events are also
+  emitted for the database-update step (`step":"update"`) — only
+  `step":"transfer"` progress should drive a batch progress bar.
+- **Partial failure**: the legacy engine finishes the DB write even when some
+  operations fail, reporting them via step `error` strings. The shim collects
+  those and, if any occurred, emits `fatal` ("Completed with errors: ...") and
+  exits 1 **instead of** `done`. Exit 0 + `done` therefore means full success.
+
 ### `del --device <mount> --id <id>`
-Schedules deletion of the track whose id matches a fresh `list` enumeration, commits, then:
+Schedules deletion of the track whose id matches a fresh `list` enumeration, commits.
+Stream shape: `scan`, `start`, `plan`, a `delete` step (with `file`/`progress`
+events), then the `update` step rebuilding the 17 DB files, then:
 
 ```json
 {"event":"done"}
 ```
+
+The same partial-failure rule as `add` applies: a failed deletion surfaces as
+`fatal` + exit 1, never as a silent `done`.
 
 ### Errors
 
@@ -63,7 +81,8 @@ Schedules deletion of the track whose id matches a fresh `list` enumeration, com
 {"event":"fatal","message":"human-readable reason"}
 ```
 
-followed by exit code 1. Unknown/missing args → usage on stderr, exit 2.
+followed by exit code 1. Unknown/missing/malformed args (including non-numeric
+`--generation`/`--idle-timeout` values) → usage on stderr, exit 2.
 
 ## Backend contract (`backend/jsymphonic.py`)
 
@@ -75,7 +94,9 @@ followed by exit code 1. Unknown/missing args → usage on stderr, exit 2.
 - `on_event` receives each parsed JSON object; the FastAPI job maps `progress`/`file`
   events into the job store so the dashboard's live log stays truthful.
 - Unparseable stdout lines are logged and skipped (forward compatibility).
-- Timeouts: `info`/`list`/`del` 120 s, `add` 3600 s. On timeout: kill process, raise.
+- Timeouts: `info`/`list` 120 s, `del` 600 s (a delete rebuilds the whole DB,
+  like add), `add` 3600 s. On timeout: kill process, raise. A timer that fires
+  as a successful run exits is not a timeout — the exit code decides.
 - Nonzero exit → `JSymphonicError(message from last fatal event, else stderr tail)`.
 
 ## Mock device

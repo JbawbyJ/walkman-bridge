@@ -42,7 +42,7 @@ $Build   = Join-Path $Pkg "build"
 $Stage   = Join-Path $Build "app-root"     # becomes the installed folder
 $Cache   = Join-Path $Pkg ".cache"         # downloads, reused across builds
 $Dist    = Join-Path $Pkg "dist"
-$Version = "0.1.0"
+$Version = "0.1.1"
 
 $FfmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
@@ -56,7 +56,10 @@ function Need-File($path, $what) {
 function Fetch($url, $dest) {
     if (Test-Path $dest) { Info "cached: $(Split-Path $dest -Leaf)"; return }
     Info "downloading $url"
-    Invoke-WebRequest -Uri $url -OutFile $dest
+    $tmp = "$dest.tmp"
+    if (Test-Path $tmp) { Remove-Item -Force $tmp }
+    Invoke-WebRequest -Uri $url -OutFile $tmp
+    Move-Item -Force $tmp $dest
 }
 
 # --------------------------------------------------------------------------- #
@@ -143,6 +146,8 @@ Step "Launcher (PyInstaller)"
 # Built with the project's own venv, which already has the runtime deps.
 $venvPy = Join-Path $Root "backend\.venv\Scripts\python.exe"
 Need-File $venvPy "backend virtualenv (run scripts\setup.bat first)"
+& $venvPy -m pip install -r (Join-Path $Pkg "requirements.txt") --quiet
+if ($LASTEXITCODE -ne 0) { throw "pip install of packaging requirements failed" }
 & $venvPy -m PyInstaller --noconfirm --clean `
     --distpath (Join-Path $Build "pyi-dist") --workpath (Join-Path $Build "pyi-work") `
     --specpath $Build `

@@ -30,6 +30,11 @@ from pathlib import Path
 
 APP_NAME = "Walkman Bridge"
 
+# One sink for everything a windowed exe would otherwise lose: the logging
+# module, uvicorn's stdout logging, and stray prints all share this handle so
+# their writes interleave instead of overwriting each other.
+_LOG_SINK = None
+
 
 def install_root() -> Path:
     """Directory holding the runtimes: the exe's folder when frozen, else repo root."""
@@ -45,36 +50,41 @@ def log_path() -> Path:
 
 
 def configure_logging() -> None:
-    # A windowed exe has no console, so a log file is the only way a user can
-    # tell us what went wrong.
-    logging.basicConfig(
-        filename=str(log_path()),
-        filemode="w",
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    _ensure_std_streams()
+    """Route logging AND the std streams to one shared log-file handle.
 
-
-def _ensure_std_streams() -> None:
-    """Give the process real stdout/stderr.
-
-    PyInstaller's windowed build sets both to None. uvicorn's default logging
-    config attaches a StreamHandler to sys.stdout, so with None it kills the
-    server thread on its first log line — the app then hangs waiting for a
-    server that already died. Pointing the streams at the log file fixes that
-    and captures uvicorn's own output for support.
+    PyInstaller's windowed build sets sys.stdout/stderr to None; uvicorn's
+    default config attaches a StreamHandler to sys.stdout, which would kill
+    the server thread on its first log line. And two separately-seeked handles
+    on the same file overwrite each other — hence the single shared sink.
     """
-    if sys.stdout is not None and sys.stderr is not None:
-        return
+    global _LOG_SINK
     try:
-        sink = open(log_path(), "a", buffering=1, encoding="utf-8", errors="replace")
+        _LOG_SINK = open(log_path(), "w", buffering=1, encoding="utf-8", errors="replace")
     except Exception:
-        sink = open(os.devnull, "w")
+        _LOG_SINK = open(os.devnull, "w")
+
+    handler = logging.StreamHandler(_LOG_SINK)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+
     if sys.stdout is None:
-        sys.stdout = sink
+        sys.stdout = _LOG_SINK
     if sys.stderr is None:
-        sys.stderr = sink
+        sys.stderr = _LOG_SINK
+
+
+def acquire_app_mutex() -> None:
+    """Create the named mutex the installer's AppMutex directive checks, so
+    installing/uninstalling while the app runs gets Inno's proper warning.
+    The handle stays open for the process lifetime by design."""
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.CreateMutexW(None, False, "WalkmanBridgeAppMutex")
+    except Exception:
+        pass  # non-Windows dev run
 
 
 def configure_bundled_runtimes(root: Path) -> Path:
@@ -115,8 +125,31 @@ def wait_for_server(port: int, timeout: float = 60.0) -> bool:
     return False
 
 
+def wait_for_transfer_finish() -> None:
+    """Never exit while the JSymphonic JVM is rewriting the device database.
+
+    The backend modules are importable here because main() put the backend dir
+    on sys.path. Transcoding-only work is not device-critical; the shim lock
+    covers exactly the dangerous window.
+    """
+    try:
+        import jsymphonic as jsy
+    except Exception:
+        return
+    if jsy.wait_for_idle(timeout=0.05):
+        return
+    warn(
+        "A transfer is still writing to the Walkman.\n\n"
+        f"{APP_NAME} will close as soon as it finishes.\n"
+        "Do NOT unplug the device yet."
+    )
+    if not jsy.wait_for_idle(timeout=1800):
+        logging.error("shim still busy after 30 minutes; exiting anyway")
+
+
 def main() -> int:
     configure_logging()
+    acquire_app_mutex()
     root = install_root()
     backend_dir = configure_bundled_runtimes(root)
     logging.info("root=%s backend=%s", root, backend_dir)
@@ -151,7 +184,7 @@ def main() -> int:
     try:
         import webview  # pywebview -> WebView2 on Windows
 
-        window = webview.create_window(
+        webview.create_window(
             APP_NAME, url, width=1180, height=820, min_size=(900, 640)
         )
         webview.start()  # blocks until the window is closed
@@ -162,23 +195,37 @@ def main() -> int:
         import webbrowser
 
         webbrowser.open(url)
-        warn(
-            f"{APP_NAME} could not open its own window, so it opened in your "
-            f"browser instead.\n\nClose this message to stop the app."
-        )
+        # The dialog is the only stop control in this mode — loop until the
+        # user actually wants to stop instead of killing the server on the
+        # first accidental dismiss.
+        while not ask_yes_no(
+            f"{APP_NAME} could not open its own window, so it is running in "
+            f"your browser at {url}.\n\nStop {APP_NAME} now?"
+        ):
+            pass
 
+    wait_for_transfer_finish()
     server.should_exit = True
     thread.join(timeout=10)
     return 0
 
 
-def _message_box(text: str, caption: str, flags: int) -> None:
+def _message_box(text: str, caption: str, flags: int) -> int:
     try:
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(None, text, caption, flags)
+        return int(ctypes.windll.user32.MessageBoxW(None, text, caption, flags))
     except Exception:
         print(f"{caption}: {text}", file=sys.stderr)
+        return 0
+
+
+def ask_yes_no(text: str) -> bool:
+    IDYES = 6
+    result = _message_box(text, APP_NAME, 0x04 | 0x20)  # MB_YESNO | MB_ICONQUESTION
+    if result == 0:  # message box unavailable (non-Windows dev run)
+        return True
+    return result == IDYES
 
 
 def fail(text: str) -> None:
@@ -195,6 +242,10 @@ def guarded_main() -> int:
     """A windowed exe has no console: an unhandled exception would vanish."""
     try:
         return main()
+    except KeyboardInterrupt:
+        return 0
+    except SystemExit as e:  # a deliberate exit is not a crash
+        return e.code if isinstance(e.code, int) else 0
     except BaseException:
         import traceback
 

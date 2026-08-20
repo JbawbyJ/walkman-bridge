@@ -49,7 +49,11 @@ def normalize_to_mp3(src: Path) -> Path:
     if SAFE_PASSTHROUGH and src.suffix.lower() == ".mp3":
         return src
 
-    out = Path(tempfile.mkstemp(suffix=".mp3", prefix="wbridge-")[1])
+    # mkstemp returns an OPEN fd; leaking it makes the file undeletable on
+    # Windows (the handle lacks FILE_SHARE_DELETE), which broke all cleanup.
+    fd, name = tempfile.mkstemp(suffix=".mp3", prefix="wbridge-")
+    os.close(fd)
+    out = Path(name)
 
     cmd = [
         ffmpeg,
@@ -67,7 +71,15 @@ def normalize_to_mp3(src: Path) -> Path:
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=600
+            cmd,
+            capture_output=True,
+            text=True,
+            # Windows default is cp1252 — non-ASCII metadata in ffmpeg's stderr
+            # must not blow up the decode. No console window from the frozen app.
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired as e:
         out.unlink(missing_ok=True)
