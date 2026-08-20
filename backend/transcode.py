@@ -40,6 +40,18 @@ def _ensure_ffmpeg() -> str:
     return path
 
 
+def _closed_temp_mp3() -> Path:
+    """Create an empty temp MP3 and close the handle before ffmpeg opens it.
+
+    mkstemp leaves the file open. On Windows that exclusive handle blocks
+    ffmpeg's `-y` overwrite (and leaks a descriptor per transfer). Close it
+    immediately — same rule as the rest of the Windows file-locking fixes.
+    """
+    fd, name = tempfile.mkstemp(suffix=".mp3", prefix="wbridge-")
+    os.close(fd)
+    return Path(name)
+
+
 def normalize_to_mp3(src: Path) -> Path:
     """Convert any audio file to a Walkman-friendly MP3 in a temp dir."""
     ffmpeg = _ensure_ffmpeg()
@@ -49,7 +61,7 @@ def normalize_to_mp3(src: Path) -> Path:
     if SAFE_PASSTHROUGH and src.suffix.lower() == ".mp3":
         return src
 
-    out = Path(tempfile.mkstemp(suffix=".mp3", prefix="wbridge-")[1])
+    out = _closed_temp_mp3()
 
     cmd = [
         ffmpeg,

@@ -102,6 +102,44 @@ class JobResponse(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# Upload helpers
+# --------------------------------------------------------------------------- #
+
+def _upload_basename(filename: str | None) -> str:
+    """Last path component, treating both slashes as separators.
+
+    A browser on Windows may send `C:\\Music\\01.mp3` even when this process
+    is not on Windows; Path.name would keep the whole string on POSIX.
+    """
+    if not filename:
+        return ""
+    return filename.replace("\\", "/").split("/")[-1]
+
+
+def upload_destination(job_dir: Path, filename: str | None, index: int) -> Path:
+    """Write each upload inside job_dir under a unique, path-safe name.
+
+    Two dropped files often share a name (`01 Intro.mp3` from different
+    albums). Using the raw filename would overwrite the first and transfer
+    only one track.
+    """
+    raw = _upload_basename(filename)
+    if not raw or raw in {".", ".."}:
+        raw = f"upload-{index}"
+    target = job_dir / raw
+    if not target.exists():
+        return target
+    stem = Path(raw).stem
+    suffix = Path(raw).suffix
+    n = index
+    candidate = job_dir / f"{stem}-{n}{suffix}"
+    while candidate.exists():
+        n += 1
+        candidate = job_dir / f"{stem}-{n}{suffix}"
+    return candidate
+
+
+# --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
 
@@ -161,7 +199,7 @@ async def upload(
     # UploadFile handles close when the request ends.
     saved: list[Path] = []
     for f in files:
-        target = job_dir / (f.filename or f"upload-{len(saved)}")
+        target = upload_destination(job_dir, f.filename, len(saved))
         with target.open("wb") as out:
             shutil.copyfileobj(f.file, out)
         saved.append(target)
@@ -244,7 +282,15 @@ async def process_upload_job(job_id: str, files: List[Path], mount: Path):
 
         track_cache.invalidate()  # next /api/tracks poll re-reads the device
         job.progress = 1.0
-        job.set_status(JobStatus.DONE, "All files processed")
+        failed = len(files) - len(mp3s)
+        if failed:
+            job.set_status(
+                JobStatus.PARTIAL,
+                f"Transferred {len(mp3s)} of {len(files)} files "
+                f"({failed} failed transcoding)",
+            )
+        else:
+            job.set_status(JobStatus.DONE, "All files processed")
     except Exception as e:  # noqa: BLE001
         job.set_status(JobStatus.FAILED, f"Job crashed: {e}")
     finally:

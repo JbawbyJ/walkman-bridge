@@ -1,10 +1,12 @@
 """ffmpeg resolution: bundled binary (installed app) vs PATH (dev checkout)."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import transcode
-from transcode import AudioError, _ensure_ffmpeg
+from transcode import AudioError, _closed_temp_mp3, _ensure_ffmpeg
 
 
 def test_env_override_wins_over_path(tmp_path, monkeypatch):
@@ -39,3 +41,19 @@ def test_no_ffmpeg_anywhere_raises(monkeypatch):
 
     with pytest.raises(AudioError, match="ffmpeg not found"):
         _ensure_ffmpeg()
+
+
+def test_temp_mp3_closes_the_mkstemp_handle(monkeypatch, tmp_path):
+    """ffmpeg cannot overwrite a Windows file we still hold exclusive."""
+    fake = tmp_path / "wbridge-test.mp3"
+    closed: list[int] = []
+
+    def fake_mkstemp(suffix=".mp3", prefix="wbridge-"):
+        fake.write_bytes(b"")
+        return 4242, str(fake)
+
+    monkeypatch.setattr(transcode.tempfile, "mkstemp", fake_mkstemp)
+    monkeypatch.setattr(transcode.os, "close", lambda fd: closed.append(fd))
+
+    assert _closed_temp_mp3() == Path(fake)
+    assert closed == [4242]

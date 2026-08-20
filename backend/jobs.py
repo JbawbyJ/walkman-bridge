@@ -16,6 +16,7 @@ class JobStatus(str, Enum):
     RUNNING = "running"
     DONE = "done"
     FAILED = "failed"
+    PARTIAL = "partial"
 
 
 @dataclass
