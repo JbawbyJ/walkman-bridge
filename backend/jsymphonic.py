@@ -59,8 +59,10 @@ def _ensure_jar() -> Path:
     if not JAR_PATH.exists():
         raise JSymphonicError(
             f"jsymphonic.jar not found at {JAR_PATH}. "
-            "Build the forked jar (mvn package) or download it from "
-            "github.com/georgewoodall82/jsymphonic and place it in backend/vendor/."
+            "Build the companion fork (https://github.com/JbawbyJ/jsymphonic) "
+            "with `mvn package` and place the jar-with-dependencies artifact "
+            "at backend/vendor/jsymphonic.jar. The upstream GUI jar does not "
+            "include HeadlessCli."
         )
     return JAR_PATH
 

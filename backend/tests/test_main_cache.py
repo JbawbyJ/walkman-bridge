@@ -172,7 +172,7 @@ def test_upload_filename_sanitized(client, monkeypatch):
     monkeypatch.setattr(main, "normalize_to_mp3", lambda src: src)
 
     r = c.post("/api/upload", files=[
-        ("files", ("..\\..\\evil.mp3", b"x", "audio/mpeg")),
+        ("files", (r"..\..\evil.mp3", b"x", "audio/mpeg")),
         ("files", ("../../../also-evil.mp3", b"y", "audio/mpeg")),
         ("files", ("NUL.mp3", b"z", "audio/mpeg")),
     ])
@@ -187,13 +187,82 @@ def test_upload_filename_sanitized(client, monkeypatch):
     assert not any(n.lower().startswith("nul.") for n in names)
 
 
-def test_safe_upload_name_unit():
-    f = main._safe_upload_name
-    assert f("song.mp3", 0) == "song.mp3"
-    assert f("..\\..\\x.mp3", 0) == "x.mp3"
-    assert f("/etc/passwd", 0) == "passwd"
-    assert f("", 3) == "upload-3"
-    assert f(None, 4) == "upload-4"
-    assert f("..", 5) == "upload-5"
-    assert f("CON.mp3", 6).startswith("upload-6")
-    assert f("com1", 7).startswith("upload-7")
+def test_upload_destination_strips_paths_and_dedupes(tmp_path):
+    first = main.upload_destination(tmp_path, r"C:\\Music\\Album\\01 Intro.mp3", 0)
+    first.write_bytes(b"one")
+    second = main.upload_destination(tmp_path, "Mixtape/01 Intro.mp3", 1)
+    second.write_bytes(b"two")
+    escaped = main.upload_destination(tmp_path, "../escape.mp3", 2)
+    dotted = main.upload_destination(tmp_path, "..", 3)
+    reserved = main.upload_destination(tmp_path, "CON.mp3", 4)
+    reserved_bare = main.upload_destination(tmp_path, "com1", 5)
+
+    assert first.name == "01 Intro.mp3"
+    assert second.name == "01 Intro-1.mp3"
+    assert escaped.name == "escape.mp3"
+    assert dotted.name == "upload-3"
+    assert reserved.name == "upload-4-CON.mp3"
+    assert reserved_bare.name == "upload-5-com1"
+    assert first.parent == second.parent == escaped.parent == dotted.parent == tmp_path
+    assert first.read_bytes() == b"one"
+    assert second.read_bytes() == b"two"
+
+
+def test_upload_keeps_same_named_files(client, monkeypatch):
+    c, _calls = client
+    added_names: list[str] = []
+    added_bytes: dict[str, bytes] = {}
+
+    def fake_add(mount, files, on_event):
+        added_names.extend(p.name for p in files)
+        added_bytes.update({p.name: p.read_bytes() for p in files})
+        on_event({"event": "done"})
+
+    monkeypatch.setattr(main, "add_tracks", fake_add)
+    monkeypatch.setattr(main, "normalize_to_mp3", lambda src: src)
+
+    r = c.post("/api/upload", files=[
+        ("files", ("01.mp3", b"aaa", "audio/mpeg")),
+        ("files", ("01.mp3", b"bbb", "audio/mpeg")),
+    ])
+    assert r.status_code == 200
+    job = job_store.get(r.json()["job_id"])
+    assert job is not None
+    assert job.status.value == "done"
+    assert sorted(added_names) == ["01-1.mp3", "01.mp3"]
+    assert added_bytes["01.mp3"] == b"aaa"
+    assert added_bytes["01-1.mp3"] == b"bbb"
+
+
+def test_upload_partial_transcode_is_not_all_success(client, monkeypatch):
+    c, calls = client
+    added: list[list] = []
+
+    def fake_norm(src):
+        if src.name.startswith("bad"):
+            raise main.AudioError("corrupt")
+        return src
+
+    def fake_add(mount, files, on_event):
+        added.append(list(files))
+        on_event({"event": "done"})
+
+    monkeypatch.setattr(main, "normalize_to_mp3", fake_norm)
+    monkeypatch.setattr(main, "add_tracks", fake_add)
+
+    c.get("/api/tracks")
+    assert calls["list"] == 1
+
+    r = c.post("/api/upload", files=[
+        ("files", ("good.mp3", b"aaa", "audio/mpeg")),
+        ("files", ("bad.mp3", b"xxx", "audio/mpeg")),
+    ])
+    job = job_store.get(r.json()["job_id"])
+    assert job is not None
+    assert job.status.value == "partial"
+    assert "1 of 2" in job.message
+    assert len(added) == 1
+    assert [p.name for p in added[0]] == ["good.mp3"]
+    # Survivors were written — next poll must re-read the device.
+    c.get("/api/tracks")
+    assert calls["list"] == 2

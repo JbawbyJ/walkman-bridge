@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from './api'
 
+const TERMINAL_STATUSES = ['done', 'failed', 'partial']
+
 const fmtBytes = (b) => {
   if (b == null) return '—'
   const u = ['B', 'KB', 'MB', 'GB']
@@ -20,7 +22,7 @@ export default function App() {
   const [pendingDeletes, setPendingDeletes] = useState(() => new Set())
   const fileInput = useRef(null)
 
-  const jobBusy = !!activeJob && activeJob.status !== 'done' && activeJob.status !== 'failed'
+  const jobBusy = !!activeJob && !TERMINAL_STATUSES.includes(activeJob.status)
 
   // Prevent the browser/webview from navigating away when a file is
   // dropped outside the dropzone
@@ -60,7 +62,7 @@ export default function App() {
 
   // Poll active job
   useEffect(() => {
-    if (!activeJob || activeJob.status === 'done' || activeJob.status === 'failed') return
+    if (!activeJob || TERMINAL_STATUSES.includes(activeJob.status)) return
     let failures = 0
     const id = setInterval(async () => {
       try {
