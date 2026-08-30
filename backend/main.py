@@ -6,6 +6,7 @@ Bind to 127.0.0.1 only. Single-user local tool, no auth.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import tempfile
 import threading
@@ -139,6 +140,10 @@ class JobResponse(BaseModel):
     log_tail: List[str]
 
 
+class UploadFolderRequest(BaseModel):
+    path: str
+
+
 # --------------------------------------------------------------------------- #
 # Upload helpers
 # --------------------------------------------------------------------------- #
@@ -187,13 +192,48 @@ def upload_destination(job_dir: Path, filename: str | None, index: int) -> Path:
     return candidate
 
 
+_AUDIO_SUFFIXES = {".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg"}
+
+
+def collect_audio_files(folder: Path) -> list[Path]:
+    """Audio files under folder, recursive so multi-disc albums work."""
+    files = [
+        p
+        for p in folder.rglob("*")
+        if p.is_file() and p.suffix.lower() in _AUDIO_SUFFIXES
+    ]
+    files.sort()
+    return files
+
+
+def _enqueue_upload(
+    background_tasks: BackgroundTasks,
+    job_id: str,
+    saved: list[Path],
+    mount: Path,
+) -> str:
+    job_store.create(job_id, total_files=len(saved))
+    background_tasks.add_task(process_upload_job, job_id, saved, mount)
+    return job_id
+
+
 # --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True}
+    java_cmd = os.environ.get("WALKMAN_BRIDGE_JAVA") or "java"
+    jar = Path(__file__).resolve().parent / "vendor" / "jsymphonic.jar"
+    # find_walkman is a cheap OMGAUDIO existence check (drive scan, no rglob).
+    mount = await asyncio.to_thread(find_walkman)
+    return {
+        "ok": True,
+        "java": shutil.which(java_cmd) is not None,
+        "jar": jar.exists(),
+        "mock_device": bool(os.environ.get("MOCK_DEVICE_PATH")),
+        "device_connected": mount is not None,
+    }
 
 
 @app.get("/api/device", response_model=DeviceResponse)
@@ -212,7 +252,7 @@ async def get_device():
 
 
 @app.get("/api/tracks", response_model=List[TrackResponse])
-async def get_tracks(refresh: int = 0):
+async def get_tracks(refresh: int = 0, q: str | None = None):
     mount = await asyncio.to_thread(find_walkman)
     if not mount:
         raise HTTPException(status_code=404, detail="No Walkman detected")
@@ -220,6 +260,15 @@ async def get_tracks(refresh: int = 0):
         tracks = await asyncio.to_thread(track_cache.get, mount, bool(refresh))
     except JSymphonicError as e:
         raise HTTPException(status_code=500, detail=str(e))
+    if q:
+        needle = q.casefold()
+        tracks = [
+            t
+            for t in tracks
+            if needle in str(t.get("title") or "").casefold()
+            or needle in str(t.get("artist") or "").casefold()
+            or needle in str(t.get("album") or "").casefold()
+        ]
     return tracks
 
 
@@ -272,9 +321,50 @@ async def upload(
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"could not store upload: {e}")
 
-    job_store.create(job_id, total_files=len(saved))
-    background_tasks.add_task(process_upload_job, job_id, saved, mount)
-    return {"job_id": job_id}
+    return {"job_id": _enqueue_upload(background_tasks, job_id, saved, mount)}
+
+
+@app.post("/api/upload-folder")
+async def upload_folder(
+    body: UploadFolderRequest,
+    background_tasks: BackgroundTasks,
+):
+    """Operator-only: enqueue a local directory. Copies into the job dir so
+    process_upload_job cleanup cannot delete the source library."""
+    mount = await asyncio.to_thread(find_walkman)
+    if not mount:
+        raise HTTPException(status_code=404, detail="No Walkman detected")
+
+    folder = Path(body.path)
+    if not folder.is_dir():
+        raise HTTPException(status_code=400, detail="Not a directory")
+
+    collected = await asyncio.to_thread(collect_audio_files, folder)
+    if not collected:
+        raise HTTPException(status_code=400, detail="No audio files found")
+
+    job_id = str(uuid.uuid4())
+    job_dir = WORK_DIR / job_id
+
+    def persist() -> list[Path]:
+        job_dir.mkdir()
+        saved: list[Path] = []
+        try:
+            for src in collected:
+                target = upload_destination(job_dir, src.name, len(saved))
+                shutil.copy2(src, target)
+                saved.append(target)
+            return saved
+        except Exception:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise
+
+    try:
+        saved = await asyncio.to_thread(persist)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"could not store upload: {e}")
+
+    return {"job_id": _enqueue_upload(background_tasks, job_id, saved, mount)}
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
@@ -325,6 +415,7 @@ def _shim_event_to_job(job: Job, total_files: int) -> Callable[[dict], None]:
                 pct = min(max(float(percent), 0.0), 100.0) / 100.0
                 frac = min((done + pct) / total_files, 1.0)
                 job.progress = 0.5 + 0.5 * frac
+                job.touch()
         elif kind == "step":
             error = event.get("error")
             suffix = f"  ! {error}" if error else ""
@@ -354,6 +445,7 @@ async def process_upload_job(job_id: str, files: List[Path], mount: Path):
                 continue
             mp3s.append(mp3)
             job.progress = 0.5 * (idx + 1) / len(files)
+            job.touch()
 
         if not mp3s:
             job.set_status(JobStatus.FAILED, "No files survived transcoding")
@@ -373,6 +465,7 @@ async def process_upload_job(job_id: str, files: List[Path], mount: Path):
             return
 
         job.progress = 1.0
+        job.touch()
         failed = len(files) - len(mp3s)
         if failed:
             job.set_status(

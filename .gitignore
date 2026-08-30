@@ -14,6 +14,8 @@ frontend/dist/
 # Runtime work dirs
 uploads/
 work/
+backend/walkman-jobs.sqlite
+backend/walkman-jobs.sqlite-*
 
 # OS junk
 Thumbs.db

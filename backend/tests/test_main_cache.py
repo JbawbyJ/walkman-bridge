@@ -266,3 +266,81 @@ def test_upload_partial_transcode_is_not_all_success(client, monkeypatch):
     # Survivors were written — next poll must re-read the device.
     c.get("/api/tracks")
     assert calls["list"] == 2
+
+
+def test_health_has_java_bool(client):
+    c, _calls = client
+    r = c.get("/api/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert isinstance(body["java"], bool)
+
+
+def test_tracks_q_filters(client, monkeypatch):
+    c, _calls = client
+
+    def fake_list(mount):
+        return [
+            {"id": "1", "title": "Hello World", "artist": "Ada", "album": "First",
+             "duration_seconds": 1},
+            {"id": "2", "title": "Silence", "artist": "Other", "album": "Blue Notes",
+             "duration_seconds": 2},
+        ]
+
+    monkeypatch.setattr(main, "list_tracks", fake_list)
+    main.track_cache.invalidate()
+
+    r = c.get("/api/tracks")
+    assert r.status_code == 200
+    assert {t["id"] for t in r.json()} == {"1", "2"}
+
+    r = c.get("/api/tracks?q=hello")
+    assert r.status_code == 200
+    assert [t["id"] for t in r.json()] == ["1"]
+
+    r = c.get("/api/tracks?q=BLUE")
+    assert [t["id"] for t in r.json()] == ["2"]
+
+    r = c.get("/api/tracks?q=ada")
+    assert [t["id"] for t in r.json()] == ["1"]
+
+    r = c.get("/api/tracks?q=nope")
+    assert r.json() == []
+
+
+def test_upload_folder_rejects_non_directory(client, tmp_path):
+    c, _calls = client
+    target = tmp_path / "not-a-dir.txt"
+    target.write_text("x")
+    r = c.post("/api/upload-folder", json={"path": str(target)})
+    assert r.status_code == 400
+    assert "directory" in r.json()["detail"].lower()
+
+
+def test_upload_folder_collects_audio_and_runs_job(client, monkeypatch, tmp_path):
+    c, _calls = client
+    album = tmp_path / "album"
+    (album / "cd2").mkdir(parents=True)
+    (album / "song.mp3").write_bytes(b"aaa")
+    (album / "cd2" / "deep.flac").write_bytes(b"bbb")
+    (album / "notes.txt").write_text("skip me")
+
+    added: list[list[str]] = []
+
+    def fake_add(mount, files, on_event):
+        added.append([p.name for p in files])
+        on_event({"event": "done"})
+
+    monkeypatch.setattr(main, "add_tracks", fake_add)
+    monkeypatch.setattr(main, "normalize_to_mp3", lambda src: src)
+
+    r = c.post("/api/upload-folder", json={"path": str(album)})
+    assert r.status_code == 200
+    job = job_store.get(r.json()["job_id"])
+    assert job is not None
+    assert job.status.value == "done"
+    assert sorted(added[0]) == ["deep.flac", "song.mp3"]
+    # Source library must survive job cleanup.
+    assert (album / "song.mp3").is_file()
+    assert (album / "cd2" / "deep.flac").is_file()
