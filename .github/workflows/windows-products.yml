@@ -1,9 +1,16 @@
 name: Windows products
 
 on:
-  pull_request:
+  # agent/** matches nested branches such as agent/name/topic. agent/* does not:
+  # GitHub's single star stops at a slash.
   push:
-    branches: [main]
+    branches:
+      - main
+      - 'agent/**'
+  pull_request:
+    branches:
+      - main
+      - 'agent/**'
   workflow_dispatch:
 
 permissions:
@@ -33,7 +40,10 @@ jobs:
       - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
         with:
           distribution: temurin
-          java-version: '21.0.12+8'
+          # Adoptium lists this JDK as 21.0.12+8.0.LTS. The product pin 21.0.12+8
+          # does not match that catalog id, and setup-java then fails the job
+          # before pytest, the helper, or Electron run.
+          java-version: '21.0.12+8.0.LTS'
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: '10.0.400'
@@ -48,6 +58,26 @@ jobs:
           python -m pip install -r backend/requirements.txt -c packaging/python-runtime-constraints.txt -r backend/requirements-dev.txt pip-audit
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force packaging/build | Out-Null
+      - name: Install pinned ffmpeg and put it on PATH
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $lock = Get-Content -Raw packaging/runtime-lock.json | ConvertFrom-Json
+          $record = $lock.ffmpeg
+          $zip = Join-Path $env:RUNNER_TEMP $record.filename
+          Invoke-WebRequest -Uri $record.url -OutFile $zip -UseBasicParsing -Headers @{ 'User-Agent' = 'RedLotus-Packaging/0.4.1' }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($hash -ne $record.sha256) { throw "ffmpeg sha256 mismatch: $hash" }
+          $dest = Join-Path $env:RUNNER_TEMP 'ffmpeg-essentials'
+          if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
+          $bin = Get-ChildItem -LiteralPath $dest -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $bin) { throw 'pinned ffmpeg archive did not contain ffmpeg.exe' }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin.DirectoryName
+          "WALKMAN_BRIDGE_FFMPEG=$($bin.FullName)" | Add-Content -Path $env:GITHUB_ENV
+          & $bin.FullName -version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Audit runtime dependencies
         run: |
           npm audit --audit-level=high
@@ -58,7 +88,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Backend, browser logic and broker tests
         run: |
-          python -m pytest backend/tests -q -p no:cacheprovider
+          python -m pytest backend/tests -q -p no:cacheprovider -rs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python packaging/test_stage.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -70,6 +100,31 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           dotnet publish scanner-helper/ScannerHelper/ScannerHelper.csproj -c Release -r win-x64 --self-contained true -o scanner-helper/artifacts/win-x64
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build frontend for Electron smoke
+        run: |
+          npm --prefix frontend run build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if (-not (Test-Path -LiteralPath frontend/dist/index.html)) { throw 'frontend/dist/index.html missing' }
+      - name: Electron headless smoke and DSP self-test
+        run: |
+          Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+          $ElectronPath = Join-Path $PWD 'node_modules/electron/dist/electron.exe'
+          if (-not (Test-Path -LiteralPath $ElectronPath)) { throw "Electron binary missing: $ElectronPath" }
+          foreach ($Harness in @(
+            'frontend/tests/dsp-offline.cjs',
+            'frontend/tests/renderer-smoke.cjs',
+            'frontend/tests/media-import-smoke.cjs',
+            'frontend/tests/management-smoke.cjs',
+            'frontend/tests/resize-smoke.cjs',
+            'electron/tests/lifecycle.electron.cjs'
+          )) {
+            if (-not (Test-Path -LiteralPath $Harness)) { throw "Electron harness missing: $Harness" }
+            $Acceptance = Start-Process -FilePath $ElectronPath -ArgumentList $Harness -WorkingDirectory $PWD -WindowStyle Hidden -Wait -PassThru
+            if ($null -eq $Acceptance -or $Acceptance.ExitCode -ne 0) {
+              throw "Electron smoke failed: $Harness (exit $($Acceptance.ExitCode))"
+            }
+            Write-Host "PASS $Harness"
+          }
       - name: Build and test the real headless Java engine
         run: |
           python packaging/provision-engine.py
@@ -80,19 +135,31 @@ jobs:
           $Jar = Get-ChildItem .ci/jsymphonic/target/*-jar-with-dependencies.jar | Select-Object -First 1
           if (-not $Jar) { throw 'Headless engine artifact is missing' }
           Copy-Item -LiteralPath $Jar.FullName -Destination backend/vendor/jsymphonic.jar
+      - name: ffmpeg and Java backend tests
+        run: |
+          $ffmpeg = $env:WALKMAN_BRIDGE_FFMPEG
+          if (-not $ffmpeg) { $ffmpeg = (Get-Command ffmpeg -ErrorAction Stop).Source }
+          $java = Join-Path $env:JAVA_HOME 'bin/java.exe'
+          if (-not (Test-Path -LiteralPath $ffmpeg)) { throw "ffmpeg missing: $ffmpeg" }
+          if (-not (Test-Path -LiteralPath $java)) { throw "java runtime missing: $java" }
+          $env:WALKMAN_BRIDGE_FFMPEG = $ffmpeg
+          $env:WALKMAN_BRIDGE_JAVA = $java
+          $env:NIGHTOPS_REAL_MOCK = '1'
+          Write-Host "Using ffmpeg $ffmpeg"
+          Write-Host "Using java $java"
+          & $ffmpeg -version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & $java -version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m pytest backend/tests/test_analysis.py backend/tests/test_metadata.py backend/tests/test_real_mock.py backend/tests/test_metadata_device_roundtrip.py -q -p no:cacheprovider -rs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build both versioned installers
         run: |
           ./packaging/build-products.ps1 -Product all -Python (Get-Command python).Source -JdkHome $env:JAVA_HOME -JSymphonicSource "$PWD/.ci/jsymphonic"
-      - name: Actual Electron renderer, lifecycle and DSP acceptance
+      - name: Verify packaged app archives
         run: |
           node packaging/verify-asar.cjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
-          $ElectronPath = Join-Path $PWD 'node_modules/electron/dist/electron.exe'
-          foreach ($Harness in @('frontend/tests/renderer-smoke.cjs', 'frontend/tests/media-import-smoke.cjs', 'frontend/tests/management-smoke.cjs', 'frontend/tests/resize-smoke.cjs', 'electron/tests/lifecycle.electron.cjs', 'frontend/tests/dsp-offline.cjs')) {
-            $Acceptance = Start-Process -FilePath $ElectronPath -ArgumentList $Harness -WorkingDirectory $PWD -WindowStyle Hidden -Wait -PassThru
-            if ($Acceptance.ExitCode -ne 0) { throw "Electron acceptance failed: $Harness (exit $($Acceptance.ExitCode))" }
-          }
       - name: Real ffmpeg and Java API roundtrip on a temporary mock volume
         run: |
           python packaging/probe-resources.py dist_electron/bridge/win-unpacked/resources --output packaging/build/bridge-resources-probe.json
@@ -102,9 +169,11 @@ jobs:
           $env:NIGHTOPS_REAL_MOCK = '1'
           $env:WALKMAN_BRIDGE_JAVA = "$env:JAVA_HOME/bin/java.exe"
           $env:WALKMAN_BRIDGE_FFMPEG = "$PWD/packaging/build/redlotus/bridge/ffmpeg/ffmpeg.exe"
+          if (-not (Test-Path -LiteralPath $env:WALKMAN_BRIDGE_FFMPEG)) { throw "staged ffmpeg missing: $env:WALKMAN_BRIDGE_FFMPEG" }
+          if (-not (Test-Path -LiteralPath $env:WALKMAN_BRIDGE_JAVA)) { throw "staged java missing: $env:WALKMAN_BRIDGE_JAVA" }
           New-Item -ItemType Directory -Force deno | Out-Null
           Copy-Item -LiteralPath packaging/build/redlotus/player/deno/deno.exe -Destination deno/deno.exe
-          python -m pytest backend/tests/test_real_mock.py backend/tests/test_metadata.py backend/tests/test_metadata_device_roundtrip.py backend/tests/test_link_import.py -q -p no:cacheprovider
+          python -m pytest backend/tests/test_real_mock.py backend/tests/test_metadata.py backend/tests/test_metadata_device_roundtrip.py backend/tests/test_analysis.py backend/tests/test_link_import.py -q -p no:cacheprovider -rs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Install, smoke and uninstall both products
         run: |
