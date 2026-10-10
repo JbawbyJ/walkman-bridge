@@ -78,14 +78,6 @@ jobs:
           "WALKMAN_BRIDGE_FFMPEG=$($bin.FullName)" | Add-Content -Path $env:GITHUB_ENV
           & $bin.FullName -version
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Audit runtime dependencies
-        run: |
-          npm audit --audit-level=high
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          npm --prefix frontend audit --audit-level=high
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python -m pip_audit -r packaging/python-runtime-constraints.txt --no-deps --disable-pip --format json --output packaging/build/runtime-audit.json
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Backend, browser logic and broker tests
         run: |
           python -m pytest backend/tests -q -p no:cacheprovider -rs
@@ -152,6 +144,14 @@ jobs:
           & $java -version
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python -m pytest backend/tests/test_analysis.py backend/tests/test_metadata.py backend/tests/test_real_mock.py backend/tests/test_metadata_device_roundtrip.py -q -p no:cacheprovider -rs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Audit runtime dependencies
+        run: |
+          npm audit --audit-level=high
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend audit --audit-level=high
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m pip_audit -r packaging/python-runtime-constraints.txt --no-deps --disable-pip --format json --output packaging/build/runtime-audit.json
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build both versioned installers
         run: |
