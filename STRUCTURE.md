@@ -28,4 +28,4 @@ Both products own a separate process and nightops.sqlite beneath their applicati
 
 Legacy browser/pywebview launchers remain historical source and are excluded from product packaging. They do not represent the authenticated Electron entry point. The original HTML export remains an external design reference; its wrapper is never run.
 
-Verification lives in backend/tests, frontend/src/*.test.js, frontend/tests, electron/*.test.cjs, scanner-helper tests, packaging tests and the companion Java tests. The progress document distinguishes executed evidence from CI configuration and manual acceptance gates.
+Verification lives in backend/tests, frontend/src/*.test.js, frontend/tests, electron/*.test.cjs, scanner-helper tests, packaging tests and the companion Java tests. `frontend/tests/walkman-smoke.test.mjs` is the headless Bridge viewport and renderer-boot check. The progress document and packaging/README-WINDOWS.md distinguish that suite from the Windows Electron harness and the remaining manual acceptance gates.
