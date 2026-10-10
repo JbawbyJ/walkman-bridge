@@ -17,6 +17,72 @@ from jsymphonic import JSymphonicError
 FAKE_SHIM = Path(__file__).parent / "fake_shim.py"
 
 
+def scripted(monkeypatch, events, exit_code=0):
+    code = "import json,sys; events=" + repr(events) + "; [print(json.dumps(e),flush=True) for e in events]; sys.exit(" + str(exit_code) + ")"
+    monkeypatch.setattr(jsymphonic, "SHIM_CMD_PREFIX", [sys.executable, "-c", code])
+
+
+def test_list_requires_terminal_marker(monkeypatch):
+    scripted(monkeypatch, [{"event": "track", "id": "1"}])
+    with pytest.raises(JSymphonicError, match="listEnd"):
+        jsymphonic.list_tracks(Path("X:/"))
+
+
+def test_list_requires_correct_terminal_count(monkeypatch):
+    scripted(monkeypatch, [{"event": "listEnd", "count": 1}])
+    with pytest.raises(JSymphonicError, match="count"):
+        jsymphonic.list_tracks(Path("X:/"))
+
+
+@pytest.mark.parametrize("events", [
+    [{"event": "start", "files": 1}],
+    [{"event": "fatal", "message": "failed"}, {"event": "done"}],
+    [{"event": "step", "error": "copy failed"}, {"event": "done"}],
+])
+def test_add_never_succeeds_without_clean_terminal_evidence(monkeypatch, events):
+    scripted(monkeypatch, events)
+    with pytest.raises(JSymphonicError) as error:
+        jsymphonic.add_tracks(Path("X:/"), [Path("a.mp3")], lambda _: None)
+    assert error.value.needs_reconcile
+    assert error.value.result.files[0].state == "unknown"
+
+
+def test_done_before_nonzero_exit_is_not_committed_success(monkeypatch):
+    scripted(monkeypatch, [{"event": "file", "step": "transfer", "name": "a.mp3"}, {"event": "done"}], exit_code=1)
+    with pytest.raises(JSymphonicError) as error:
+        jsymphonic.add_tracks(Path("X:/"), [Path("a.mp3"), Path("b.mp3")], lambda _: None)
+    assert [row.state for row in error.value.result.files] == ["unknown", "unknown"]
+    assert error.value.events[-1] == {"event": "done"}
+
+
+def test_add_results_preserve_duplicate_basename_input_identity(shim, tmp_path):
+    shim("happy_add")
+    files = [tmp_path / "one" / "song.mp3", tmp_path / "two" / "song.mp3"]
+    result = jsymphonic.add_tracks(tmp_path, files, lambda _: None)
+    assert [(row.input_index, row.path, row.state) for row in result.files] == [(index, str(path), "transferred") for index, path in enumerate(files)]
+    assert result.needs_reconcile is False
+
+
+def test_process_launch_failure_is_definite_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(jsymphonic, "SHIM_CMD_PREFIX", [str(tmp_path / "missing-executable")])
+    with pytest.raises(JSymphonicError) as error:
+        jsymphonic.add_tracks(tmp_path, [tmp_path / "a.mp3"], lambda _: None)
+    assert error.value.needs_reconcile is False
+    assert error.value.result.files[0].state == "failed"
+
+
+def test_callback_failure_retains_unknown_outcomes(shim, tmp_path):
+    shim("happy_add")
+
+    def fail(event):
+        raise OSError("job persistence unavailable")
+
+    with pytest.raises(JSymphonicError, match="job persistence unavailable") as error:
+        jsymphonic.add_tracks(tmp_path, [tmp_path / "a.mp3"], fail)
+    assert error.value.result.files[0].state == "unknown"
+    assert jsymphonic.wait_for_idle(0)
+
+
 @pytest.fixture
 def shim(monkeypatch):
     """Returns a selector that points jsymphonic at a fake-shim scenario."""

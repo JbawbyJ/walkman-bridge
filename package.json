@@ -1,0 +1,24 @@
+{
+  "name": "red-lotus-audio",
+  "private": true,
+  "version": "0.4.1",
+  "description": "Red Lotus Player and Walkman Bridge desktop products",
+  "author": "Red Lotus",
+  "license": "MIT",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "electron": "npm --prefix frontend run build && electron .",
+    "electron:dev": "electron .",
+    "electron:smoke": "electron . --smoke",
+    "test:electron": "node --test electron/*.test.cjs",
+    "test:frontend": "node --test frontend/src/*.test.js frontend/tests/*.test.mjs",
+    "test:packaging": "node --test packaging/*.test.cjs",
+    "dist": "powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-products.ps1 -Product all",
+    "dist:bridge": "powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-products.ps1 -Product bridge",
+    "dist:player": "powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-products.ps1 -Product player"
+  },
+  "devDependencies": {
+    "electron": "44.2.0",
+    "electron-builder": "26.15.3"
+  }
+}

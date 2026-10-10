@@ -12,11 +12,15 @@ every invocation is serialized behind a single module-level lock.
 from __future__ import annotations
 
 import json
+import base64
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -39,8 +43,27 @@ _shim_lock = threading.Lock()
 SHIM_CMD_PREFIX: list[str] | None = None
 
 
+@dataclass(frozen=True)
+class FileOutcome:
+    input_index: int
+    path: str
+    state: str
+    detail: str
+    reason_code: str | None = None
+
+
+@dataclass(frozen=True)
+class AddResult:
+    files: tuple[FileOutcome, ...]
+    needs_reconcile: bool = False
+
+
 class JSymphonicError(RuntimeError):
-    pass
+    def __init__(self, message, *, events=(), needs_reconcile=False):
+        super().__init__(message)
+        self.events = list(events)
+        self.needs_reconcile = needs_reconcile
+        self.result: AddResult | None = None
 
 
 def _ensure_java() -> str:
@@ -81,6 +104,7 @@ def _run(
     """Run one shim command, streaming parsed stdout events. Returns them all."""
     cmd = _build_cmd(args)
     events: list[dict] = []
+    mutating = bool(args and args[0] in {"add", "del", "playlist-create", "playlist-update", "playlist-delete"})
     with _shim_lock:
         try:
             proc = subprocess.Popen(
@@ -97,7 +121,7 @@ def _run(
 
         # Drain stderr on a side thread so a chatty JVM can't fill the pipe
         # and deadlock against our stdout read.
-        stderr_lines: list[str] = []
+        stderr_lines: deque[str] = deque(maxlen=200)
         assert proc.stderr is not None
         stderr_pipe = proc.stderr
         drainer = threading.Thread(
@@ -111,7 +135,10 @@ def _run(
 
         def _kill() -> None:
             timed_out.set()
-            proc.kill()
+            try:
+                proc.kill()
+            except OSError:
+                pass  # Process may have exited between the timer and kill.
 
         watchdog = threading.Timer(timeout, _kill)
         watchdog.start()
@@ -133,28 +160,52 @@ def _run(
                 if on_event is not None:
                     on_event(event)
             proc.wait()
+        except Exception as exc:
+            raise JSymphonicError(
+                f"Shim output processing failed: {exc}", events=events,
+                needs_reconcile=mutating,
+            ) from exc
         finally:
             watchdog.cancel()
             if proc.poll() is None:  # e.g. on_event raised mid-stream
                 proc.kill()
                 proc.wait()
             drainer.join(timeout=5)
+            proc.stdout.close()
+            proc.stderr.close()
 
         if timed_out.is_set() and proc.returncode != 0:
             raise JSymphonicError(
-                f"jsymphonic shim timed out after {timeout:.0f}s: {' '.join(args)}"
+                f"jsymphonic shim timed out after {timeout:.0f}s: {' '.join(args)}",
+                events=events, needs_reconcile=mutating,
             )
         if proc.returncode != 0:
             for event in reversed(events):
                 if event.get("event") == "fatal":
                     raise JSymphonicError(
-                        str(event.get("message") or "shim reported a fatal error")
+                        str(event.get("message") or "shim reported a fatal error"),
+                        events=events, needs_reconcile=mutating,
                     )
-            tail = "\n".join(stderr_lines[-5:]).strip()
+            tail = "\n".join(list(stderr_lines)[-5:]).strip()
             raise JSymphonicError(
-                tail or f"jsymphonic shim exited with code {proc.returncode}"
+                tail or f"jsymphonic shim exited with code {proc.returncode}",
+                events=events, needs_reconcile=mutating,
             )
     return events
+
+
+def _require_terminal(events: list[dict], terminal: str, *, mutating=False) -> None:
+    for event in events:
+        if event.get("event") == "fatal" or event.get("error"):
+            raise JSymphonicError(
+                str(event.get("message") or event.get("error") or "Shim reported a fatal error"),
+                events=events, needs_reconcile=mutating,
+            )
+    if not events or events[-1].get("event") != terminal:
+        raise JSymphonicError(
+            f"Shim produced no final {terminal} terminal marker",
+            events=events, needs_reconcile=mutating,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -174,8 +225,11 @@ def wait_for_idle(timeout: float | None = None) -> bool:
 def device_details(mount: Path) -> dict:
     """Validate the mount via the shim and return its `device` event."""
     events = _run(["info", "--device", str(mount)], INFO_TIMEOUT)
+    _require_terminal(events, "device")
     for event in events:
         if event.get("event") == "device":
+            if event.get("ok") is not True:
+                raise JSymphonicError("Shim did not validate the device", events=events)
             return event
     raise JSymphonicError("shim produced no device event")
 
@@ -183,6 +237,7 @@ def device_details(mount: Path) -> dict:
 def list_tracks(mount: Path) -> list[dict]:
     """Enumerate tracks on the device. Ids are opaque — never persist them."""
     events = _run(["list", "--device", str(mount)], LIST_TIMEOUT)
+    _require_terminal(events, "listEnd")
     tracks: list[dict] = []
     for event in events:
         if event.get("event") == "track":
@@ -193,23 +248,110 @@ def list_tracks(mount: Path) -> list[dict]:
                 "album": event.get("album") or "",
                 "duration_seconds": event.get("durationSeconds"),
             })
-    if not any(e.get("event") == "listEnd" for e in events):
-        logger.warning("shim: list produced no listEnd terminator")
+    count = events[-1].get("count")
+    if type(count) is not int or count != len(tracks):
+        raise JSymphonicError("Shim listEnd count does not match returned tracks", events=events)
     return tracks
 
 
 def add_tracks(
     mount: Path, files: list[Path], on_event: Callable[[dict], None]
-) -> None:
+) -> AddResult:
     """Import a whole batch in ONE shim run — one applyChanges() DB commit."""
     if not files:
-        return
-    _run(
-        ["add", "--device", str(mount), *(str(f) for f in files)],
-        ADD_TIMEOUT,
-        on_event,
-    )
+        return AddResult(())
+    try:
+        events = _run(
+            ["add", "--device", str(mount), *(str(f) for f in files)],
+            ADD_TIMEOUT,
+            on_event,
+        )
+        _require_terminal(events, "done", mutating=True)
+    except JSymphonicError as exc:
+        # The legacy protocol only reports aggregate step errors. Neither a
+        # file event nor 100% progress proves its database write committed.
+        exc.result = AddResult(tuple(
+            FileOutcome(index, str(path), "unknown" if exc.needs_reconcile else "failed", str(exc),
+                        "device_outcome_unknown" if exc.needs_reconcile else "shim_unavailable")
+            for index, path in enumerate(files)
+        ), needs_reconcile=exc.needs_reconcile)
+        raise
+    return AddResult(tuple(
+        FileOutcome(index, str(path), "transferred", "Device database update completed")
+        for index, path in enumerate(files)
+    ))
 
 
 def remove_track(mount: Path, track_id: str) -> None:
-    _run(["del", "--device", str(mount), "--id", track_id], DEL_TIMEOUT)
+    events = _run(["del", "--device", str(mount), "--id", track_id], DEL_TIMEOUT)
+    _require_terminal(events, "done", mutating=True)
+
+
+def _playlist_row(event, events, *, mutating=False):
+    playlist_id, name, ids = event.get('id'), event.get('name'), event.get('trackIds')
+    if (not isinstance(playlist_id, str) or not re.fullmatch(r'[1-9][0-9]{0,9}', playlist_id)
+            or not isinstance(name, str) or not isinstance(ids, list)
+            or any(not isinstance(key, str) or not re.fullmatch(r'[1-9][0-9]{0,9}', key) for key in ids)):
+        raise JSymphonicError('Shim returned an invalid playlist row', events=events, needs_reconcile=mutating)
+    return {'id': playlist_id, 'name': name, 'track_ids': ids}
+
+
+def list_playlists(mount: Path) -> list[dict]:
+    events = _run(['playlists', '--device', str(mount)], LIST_TIMEOUT)
+    _require_terminal(events, 'playlistsEnd')
+    rows = [_playlist_row(event, events) for event in events if event.get('event') == 'playlist']
+    count = events[-1].get('count')
+    if type(count) is not int or count != len(rows) or len({row['id'] for row in rows}) != len(rows):
+        raise JSymphonicError('Shim playlistsEnd count or playlist IDs are invalid', events=events)
+    return rows
+
+
+def _playlist_mutation(args):
+    events = _run(args, DEL_TIMEOUT)
+    _require_terminal(events, 'done', mutating=True)
+    rows = [_playlist_row(event, events, mutating=True) for event in events if event.get('event') == 'playlist']
+    if len(rows) != 1:
+        raise JSymphonicError('Shim did not return the changed playlist', events=events, needs_reconcile=True)
+    return rows[0]
+
+
+def _device_playlist_id(value):
+    if not isinstance(value, str) or not re.fullmatch(r'[1-9][0-9]{0,9}', value):
+        raise ValueError('Invalid device playlist or track ID')
+    return value
+
+
+def _device_playlist_tracks(ids):
+    if not isinstance(ids, list) or len(ids) > 200:
+        raise ValueError('A playlist can contain at most 200 tracks')
+    for key in ids:
+        _device_playlist_id(key)
+    return ids
+
+
+def create_playlist(mount: Path, name: str, track_ids: list[str]) -> dict:
+    from media_store import playlist_name
+    # Windows Java's launcher can replace non-ANSI argv characters before main().
+    encoded = base64.b64encode(playlist_name(name).encode('utf-8')).decode('ascii')
+    return _playlist_mutation(['playlist-create', '--device', str(mount), '--name-base64',
+        encoded, *_device_playlist_tracks(track_ids)])
+
+
+def update_playlist(mount: Path, playlist_id: str, name: str | None = None, track_ids: list[str] | None = None) -> dict:
+    from media_store import playlist_name
+    args = ['playlist-update', '--device', str(mount), '--id', _device_playlist_id(playlist_id)]
+    if name is not None:
+        args.extend(['--name-base64', base64.b64encode(playlist_name(name).encode('utf-8')).decode('ascii')])
+    if track_ids is not None:
+        args.extend(['--tracks', ','.join(_device_playlist_tracks(track_ids))])
+    if name is None and track_ids is None:
+        raise ValueError('Provide a playlist name or track IDs')
+    row = _playlist_mutation(args)
+    if row['id'] != playlist_id:
+        raise JSymphonicError('Shim changed a different playlist', needs_reconcile=True)
+    return row
+
+
+def delete_playlist(mount: Path, playlist_id: str) -> None:
+    events = _run(['playlist-delete', '--device', str(mount), '--id', _device_playlist_id(playlist_id)], DEL_TIMEOUT)
+    _require_terminal(events, 'done', mutating=True)

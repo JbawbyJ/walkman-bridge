@@ -1,101 +1,58 @@
-# Walkman Bridge
+# Red Lotus Player and Walkman Bridge
 
-A local web dashboard for putting music on a **Sony NW-S705F Walkman** (2007) from a modern computer — no SonicStage, no Linux, no command line.
+Two Windows desktop applications share local playback, a persistent queue and mandatory Microsoft Defender scanning.
 
-Drop audio files onto the page; they're converted to Walkman-friendly MP3 and written into the device's proprietary OMGAUDIO database. Runs entirely on your machine: the browser talks to a small local server on `127.0.0.1`, which uses `ffmpeg` for conversion and a headless build of [JSymphonic](https://github.com/georgewoodall82/jsymphonic) for the device database.
+| Application | Interface | Additional capabilities |
+| --- | --- | --- |
+| Red Lotus Player | Sculpted retro music player | Ten-band equalizer, real audio visualization, source-quality playback |
+| Walkman Bridge | Retro playback with device views | Walkman library, verified backup, staging, transfer and deletion |
 
-```
-Browser (React dashboard)
-   ↓ HTTP (localhost only)
-FastAPI server (127.0.0.1:8000)
-   ↓ subprocess
-   ├── ffmpeg               → convert anything → MP3 192k/44.1kHz
-   └── jsymphonic.jar       → HeadlessCli: OMA-wrap + rebuild OMGAUDIO DB
-   ↓ filesystem
-Walkman (USB mass storage drive)
-```
+Install the matching versioned NSIS executable from dist_electron/player or dist_electron/bridge. Both contain Python, ffmpeg, a restricted Deno runtime for link importing, the self-contained .NET scanner helper, Electron and local fonts. Player contains no Java, JSymphonic or device module. Build instructions and installer smoke checks are in [packaging/README-WINDOWS.md](packaging/README-WINDOWS.md). These are local unsigned builds; no release has been published.
 
-## Install it (recommended)
+## Playback and scanning
 
-Download **`WalkmanBridge-Setup-0.1.0.exe`** and run it.
+Import copies audio into the application's private managed cache; originals remain untouched. Defender must explicitly clear unchanged bytes before decoding, analysis, playback or conversion. When ordinary scanning requires elevation, Windows UAC launches a narrow helper for that batch. The UI and backend stay unprivileged. Missing/disabled Defender, cancelled permission, errors, timeouts and ambiguous results block consumption.
 
-1. Windows may warn about an unknown publisher (the installer isn't code-signed) — choose **More info → Run anyway**.
-2. It installs for your user only: no administrator prompt, nothing added to PATH, no system settings touched.
-3. Launch **Walkman Bridge** from the Start Menu or desktop shortcut. It opens as its own app window.
-4. Plug in the Walkman with its WM-PORT cable, drag songs in, watch them transfer.
+Supported source audio plays without a lossy re-encode. Codec compatibility can use a lossless FLAC derivative. Walkman transfer generates a separate 192 kbps, 44.1 kHz stereo MP3. Derivatives require their own clearance. Enhancement defaults off and changes playback only. Loudness matching uses measured EBU R128 levels; it does not reconstruct lost audio information.
 
-**No prerequisites** — the installer bundles its own Java runtime, ffmpeg, and the JSymphonic engine (~80 MB download, ~175 MB installed). Uninstall from Settings → Apps like any other program.
+Queue order, track, position, volume, shuffle and repeat persist in SQLite; startup restores paused. Queue removal waits for playback/processing leases before deleting managed bytes. Limits are 500 MiB per file, 2 GiB/200 files per import, one active import batch, and a 10 GiB cache.
 
-Build the installer yourself with:
+## Music management and layout (0.4.1)
 
-```
-powershell -ExecutionPolicy Bypass -File packaginguild.ps1
-```
+Current deployment checks and the remaining clean-VM/UAC acceptance are tracked in [docs/BRANDING-SANDBOX-0.4.1.md](docs/BRANDING-SANDBOX-0.4.1.md). Installer instructions are in [packaging/DEPLOYMENT-0.4.1.md](packaging/DEPLOYMENT-0.4.1.md).
 
-See [packaging/](packaging) for what it assembles. Logs live at `%LOCALAPPDATA%\Walkman Bridge\walkman-bridge.log`.
+**Manage music** opens searchable managed files, editable music details, and saved playlists. Create, rename, reorder and delete playlists; play them in their saved order or stage their music for Walkman transfer. Removing playlist membership keeps the audio. Removing managed files requires confirmation, prunes playlist membership and leaves the original files untouched. Metadata edits regenerate the transfer MP3 on the next transfer without rewriting the source audio.
 
-## Run from source (developers)
+Bridge also has a **Sony playlists** tab for creating and editing the Walkman's native playlist tables, including ordered membership in tracks already on the device. Transfer local music first, then add those device tracks to a Sony playlist. Native edits require a fresh device snapshot and run through the same volume-bound coordinator and Java engine as transfers. Playlist deletion never deletes the songs. The format and preservation limits are documented in the bundled JSymphonic source's `NATIVE-PLAYLISTS.md`.
 
-1. Run `scripts\setup.bat` once (double-click). It prepares everything and tells you if anything is missing.
-2. Double-click **`START-WALKMAN-BRIDGE.bat`**. Your browser opens the dashboard.
+Bridge separates **Listening**, **Walkman** and **Transfer** views. Both products keep essential transport controls visible and move optional equalizer, queue actions and job details behind expandable controls. Layouts scroll inside the window, dialogs fit small viewports, and the initial Electron window fits the active display work area. Both products use the retro playback deck and locally bundled fonts. Version 0.4.1 removes the former edition branding while preserving installation IDs, stored music and playlists.
 
-To stop, close the console window (or press `Ctrl+C` in it).
+## Music details, artwork and links (0.3.0)
 
-## Prerequisites (source checkout only — the installer needs none)
+Embedded title, artist, album, genre, date/year and track number are read after source clearance and written explicitly into the Walkman MP3. Missing titles use the original filename; absent artist/album values remain visibly unknown. Existing cached transfer files are regenerated when they lack the corrected metadata policy. This version does not look up missing local tags online. The legacy device engine limits text length and track numbers; hardware display still needs operator verification.
 
-| What | Why | Check |
-|---|---|---|
-| Python 3.10+ | runs the server | `python --version` |
-| Node.js 18+ | builds the dashboard (once) | `node --version` |
-| ffmpeg | audio conversion | `ffmpeg -version` |
-| Java 17/21 JRE | runs the JSymphonic engine | auto-detected: `WALKMAN_BRIDGE_JAVA` env var, a portable JDK in `..\tools\jdk*`, or `java` on PATH |
-| `jsymphonic.jar` | the transfer engine | place at `backend\vendor\jsymphonic.jar` |
+Embedded cover art appears in the desktop player after bounded JPEG extraction and its own Defender clearance. Failed or unavailable artwork falls back to the official lotus. Writing Sony jacket-picture databases is not implemented, so desktop cover display does not imply cover display on the Walkman.
 
-**About the jar:** build it from [the companion JSymphonic fork](https://github.com/JbawbyJ/jsymphonic) with `mvn package` (use the `jar-with-dependencies` artifact). The fork adds the headless CLI this app drives, plus Windows file-locking fixes. JSymphonic is GPL-3.0, so the jar is not bundled in this repo — you build or download it yourself.
+**Import link** accepts one public YouTube video or SoundCloud track. Acquisition runs in a bounded child process with pinned HTTPS destinations and a ten-minute deadline; scanning must finish before any audio decoding, playback or conversion. Available provider music fields supplement embedded tags, without treating an uploader/channel name as a verified artist. Downloads remain in the managed queue after transfer. Use material you own or have permission to download.
 
-## Manual start (developers)
+Importing a provider's entire playlist, authenticated/private/paywalled streams, DRM, live streams and other providers are outside this version. A provider must offer a supported direct audio format; HLS-only SoundCloud tracks are reported unavailable. Online services can change their delivery formats, so some public links may fail with an actionable import error.
 
-```bash
-# Backend
-cd backend
-python -m venv .venv
-.venv\Scripts\activate            # POSIX: source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --host 127.0.0.1 --port 8000
+## Device reliability
 
-# Frontend — dev server with hot reload (proxies /api to :8000)
-cd frontend
-npm install
-npm run dev
-```
+JSymphonic HeadlessCli is the only OMGAUDIO writer. Backup, database reads, addition and deletion share a device coordinator and revalidate Windows volume identity. Deletion requires the current track-list ETag. Backups publish only after a complete verified copy. Interrupted or ambiguous writes display **Verify device state** and are never automatically retried.
 
-In production mode there is no second process: `npm run build` once, and the FastAPI server serves `frontend/dist` itself at `http://127.0.0.1:8000`.
+**Before a physical NW-S705F write, make a full device backup and verify it.** Mock-device integration proves the software round trip; firmware playback still requires an operator-controlled hardware test. Do not infer physical playback from API or Java success.
 
-### Developing without a Walkman
+Each product keeps its database, managed cache, backups and logs below its own %LOCALAPPDATA% directory: Red Lotus Player or Walkman Bridge. Existing terminal job history is migrated additively. Closing stops playback, saves state and drains admitted work. Failed busy probes mean unknown status; no timer kills an active device operation.
 
-Set `MOCK_DEVICE_PATH` to any folder containing an empty `OMGAUDIO` directory and the app treats it as the connected device — JSymphonic regenerates the entire database from scratch, so transfers, listing, and deletion are all fully exercisable against a plain folder:
+## Development and release
 
-```bash
-mkdir -p /tmp/mockdev/OMGAUDIO
-MOCK_DEVICE_PATH=/tmp/mockdev uvicorn main:app
-```
+Use Windows x64, Node 24+, build Python 3.11+ and .NET SDK 10.0.400. Bridge also needs the pinned JDK/JSymphonic source described in the packaging guide. After dependency setup, run npm run electron for Bridge or npx electron . --product=player for Player.
 
-## Before your first real transfer — read this
+Electron starts the Python factory using an authenticated, signed dynamic-port announcement. It serves the built React application through that backend. Production uses no Vite server, external fonts or export loaders. Direct legacy browser launchers do not establish this authentication boundary and are not supported product entry points.
 
-The NW-S705F's database format was reverse-engineered decades ago, and JSymphonic's historical track record on the S70x series specifically is thin. This app is verified against mock devices; **real-hardware behavior is verified only by you, on your device.**
+The backend API requires a per-launch capability and exact permitted origin; renderer requests use an HttpOnly/SameSite cookie. Electron restricts outgoing requests to the exact backend origin including its port. Native scan and shutdown routes require the main-process capability.
 
-1. **Back up the device first.** Copy the entire Walkman drive (including `OMGAUDIO`) to a folder on your PC. Restoring that copy restores the device.
-2. **One-way door:** SonicStage cannot manage a JSymphonic-written database. If you still use SonicStage, switching back later means wiping the device.
-3. Start with one track, verify it plays on the device, then trust it with more.
+See [STRUCTURE.md](STRUCTURE.md), [docs/DESIGN.md](docs/DESIGN.md), [docs/IMPLEMENTATION-CONTRACT.md](docs/IMPLEMENTATION-CONTRACT.md) and [docs/IMPLEMENTATION-PROGRESS.md](docs/IMPLEMENTATION-PROGRESS.md) for modules, decisions, interfaces and verification evidence.
 
-## Security model
-
-Single user, local machine. The server binds to `127.0.0.1` only — nothing is reachable from the network. No accounts, no auth, no telemetry. Uploaded files are processed in a temp folder and deleted after transfer.
-
-## Repository layout
-
-See [STRUCTURE.md](STRUCTURE.md) for the module map and [docs/PROTOCOL.md](docs/PROTOCOL.md) for the backend ↔ HeadlessCli JSON-lines protocol.
-
-## License
-
-The Walkman Bridge application code is MIT. The JSymphonic engine (separate repo, separate artifact, invoked as a subprocess) is GPL-3.0; its jar is intentionally not distributed with this repository.
+Application code is MIT. Bundled dependencies retain their own notices, including GPL components. Bridge includes the companion JSymphonic source snapshot. Review [packaging/NOTICES.md](packaging/NOTICES.md) before distribution; the complete ffmpeg corresponding-source package remains a publishing prerequisite. Local builds are not a public release or a claim that hardware, listening and clean-machine acceptance have all passed.

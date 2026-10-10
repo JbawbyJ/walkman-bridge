@@ -1,0 +1,28 @@
+# Product-specific identity and staged resources are supplied by
+# packaging/electron-builder.cjs. Always use the npm dist:* commands.
+copyright: Copyright Red Lotus contributors
+files:
+  - electron/*.cjs
+  - "!electron/*.test.cjs"
+  - "!electron/*-smoke.cjs"
+  - package.json
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  requestedExecutionLevel: asInvoker
+  icon: packaging/build/lotus-icon.svg
+  signAndEditExecutable: true
+  signExecutable: false
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  runAfterFinish: false
+  deleteAppDataOnUninstall: false
+asar: true
+npmRebuild: false
+publish: null

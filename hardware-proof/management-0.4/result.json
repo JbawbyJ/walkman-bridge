@@ -1,0 +1,197 @@
+{
+  "passed": true,
+  "backup": "hardware-proof\\pre-playlist-backups\\2026-09-05-194948",
+  "volume_id": "<redacted>",
+  "jar_sha256": "cbab7deae5baed02b799f43a454095e5b8b8d00a26151cc0c8649c2cccbcfc72",
+  "steps": [
+    {
+      "step": "Verified full backup, volume identity and original 14-track ledger"
+    },
+    {
+      "step": "Real Defender cleared generated source",
+      "scan": {
+        "ok": true,
+        "state": "CLEAN",
+        "reason": "Microsoft Defender reported clean",
+        "engine": "audio-guard",
+        "pid": "ag-1",
+        "reason_code": "clean",
+        "defender_status": "clean",
+        "sha256": "76add85f477e2c90058cb6afa92d4f1430ef37b83b9d1bf1732fd8b3f8b6b61b",
+        "size_bytes": 352844,
+        "policy_version": "defender-strict-v1",
+        "scanned_at": 1788654309.6108162,
+        "defender_engine_version": "1.1.26080.3",
+        "defender_signature_version": "1.459.66.0",
+        "defender_platform_version": "4.18.26080.3"
+      }
+    },
+    {
+      "step": "Transferred one generated 192 kbps MP3 and read its music details from Sony",
+      "track": {
+        "id": "15",
+        "title": "Night Ops hardware check",
+        "artist": "Red Lotus",
+        "album": "Deployment verification",
+        "duration_seconds": 2
+      },
+      "scan": {
+        "ok": true,
+        "state": "CLEAN",
+        "reason": "Microsoft Defender reported clean",
+        "engine": "audio-guard",
+        "pid": "ag-2",
+        "reason_code": "clean",
+        "defender_status": "clean",
+        "sha256": "436596aa15fb0fbd345d56a58931339a55f3dde11cbe0e79f430bd1f3d76d877",
+        "size_bytes": 49729,
+        "policy_version": "defender-strict-v1",
+        "scanned_at": 1788654309.895214,
+        "defender_engine_version": "1.1.26080.3",
+        "defender_signature_version": "1.459.66.0",
+        "defender_platform_version": "4.18.26080.3"
+      }
+    },
+    {
+      "step": "Created, read, renamed and reordered native Unicode playlist"
+    },
+    {
+      "step": "Deleted only generated test track and test playlist; original ledger matches"
+    },
+    {
+      "step": "STOP: no automatic retry or restoration",
+      "error": "['OMGAUDIO/02TREINF.DAT', 'OMGAUDIO/01TREE01.DAT', 'OMGAUDIO/03GINF01.DAT', 'OMGAUDIO/04CNTINF.DAT', 'OMGAUDIO/01TREE02.DAT', 'OMGAUDIO/03GINF02.DAT', 'OMGAUDIO/01TREE03.DAT', 'OMGAUDIO/03GINF03.DAT', 'OMGAUDIO/01TREE04.DAT', 'OMGAUDIO/03GINF04.DAT', 'OMGAUDIO/01TREE22.DAT', 'OMGAUDIO/03GINF22.DAT', 'OMGAUDIO/01TREE2D.DAT', 'OMGAUDIO/03GINF2D.DAT', 'OMGAUDIO/05CIDLST.DAT']"
+    },
+    {
+      "step": "Read-only postflight passed after correcting probe allowlist for documented 02TREINF duration updates; no device writes repeated",
+      "duration_byte_offsets": [
+        6393,
+        6394,
+        6395
+      ],
+      "all_original_oma_hashes_match": true,
+      "all_private_sony_files_match": true,
+      "immutable_backup_matches": true
+    }
+  ],
+  "firmware_check_playlist": {
+    "id": "4",
+    "name": "Night Ops Check",
+    "track_ids": [
+      "11",
+      "1"
+    ]
+  },
+  "firmware_check_tracks": [
+    {
+      "id": "11",
+      "title": "<redacted>",
+      "artist": "<redacted>",
+      "album": "<redacted>",
+      "duration_seconds": 238
+    },
+    {
+      "id": "1",
+      "title": "<redacted>",
+      "artist": "<redacted>",
+      "album": "<redacted>",
+      "duration_seconds": 218
+    }
+  ],
+  "originals_preserved": true,
+  "original_tracks": 14,
+  "changed_paths": [
+    "OMGAUDIO/01TREE01.DAT",
+    "OMGAUDIO/01TREE02.DAT",
+    "OMGAUDIO/01TREE03.DAT",
+    "OMGAUDIO/01TREE04.DAT",
+    "OMGAUDIO/01TREE22.DAT",
+    "OMGAUDIO/01TREE2D.DAT",
+    "OMGAUDIO/02TREINF.DAT",
+    "OMGAUDIO/03GINF01.DAT",
+    "OMGAUDIO/03GINF02.DAT",
+    "OMGAUDIO/03GINF03.DAT",
+    "OMGAUDIO/03GINF04.DAT",
+    "OMGAUDIO/03GINF22.DAT",
+    "OMGAUDIO/03GINF2D.DAT",
+    "OMGAUDIO/04CNTINF.DAT",
+    "OMGAUDIO/05CIDLST.DAT"
+  ],
+  "added_paths": [
+    "OMGAUDIO/db_backup",
+    "OMGAUDIO/01tree01.dat",
+    "OMGAUDIO/03ginf01.dat",
+    "OMGAUDIO/01tree02.dat",
+    "OMGAUDIO/03ginf02.dat",
+    "OMGAUDIO/01tree03.dat",
+    "OMGAUDIO/03ginf03.dat",
+    "OMGAUDIO/01tree04.dat",
+    "OMGAUDIO/03ginf04.dat",
+    "OMGAUDIO/01tree2D.dat",
+    "OMGAUDIO/03ginf2D.dat",
+    "OMGAUDIO/04cntinf.dat",
+    "OMGAUDIO/04patlst.dat",
+    "OMGAUDIO/05cidlst.dat",
+    "OMGAUDIO/db_backup/A_WM",
+    "OMGAUDIO/db_backup/20P01",
+    "OMGAUDIO/db_backup/20P02",
+    "OMGAUDIO/db_backup/20P03",
+    "OMGAUDIO/db_backup/20P04",
+    "OMGAUDIO/db_backup/20P05",
+    "OMGAUDIO/db_backup/SMLE",
+    "OMGAUDIO/db_backup/20P06",
+    "OMGAUDIO/db_backup/00GTRLST.DAT",
+    "OMGAUDIO/db_backup/02TREINF.DAT",
+    "OMGAUDIO/db_backup/07GTCHLG.DAT",
+    "OMGAUDIO/db_backup/01TREE01.DAT",
+    "OMGAUDIO/db_backup/03GINF01.DAT",
+    "OMGAUDIO/db_backup/04CNTINF.DAT",
+    "OMGAUDIO/db_backup/01TREE02.DAT",
+    "OMGAUDIO/db_backup/03GINF02.DAT",
+    "OMGAUDIO/db_backup/01TREE03.DAT",
+    "OMGAUDIO/db_backup/03GINF03.DAT",
+    "OMGAUDIO/db_backup/01TREE04.DAT",
+    "OMGAUDIO/db_backup/03GINF04.DAT",
+    "OMGAUDIO/db_backup/01TREE22.DAT",
+    "OMGAUDIO/db_backup/03GINF22.DAT",
+    "OMGAUDIO/db_backup/01TREE2D.DAT",
+    "OMGAUDIO/db_backup/03GINF2D.DAT",
+    "OMGAUDIO/db_backup/01TREE2E.DAT",
+    "OMGAUDIO/db_backup/03GINF2E.DAT",
+    "OMGAUDIO/db_backup/01TREE2F.DAT",
+    "OMGAUDIO/db_backup/03GINF2F.DAT",
+    "OMGAUDIO/db_backup/01TREE30.DAT",
+    "OMGAUDIO/db_backup/03GINF30.DAT",
+    "OMGAUDIO/db_backup/01TREE31.DAT",
+    "OMGAUDIO/db_backup/03GINF31.DAT",
+    "OMGAUDIO/db_backup/01TREE32.DAT",
+    "OMGAUDIO/db_backup/03GINF32.DAT",
+    "OMGAUDIO/db_backup/01TREE33.DAT",
+    "OMGAUDIO/db_backup/03GINF33.DAT",
+    "OMGAUDIO/db_backup/01TREE34.DAT",
+    "OMGAUDIO/db_backup/03GINF34.DAT",
+    "OMGAUDIO/db_backup/01TREE35.DAT",
+    "OMGAUDIO/db_backup/03GINF35.DAT",
+    "OMGAUDIO/db_backup/01TREE36.DAT",
+    "OMGAUDIO/db_backup/03GINF36.DAT",
+    "OMGAUDIO/db_backup/01TREE37.DAT",
+    "OMGAUDIO/db_backup/03GINF37.DAT",
+    "OMGAUDIO/db_backup/05CIDLST.DAT",
+    "OMGAUDIO/db_backup/00010021.DAT",
+    "OMGAUDIO/db_backup/RESERVED.DAT",
+    "OMGAUDIO/db_backup/ACTIVITY.DAT",
+    "OMGAUDIO/db_backup/A_WM/EXCNTINF.DAT",
+    "OMGAUDIO/db_backup/A_WM/EXCNTMTA.DAT",
+    "OMGAUDIO/db_backup/A_WM/ARTISTLK.DAT",
+    "OMGAUDIO/db_backup/A_WM/ARTSTINF.DAT",
+    "OMGAUDIO/db_backup/A_WM/AFMNTLOG.DAT",
+    "OMGAUDIO/db_backup/20P05/JN0005P0.JPG",
+    "OMGAUDIO/db_backup/20P05/JN000501.JPG",
+    "OMGAUDIO/db_backup/20P05/JN000502.JPG",
+    "OMGAUDIO/db_backup/SMLE/METATIME.DAT",
+    "OMGAUDIO/db_backup/20P06/JN0006P0.JPG",
+    "OMGAUDIO/db_backup/20P06/JN000601.JPG",
+    "OMGAUDIO/db_backup/20P06/JN000602.JPG"
+  ],
+  "firmware_verified": false
+}
