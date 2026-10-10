@@ -121,7 +121,8 @@ jobs:
         run: |
           python packaging/provision-engine.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          mvn -B -Dproject.build.sourceEncoding=UTF-8 -f .ci/jsymphonic/pom.xml package
+          # Quote -D so PowerShell does not treat it as its own parameter.
+          mvn -B "-Dproject.build.sourceEncoding=UTF-8" -f .ci/jsymphonic/pom.xml package
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force backend/vendor | Out-Null
           $Jar = Get-ChildItem .ci/jsymphonic/target/*-jar-with-dependencies.jar | Select-Object -First 1
