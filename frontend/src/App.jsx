@@ -1,343 +1,233 @@
 import { useEffect, useRef, useState } from 'react'
-import { api } from './api'
+import { api } from './api.js'
+import { backupFailureMessage, backupSavedMessage, backupSuccessPath } from './backup.js'
+import { moveTrack, playable, transferable, timeLabel, processingBusy } from './playback.js'
+import { usePlayer } from './usePlayer.js'
+import { Brand, Equalizer, Icon, IconButton, NowPlaying, Queue, Transport, Volume } from './components/PlayerPanels.jsx'
+import { DevicePanel, JobPanel, StagingPanel } from './components/BridgePanels.jsx'
+import LinkImportDialog from './components/LinkImportDialog.jsx'
+import MusicManager from './components/MusicManager.jsx'
 
-const TERMINAL_STATUSES = ['done', 'failed', 'partial']
-
-const fmtBytes = (b) => {
-  if (b == null) return '—'
-  const u = ['B', 'KB', 'MB', 'GB']
-  let i = 0
-  let n = b
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++ }
-  return `${n.toFixed(1)} ${u[i]}`
-}
+const terminal = job => ['done', 'partial', 'failed', 'interrupted'].includes(job?.status)
+const readPreference = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback } }
+const storePreference = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* private storage */ } }
 
 export default function App() {
-  const [device, setDevice] = useState({ connected: false })
-  const [tracks, setTracks] = useState([])
-  const [activeJob, setActiveJob] = useState(null)
-  const [dragOver, setDragOver] = useState(false)
-  const [pollError, setPollError] = useState(null)
-  const [actionError, setActionError] = useState(null)
-  const [pendingDeletes, setPendingDeletes] = useState(() => new Set())
-  const fileInput = useRef(null)
-
-  const jobBusy = !!activeJob && !TERMINAL_STATUSES.includes(activeJob.status)
-
-  // Prevent the browser/webview from navigating away when a file is
-  // dropped outside the dropzone
+  const [health, setHealth] = useState(null)
+  const [session, setSession] = useState(null)
+  const [error, setError] = useState(null)
   useEffect(() => {
-    const prevent = (e) => e.preventDefault()
-    window.addEventListener('dragover', prevent)
-    window.addEventListener('drop', prevent)
-    return () => {
-      window.removeEventListener('dragover', prevent)
-      window.removeEventListener('drop', prevent)
+    let alive = true, timer
+    const connect = async () => {
+      try { const [result, saved] = await Promise.all([api.health(), api.playbackState()]); if (alive) { setHealth(result); setSession(saved); setError(null) } }
+      catch (e) { if (alive) { setError(e.message); timer = setTimeout(connect, 3000) } }
     }
+    connect()
+    return () => { alive = false; clearTimeout(timer) }
   }, [])
-
-  // Poll device + tracks every 3s
-  useEffect(() => {
-    let alive = true
-    const tick = async () => {
-      try {
-        const d = await api.device()
-        if (!alive) return
-        setDevice(d)
-        if (d.connected) {
-          const t = await api.tracks().catch(() => [])
-          if (alive) setTracks(t)
-        } else {
-          setTracks([])
-        }
-        if (alive) setPollError(null)
-      } catch (e) {
-        if (alive) setPollError(e.message)
-      }
-    }
-    tick()
-    const id = setInterval(tick, 3000)
-    return () => { alive = false; clearInterval(id) }
-  }, [])
-
-  // Poll active job
-  useEffect(() => {
-    if (!activeJob || TERMINAL_STATUSES.includes(activeJob.status)) return
-    let failures = 0
-    const id = setInterval(async () => {
-      try {
-        const j = await api.job(activeJob.job_id)
-        failures = 0
-        setActiveJob(j)
-      } catch (e) {
-        failures += 1
-        if (e.message.startsWith('404') || failures >= 5) {
-          setActiveJob((prev) =>
-            prev ? { ...prev, status: 'failed', message: 'Lost contact with job' } : prev
-          )
-        }
-      }
-    }, 1000)
-    return () => clearInterval(id)
-  }, [activeJob])
-
-  const handleFiles = async (files) => {
-    if (!files || files.length === 0) return
-    if (jobBusy) return
-    if (!device.connected) {
-      setActionError('No Walkman detected')
-      return
-    }
-    try {
-      const { job_id } = await api.upload(Array.from(files))
-      setActiveJob({ job_id, status: 'pending', progress: 0, message: 'Queued', log_tail: [] })
-    } catch (e) {
-      setActionError(e.message)
-    }
-  }
-
-  const onDrop = (e) => {
-    e.preventDefault()
-    setDragOver(false)
-    if (jobBusy) return
-    handleFiles(e.dataTransfer.files)
-  }
-
-  const onRemove = async (id) => {
-    if (jobBusy || pendingDeletes.has(id)) return
-    setPendingDeletes((prev) => {
-      const next = new Set(prev)
-      next.add(id)
-      return next
-    })
-    try {
-      await api.deleteTrack(id)
-      setTracks((t) => t.filter((x) => x.id !== id))
-    } catch (e) {
-      setActionError(e.message)
-    } finally {
-      setPendingDeletes((prev) => {
-        const next = new Set(prev)
-        next.delete(id)
-        return next
-      })
-    }
-  }
-
-  const usagePct = device.total_bytes
-    ? ((device.total_bytes - device.free_bytes) / device.total_bytes) * 100
-    : 0
-
-  return (
-    <div className="min-h-screen px-6 py-8 md:px-12 md:py-12">
-      {/* Header */}
-      <header className="flex items-end justify-between border-b border-line pb-6 mb-10">
-        <div>
-          <div className="font-display text-[10px] tracking-[0.3em] text-muted">
-            UTILITY · v0.1 · LOCAL
-          </div>
-          <h1 className="font-display text-3xl md:text-5xl font-bold tracking-tight mt-2">
-            WALKMAN<span className="text-amber">·</span>BRIDGE
-          </h1>
-        </div>
-        <div className="hidden md:flex flex-col items-end font-display text-[10px] tracking-[0.2em] text-muted">
-          <div>NW-S705F · TRANSFER UTILITY</div>
-          <div>VIA JSYMPHONIC</div>
-        </div>
-      </header>
-
-      {/* Error strips */}
-      {pollError && (
-        <div className="mb-6 border border-crimson/40 bg-crimson/5 px-4 py-3 font-display text-xs text-crimson">
-          ERR · {pollError}
-        </div>
-      )}
-      {actionError && (
-        <div className="mb-6 flex items-center justify-between gap-4 border border-crimson/40 bg-crimson/5 px-4 py-3 font-display text-xs text-crimson">
-          <span>ERR · {actionError}</span>
-          <button
-            onClick={() => setActionError(null)}
-            aria-label="Dismiss error"
-            className="font-display text-sm leading-none text-crimson hover:opacity-60 transition-opacity"
-          >
-            ×
-          </button>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Device panel */}
-        <section className="lg:col-span-1 border border-line bg-panel p-6">
-          <div className="font-display text-[10px] tracking-[0.3em] text-muted mb-4">
-            DEVICE
-          </div>
-          <div className="flex items-center gap-3 mb-6">
-            <span
-              className={`pulse-dot inline-block w-2 h-2 rounded-full ${
-                device.connected ? 'bg-cyan' : 'bg-muted'
-              }`}
-            />
-            <span className="font-display text-sm">
-              {device.connected ? 'CONNECTED' : 'NO DEVICE'}
-            </span>
-          </div>
-
-          {device.connected ? (
-            <dl className="space-y-3 font-display text-xs">
-              <Row k="MOUNT" v={device.mount_path} />
-              <Row k="TRACKS" v={device.track_count?.toString() ?? '—'} />
-              <Row k="FREE" v={fmtBytes(device.free_bytes)} />
-              <Row k="TOTAL" v={fmtBytes(device.total_bytes)} />
-              <div className="pt-2">
-                <div className="h-1 bg-line relative overflow-hidden">
-                  <div
-                    className="absolute inset-y-0 left-0 bg-amber"
-                    style={{ width: `${usagePct}%` }}
-                  />
-                </div>
-                <div className="mt-1 text-[10px] tracking-[0.2em] text-muted">
-                  {usagePct.toFixed(1)}% USED
-                </div>
-              </div>
-            </dl>
-          ) : (
-            <div className="font-body text-sm text-muted leading-relaxed">
-              Plug in your NW-S705F. It will mount as a USB drive and appear
-              here within a few seconds.
-            </div>
-          )}
-        </section>
-
-        {/* Dropzone + Job */}
-        <section className="lg:col-span-2 space-y-6">
-          <div
-            onDragOver={(e) => { e.preventDefault(); if (!jobBusy) setDragOver(true) }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={onDrop}
-            onClick={() => { if (!jobBusy) fileInput.current?.click() }}
-            className={`border-2 border-dashed p-12 text-center cursor-pointer transition-colors ${
-              dragOver
-                ? 'border-amber bg-amber/5 drop-active'
-                : 'border-line hover:border-muted bg-panel'
-            } ${!device.connected || jobBusy ? 'opacity-40 pointer-events-none' : ''}`}
-          >
-            <input
-              ref={fileInput}
-              type="file"
-              multiple
-              accept="audio/*,.flac,.m4a,.ogg,.wav,.aac,.opus"
-              className="hidden"
-              disabled={jobBusy}
-              onChange={(e) => {
-                handleFiles(Array.from(e.target.files))
-                e.target.value = ''
-              }}
-            />
-            <div className="font-display text-[10px] tracking-[0.3em] text-muted mb-3">
-              DROP AUDIO HERE
-            </div>
-            <div className="font-display text-2xl mb-2">+ TRANSFER</div>
-            <div className="font-body text-xs text-muted">
-              FLAC · M4A · OGG · WAV · MP3 → normalized to MP3 192k 44.1kHz
-            </div>
-          </div>
-
-          {jobBusy && (
-            <div className="font-display text-[10px] tracking-[0.2em] text-amber">
-              TRANSFER IN PROGRESS · NEW UPLOADS DISABLED
-            </div>
-          )}
-
-          {/* Active job */}
-          {activeJob && (
-            <div className="border border-line bg-panel p-6">
-              <div className="flex items-center justify-between mb-4">
-                <div className="font-display text-[10px] tracking-[0.3em] text-muted">
-                  JOB · {activeJob.job_id.slice(0, 8)}
-                </div>
-                <div
-                  className={`font-display text-[10px] tracking-[0.3em] ${
-                    activeJob.status === 'done'
-                      ? 'text-cyan'
-                      : activeJob.status === 'failed'
-                      ? 'text-crimson'
-                      : 'text-amber'
-                  }`}
-                >
-                  {activeJob.status?.toUpperCase()}
-                </div>
-              </div>
-              <div className="h-1 bg-line relative overflow-hidden mb-3">
-                <div
-                  className="absolute inset-y-0 left-0 bg-amber transition-all"
-                  style={{ width: `${(activeJob.progress || 0) * 100}%` }}
-                />
-              </div>
-              <div className="font-body text-sm mb-4">{activeJob.message}</div>
-              <pre className="font-display text-[11px] text-muted bg-bg p-3 max-h-40 overflow-auto border border-line whitespace-pre-wrap">
-                {(activeJob.log_tail || []).join('\n') || '—'}
-              </pre>
-            </div>
-          )}
-        </section>
-      </div>
-
-      {/* Track list */}
-      <section className="mt-10 border border-line bg-panel">
-        <div className="flex items-center justify-between border-b border-line px-6 py-4">
-          <div className="font-display text-[10px] tracking-[0.3em] text-muted">
-            ON DEVICE · {tracks.length} TRACK{tracks.length === 1 ? '' : 'S'}
-          </div>
-        </div>
-        {tracks.length === 0 ? (
-          <div className="px-6 py-12 text-center font-body text-sm text-muted">
-            {device.connected ? 'No tracks. Drop audio above to transfer.' : 'Connect device to view tracks.'}
-          </div>
-        ) : (
-          <ul className="divide-y divide-line">
-            {tracks.map((t) => (
-              <li
-                key={t.id}
-                className="grid grid-cols-12 gap-4 px-6 py-3 items-center hover:bg-line/30 transition-colors group"
-              >
-                <span className="col-span-1 font-display text-[10px] text-muted">
-                  {t.id}
-                </span>
-                <span className="col-span-5 font-body text-sm truncate">{t.title}</span>
-                <span className="col-span-3 font-body text-sm text-muted truncate">{t.artist}</span>
-                <span className="col-span-2 font-body text-sm text-muted truncate">{t.album}</span>
-                <button
-                  onClick={() => onRemove(t.id)}
-                  disabled={jobBusy || pendingDeletes.has(t.id)}
-                  title={jobBusy ? 'Removal disabled while a transfer job is running' : undefined}
-                  className={`col-span-1 font-display text-[10px] tracking-[0.2em] text-right transition-opacity ${
-                    pendingDeletes.has(t.id)
-                      ? 'text-muted opacity-60 cursor-wait'
-                      : jobBusy
-                      ? 'text-muted opacity-0 group-hover:opacity-40 cursor-not-allowed'
-                      : 'text-muted opacity-0 group-hover:opacity-100 hover:text-crimson'
-                  }`}
-                >
-                  {pendingDeletes.has(t.id) ? 'REMOVING…' : 'REMOVE'}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <footer className="mt-10 font-display text-[10px] tracking-[0.3em] text-muted text-center">
-        BIND 127.0.0.1 · NO TELEMETRY · LOCAL PROCESS ONLY
-      </footer>
-    </div>
-  )
+  const product = window.walkmanBridge?.product || health?.product
+  useEffect(() => { document.title = product === 'player' ? 'Red Lotus Player' : 'Walkman Bridge' }, [product])
+  if (!health || !['bridge', 'player'].includes(product)) return <div className="startup"><Brand product={product || 'bridge'} /><div><Icon name="disc" size={42} /><h1>Waking the audio system.</h1><p role="status">{error || 'Connecting to your local media service…'}</p></div></div>
+  return <Workspace key={product} product={product} version={health.version} session={session} />
 }
 
-function Row({ k, v }) {
-  return (
-    <div className="flex items-baseline justify-between gap-4">
-      <dt className="text-muted tracking-[0.2em] text-[10px]">{k}</dt>
-      <dd className="text-ink truncate text-right">{v}</dd>
-    </div>
-  )
+function Workspace({ product, version, session }) {
+  const [items, setItems] = useState([]), [quota, setQuota] = useState(null)
+  const [device, setDevice] = useState({ connected: false }), [tracks, setTracks] = useState([]), [etag, setEtag] = useState(null)
+  const [jobs, setJobs] = useState([]), [operations, setOperations] = useState({ busy: false }), [pending, setPending] = useState(false)
+  const [error, setError] = useState(null), [pollError, setPollError] = useState(null), [jobError, setJobError] = useState(null), [notice, setNotice] = useState(null)
+  const [selection, setSelection] = useState(new Set()), [backupBusy, setBackupBusy] = useState(false)
+  const [backupAck, setBackupAck] = useState(() => readPreference('nightops:backup-ack', false))
+  const [deleteTrack, setDeleteTrack] = useState(null)
+  const [linkDialog, setLinkDialog] = useState(null)
+  const [musicManager, setMusicManager] = useState(null)
+  const [bridgeView, setBridgeView] = useState('listening')
+  const [dragOver, setDragOver] = useState(false)
+  const [showQueue, setShowQueue] = useState(() => readPreference(`nightops:${product}:queue-wing`, true))
+  const [showEq, setShowEq] = useState(() => readPreference(`nightops:${product}:eq-wing`, false))
+  const [visualMode, setVisualMode] = useState(() => readPreference(`nightops:${product}:visual`, 'spectrum'))
+  const fileInput = useRef(null), latest = useRef({}), mounted = useRef(true), prepareJobs = useRef(new Map()), dragDepth = useRef(0)
+  const isBridge = product === 'bridge'
+  const busy = pending || backupBusy || processingBusy(operations) || jobs.some(job => !terminal(job))
+  const currentJob = jobs.find(job => !terminal(job)) || jobs[0]
+
+  const addJob = (job_id, kind) => setJobs(previous => [{ job_id, kind, status: 'pending', phase: 'queued', progress: 0, files: [], message: 'Operation admitted' }, ...previous.filter(job => job.job_id !== job_id)].slice(0, 12))
+  const prepare = async id => {
+    try { const result = await api.prepare(id); prepareJobs.current.set(result.job_id, id); addJob(result.job_id, 'prepare') }
+    catch (e) { setError(`Lossless preparation failed: ${e.message}`) }
+  }
+  const player = usePlayer(items, product, prepare, session)
+  latest.current = { jobs, player, items, busy }
+
+  const refresh = async () => {
+    const queue = await api.queue()
+    if (!mounted.current) return
+    const next = queue.items || []
+    setItems(next); setQuota(queue.quota)
+    if (Array.isArray(queue.playlists)) latest.current.player.syncPlaylists(queue.playlists)
+    setSelection(previous => new Set([...previous].filter(id => next.some(item => item.id === id && transferable(item)))))
+    if (latest.current.player.item && !next.some(item => item.id === latest.current.player.id)) await latest.current.player.forget()
+    const ops = await api.operations()
+    if (!mounted.current) return
+    setOperations(ops)
+    if (isBridge) {
+      const d = await api.device()
+      if (!mounted.current) return
+      setDevice(d)
+      if (d.connected) {
+        const ledger = await api.tracks()
+        if (!mounted.current) return
+        setTracks(ledger.items || []); setEtag(ledger.etag)
+      } else { setTracks([]); setEtag(null) }
+    }
+  }
+
+  useEffect(() => {
+    mounted.current = true
+    let timer
+    const poll = async () => {
+      try { await refresh(); if (mounted.current) setPollError(null) }
+      catch (e) { if (mounted.current) setPollError(`Connection interrupted: ${e.message}`) }
+      if (mounted.current) timer = setTimeout(poll, 3000)
+    }
+    poll()
+    api.latestJob().then(job => { if (mounted.current && job) setJobs(previous => previous.some(existing => existing.job_id === job.job_id) ? previous : [...previous, job]) }).catch(e => { if (mounted.current) setJobError(`Cannot recover previous operation: ${e.message}`) })
+    return () => { mounted.current = false; clearTimeout(timer) }
+  }, [])
+
+  useEffect(() => {
+    let timer, alive = true
+    const poll = async () => {
+      const active = latest.current.jobs.filter(job => !terminal(job))
+      for (const job of active) {
+        try {
+          const result = await api.job(job.job_id)
+          if (!alive) return
+          setJobError(null)
+          setJobs(previous => previous.map(existing => existing.job_id === result.job_id ? result : existing))
+          if (terminal(result)) {
+            await refresh()
+            const mediaId = prepareJobs.current.get(result.job_id)
+            if (mediaId) {
+              prepareJobs.current.delete(result.job_id)
+              // Refresh state is committed before retry so its strict ready gate
+              // evaluates the cleared derivative rather than a scanning record.
+              if (result.status === 'done') setTimeout(() => { if (mounted.current) latest.current.player.retryPrepared(mediaId) }, 0)
+              else { latest.current.player.cancelPrepared(mediaId); setError(result.message || 'Lossless preparation did not complete.') }
+            }
+          }
+        } catch (e) { if (alive) setJobError(`Operation status unavailable: ${e.message}. Its outcome is not yet known.`) }
+      }
+      if (alive) timer = setTimeout(poll, 1000)
+    }
+    poll()
+    return () => { alive = false; clearTimeout(timer) }
+  }, [])
+
+  useEffect(() => {
+    const enter = event => { event.preventDefault(); if (event.dataTransfer?.types?.includes('Files')) { dragDepth.current++; setDragOver(true) } }
+    const leave = event => { event.preventDefault(); dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragOver(false) }
+    const over = event => event.preventDefault()
+    const drop = event => { event.preventDefault(); dragDepth.current = 0; setDragOver(false); if (!linkDialog && !musicManager) importFiles(event.dataTransfer.files) }
+    const keyboard = event => {
+      if (event.target.closest('input, textarea, select, button, summary, [contenteditable="true"]') || event.altKey || event.ctrlKey || event.metaKey || deleteTrack || linkDialog || musicManager) return
+      if (event.code === 'Space') { event.preventDefault(); latest.current.player.toggle() }
+    }
+    window.addEventListener('dragenter', enter); window.addEventListener('dragleave', leave); window.addEventListener('dragover', over); window.addEventListener('drop', drop); window.addEventListener('keydown', keyboard)
+    return () => { window.removeEventListener('dragenter', enter); window.removeEventListener('dragleave', leave); window.removeEventListener('dragover', over); window.removeEventListener('drop', drop); window.removeEventListener('keydown', keyboard) }
+  }, [deleteTrack, linkDialog, musicManager])
+
+  const action = async task => {
+    if (latest.current.busy) return
+    setPending(true); setError(null)
+    try { await task(); await refresh() } catch (e) { setError(e.message) } finally { setPending(false) }
+  }
+  const importFiles = files => {
+    const list = Array.from(files || [])
+    if (!list.length) return
+    if (latest.current.busy) { setError('Wait for the current operation to finish before adding files.'); return }
+    action(async () => { const result = await api.importFiles(list); addJob(result.job_id, 'import') })
+  }
+  const importLink = async url => {
+    if (latest.current.busy) throw new Error('Wait for the current operation to finish before importing another track.')
+    setPending(true); setError(null)
+    try {
+      const result = await api.importLink(url)
+      addJob(result.job_id, 'link_import')
+      // The operation panel polls durable states after admission. A later
+      // queue refresh failure must not encourage duplicate link submission.
+    } catch (e) { setError(e.message); throw e }
+    finally { setPending(false) }
+  }
+  const rescan = id => action(async () => { if (player.id === id) await player.stop(); const result = await api.rescan(id); addJob(result.job_id, 'rescan') })
+  const remove = id => action(() => latest.current.player.removeFromQueue(id))
+  const move = (id, direction) => action(async () => { const next = moveTrack(latest.current.items, id, direction); await api.orderQueue(next.map(item => item.id)); setItems(next) })
+  const transfer = ids => action(async () => { const result = await api.transfer(ids); addJob(result.job_id, 'transfer'); setSelection(new Set()) })
+  const backup = async () => {
+    if (busy) return
+    setBackupBusy(true); setError(null); setNotice(null)
+    try {
+      const result = await api.backup(), path = backupSuccessPath(result)
+      if (result.ok && path) { setNotice(backupSavedMessage(path)); setBackupAck(true); storePreference('nightops:backup-ack', true) }
+      else setError('The service did not confirm a completed backup. Check the operation before transferring.')
+    } catch (e) { setError(backupFailureMessage(e)) } finally { setBackupBusy(false); refresh().catch(e => setPollError(e.message)) }
+  }
+  const confirmDelete = () => {
+    const track = deleteTrack
+    setDeleteTrack(null)
+    action(async () => { await api.deleteTrack(track.id, etag); setNotice(`Removed ${track.title || 'track'} from the device.`) })
+  }
+  const available = items.some(playable)
+  const queueProps = { items, player, busy, quota, onImport: () => fileInput.current?.click(), onImportLink: event => { if (!latest.current.busy) setLinkDialog({ opener: event.currentTarget }) }, onRemove: remove, onMove: move, onRescan: rescan }
+  const changeWing = (name, value) => { (name === 'queue' ? setShowQueue : setShowEq)(value); storePreference(`nightops:${product}:${name}-wing`, value) }
+  const changeVisual = () => { const next = { spectrum: 'waveform', waveform: 'off', off: 'spectrum' }[visualMode] || 'spectrum'; setVisualMode(next); storePreference(`nightops:${product}:visual`, next) }
+  const openManager = event => setMusicManager({ opener: event.currentTarget })
+  const removeManagedMedia = async id => {
+    if (latest.current.busy) throw new Error('Wait for the current operation to finish before removing music.')
+    await latest.current.player.removeFromQueue(id)
+    await refresh()
+  }
+  const stagePlaylist = ids => {
+    setSelection(new Set(ids.filter(id => items.some(item => item.id === id && transferable(item)))))
+    setBridgeView('transfer')
+  }
+
+  return <div className={`nightops-app ${isBridge ? 'bridge-composition' : 'player-composition'}`}>
+    <Brand product={product} version={version} />
+    <input ref={fileInput} type="file" multiple accept="audio/*,.mp3,.flac,.wav,.m4a,.aac,.ogg,.opus,.wma,.aif,.aiff" hidden onChange={e => { importFiles(e.target.files); e.target.value = '' }} />
+    {(error || pollError || notice) && <div className={`notice-strip ${error || pollError ? 'error' : ''}`} role={error ? 'alert' : 'status'}><span>{error || pollError || notice}</span><button aria-label="Dismiss notification" onClick={() => { setError(null); setNotice(null) }}>{pollError && !error && !notice ? 'Reconnecting…' : '×'}</button></div>}
+    {operations.draining && <div className="notice-strip" role="status">Finishing admitted operations before closing… Playback has stopped.</div>}
+    {isBridge && <nav className="workspace-tabs" aria-label="Bridge views">{[['listening', 'Listening'], ['device', 'Walkman'], ['transfer', 'Transfer']].map(([view, label]) => <button key={view} className={bridgeView === view ? 'active' : ''} aria-pressed={bridgeView === view} onClick={() => setBridgeView(view)}>{label}{view === 'transfer' && selection.size > 0 && <span>{selection.size}</span>}</button>)}<span className={device.connected ? 'connection connected' : 'connection'}><i />{device.connected ? device.model || 'CONNECTED' : 'NO DEVICE'}</span></nav>}
+    {!isBridge && <nav className="player-wing-controls" aria-label="Player panels"><button className={showQueue ? 'active' : ''} aria-pressed={showQueue} onClick={() => changeWing('queue', !showQueue)}>Playback queue</button><span>CRAFTED FOR THE LISTENING HOURS</span><button className={showEq ? 'active' : ''} aria-pressed={showEq} onClick={() => changeWing('eq', !showEq)}>Equalizer</button></nav>}
+    <main tabIndex={-1} className={isBridge ? `bridge-workspace view-${bridgeView}` : `player-workspace ${showQueue ? 'has-queue' : ''} ${showEq ? 'has-eq' : ''}`}>
+      {(currentJob || jobError) && <div className="workspace-operation"><JobPanel job={currentJob} pollingError={jobError} /></div>}
+      {isBridge ? <>
+        {bridgeView === 'listening' && <><div className="listening-column"><NowPlaying player={player} available={available} retro mode={visualMode} onMode={changeVisual} /><div className="bridge-eq-toggle"><button className="text-button" aria-expanded={showEq} onClick={() => changeWing('eq', !showEq)}>{showEq ? '− Hide' : '+ Show'} equalizer</button><span className="micro">{player.dsp.enabled ? 'PROCESSING ON' : 'DSP BYPASSED'}</span></div>{showEq && <Equalizer player={player} />}</div><Queue {...queueProps} /></>}
+        {bridgeView !== 'listening' && device.connected && !backupAck && <div className="backup-warning"><Icon name="usb" size={18} /><span><strong>Protect the music already on your Walkman.</strong> Create a full backup before your first transfer.</span><button disabled={busy} onClick={backup}>Back up now</button><button onClick={() => { setBackupAck(true); storePreference('nightops:backup-ack', true) }}>I already have a backup</button></div>}
+        {bridgeView === 'device' && <DevicePanel device={device} tracks={tracks} etag={etag} busy={busy} onBackup={backup} backupBusy={backupBusy} onDelete={setDeleteTrack} />}
+        {bridgeView === 'transfer' && <StagingPanel items={items} selection={selection} onSelection={setSelection} onTransfer={transfer} onRescan={rescan} onImport={queueProps.onImport} onImportLink={queueProps.onImportLink} busy={busy} connected={device.connected} />}
+      </> : <>
+        {showQueue && <div className="player-wing queue-wing"><Queue {...queueProps} /></div>}
+        <NowPlaying player={player} available={available} retro mode={visualMode} onMode={changeVisual} />
+        {showEq && <div className="player-wing eq-wing"><Equalizer player={player} /></div>}
+      </>}
+    </main>
+    <footer className={isBridge ? 'persistent-transport' : 'player-statusbar'}>
+      {isBridge ? <div className="footer-track"><Icon name="disc" size={24} /><div><strong>{player.item?.title || player.item?.name || 'No track selected'}</strong><small>{player.item?.artist || 'Red Lotus'}</small></div></div> : <span className="library-count"><i className="status-light" />{items.filter(playable).length} CLEARED TRACKS</span>}
+      <Transport player={player} available={available} compact />
+      {isBridge && <><time>{timeLabel(player.position)} / {timeLabel(player.duration)}</time><Volume player={player} /></>}
+      {player.activePlaylist && <div className="playlist-context"><span title={player.activePlaylist.name}>{player.activePlaylist.name}</span><button className="text-button" onClick={player.clearPlaylist}>All music</button></div>}
+      <button className="button manage-music" onClick={openManager}>Manage music</button>
+    </footer>
+    {dragOver && <div className="drop-overlay"><Icon name="plus" size={48} /><strong>Drop into your listening queue.</strong><span>Files are copied locally and scanned before playback.</span></div>}
+    {deleteTrack && <DeleteDialog track={deleteTrack} onCancel={() => setDeleteTrack(null)} onConfirm={confirmDelete} />}
+    {linkDialog && <LinkImportDialog opener={linkDialog.opener} onClose={() => setLinkDialog(null)} onImport={importLink} />}
+    {musicManager && <MusicManager {...musicManager} onClose={() => setMusicManager(null)} onChanged={refresh} product={product} items={items} onPlayPlaylist={player.setPlaylist} onRemoveMedia={removeManagedMedia} onStagePlaylist={stagePlaylist} busy={busy} deviceConnected={device.connected} deviceTracks={tracks} />}
+  </div>
+}
+
+function DeleteDialog({ track, onCancel, onConfirm }) {
+  const dialog = useRef(null)
+  useEffect(() => { dialog.current.showModal(); return () => dialog.current?.close() }, [])
+  return <dialog ref={dialog} className="delete-dialog" onCancel={onCancel}><h2>Remove from your Walkman?</h2><p>“{track.title || 'Untitled track'}” will be removed from the device database. Keep a verified backup before making changes.</p><div><button className="button" autoFocus onClick={onCancel}>Keep track</button><button className="button danger" onClick={onConfirm}>Remove from device</button></div></dialog>
 }

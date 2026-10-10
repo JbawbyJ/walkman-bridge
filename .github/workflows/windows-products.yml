@@ -1,0 +1,140 @@
+name: Windows products
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-package:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13.15'
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: '21.0.12+8'
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.400'
+      - name: Install locked build dependencies
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node node_modules/electron/install.js
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m pip install -r backend/requirements.txt -c packaging/python-runtime-constraints.txt -r backend/requirements-dev.txt pip-audit
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force packaging/build | Out-Null
+      - name: Audit runtime dependencies
+        run: |
+          npm audit --audit-level=high
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend audit --audit-level=high
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m pip_audit -r packaging/python-runtime-constraints.txt --no-deps --disable-pip --format json --output packaging/build/runtime-audit.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Backend, browser logic and broker tests
+        run: |
+          python -m pytest backend/tests -q -p no:cacheprovider
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python packaging/test_stage.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node --test frontend/src/*.test.js frontend/tests/*.test.mjs electron/*.test.cjs packaging/*.test.cjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Native helper tests and self-contained publish
+        run: |
+          dotnet run --project scanner-helper/ScannerHelper.Tests/ScannerHelper.Tests.csproj -c Release
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet publish scanner-helper/ScannerHelper/ScannerHelper.csproj -c Release -r win-x64 --self-contained true -o scanner-helper/artifacts/win-x64
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build and test the real headless Java engine
+        run: |
+          python packaging/provision-engine.py
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          mvn -B -Dproject.build.sourceEncoding=UTF-8 -f .ci/jsymphonic/pom.xml package
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force backend/vendor | Out-Null
+          $Jar = Get-ChildItem .ci/jsymphonic/target/*-jar-with-dependencies.jar | Select-Object -First 1
+          if (-not $Jar) { throw 'Headless engine artifact is missing' }
+          Copy-Item -LiteralPath $Jar.FullName -Destination backend/vendor/jsymphonic.jar
+      - name: Build both versioned installers
+        run: |
+          ./packaging/build-products.ps1 -Product all -Python (Get-Command python).Source -JdkHome $env:JAVA_HOME -JSymphonicSource "$PWD/.ci/jsymphonic"
+      - name: Actual Electron renderer, lifecycle and DSP acceptance
+        run: |
+          node packaging/verify-asar.cjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+          $ElectronPath = Join-Path $PWD 'node_modules/electron/dist/electron.exe'
+          foreach ($Harness in @('frontend/tests/renderer-smoke.cjs', 'frontend/tests/media-import-smoke.cjs', 'frontend/tests/management-smoke.cjs', 'frontend/tests/resize-smoke.cjs', 'electron/tests/lifecycle.electron.cjs', 'frontend/tests/dsp-offline.cjs')) {
+            $Acceptance = Start-Process -FilePath $ElectronPath -ArgumentList $Harness -WorkingDirectory $PWD -WindowStyle Hidden -Wait -PassThru
+            if ($Acceptance.ExitCode -ne 0) { throw "Electron acceptance failed: $Harness (exit $($Acceptance.ExitCode))" }
+          }
+      - name: Real ffmpeg and Java API roundtrip on a temporary mock volume
+        run: |
+          python packaging/probe-resources.py dist_electron/bridge/win-unpacked/resources --output packaging/build/bridge-resources-probe.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python packaging/probe-resources.py dist_electron/player/win-unpacked/resources --output packaging/build/player-resources-probe.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $env:NIGHTOPS_REAL_MOCK = '1'
+          $env:WALKMAN_BRIDGE_JAVA = "$env:JAVA_HOME/bin/java.exe"
+          $env:WALKMAN_BRIDGE_FFMPEG = "$PWD/packaging/build/redlotus/bridge/ffmpeg/ffmpeg.exe"
+          New-Item -ItemType Directory -Force deno | Out-Null
+          Copy-Item -LiteralPath packaging/build/redlotus/player/deno/deno.exe -Destination deno/deno.exe
+          python -m pytest backend/tests/test_real_mock.py backend/tests/test_metadata.py backend/tests/test_metadata_device_roundtrip.py backend/tests/test_link_import.py -q -p no:cacheprovider
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Install, smoke and uninstall both products
+        run: |
+          $Version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          ./packaging/smoke-install.ps1 -Product bridge -Installer "dist_electron/bridge/Walkman-Bridge-Setup-$Version-x64.exe"
+          ./packaging/smoke-install.ps1 -Product player -Installer "dist_electron/player/Red-Lotus-Player-Setup-$Version-x64.exe"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: red-lotus-windows-verification
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            dist_electron/*/*Setup*.exe
+            dist_electron/*/SHA256SUMS.txt
+            packaging/build/runtime-audit.json
+            packaging/build/*-resources-probe.json
+            packaging/build/redlotus/*/runtime-manifest.json
+            packaging/build/install-smoke/*/result.json
+            packaging/build/install-smoke/*/local-data/*/redlotus.log
+            packaging/build/electron-lifecycle-acceptance/proof.json
+            packaging/build/asar-proof.json
+            frontend/test-output/*.json
+            frontend/test-output/*.png
+            frontend/test-output/audio/*.json
+            frontend/test-output/audio/*.wav
+            frontend/test-output/media-import/*.json
+            frontend/test-output/media-import/*.png
+            frontend/test-output/management/*.json
+            frontend/test-output/management/*.png
+            frontend/test-output/resize*/**/*
+            packaging/build/management-upgrade/*.json
+            packaging/build/media-upgrade/*.json

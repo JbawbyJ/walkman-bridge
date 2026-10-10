@@ -1,0 +1,11 @@
+W-BACKUP t_cfeb54e7 — walkman-bridge only.
+
+Implement POST /api/backup:
+- Resolve device via MOCK_DEVICE_PATH or existing device.py detection.
+- Copy the device tree including OMGAUDIO into a dated folder under a local backups dir (not on the Walkman).
+- Never mutate OMGAUDIO on the device. Read-only copy.
+- Return JSON { ok, dest, bytes } .
+- Add backend/tests/test_backup.py — pytest must include NEW tests (verify is not lying-green on old suite).
+- Do not rewrite Electron, do not touch jsymphonic repo, no live USB writes, no T3.
+
+If a file is already dirty in the tree, do not revert unrelated WIP.

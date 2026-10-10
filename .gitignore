@@ -10,6 +10,7 @@ backend/vendor/*.jar
 # Node / frontend build
 node_modules/
 frontend/dist/
+dist_electron/
 
 # Runtime work dirs
 uploads/
@@ -24,3 +25,19 @@ Thumbs.db
 packaging/build/
 packaging/dist/
 packaging/.cache/
+.ci/
+deno/
+
+# Hardware-proof artifacts kept local: Walkman device backups (personal audio),
+# test audio, runtime state DBs and caches. Only result.json summaries are tracked.
+hardware-proof/**/backups/
+hardware-proof/pre-playlist-backups/
+hardware-proof/**/state/
+hardware-proof/**/state-*/
+hardware-proof/**/postflight-state/
+hardware-proof/*.wav
+hardware-proof/playlist-prewrite-backup.json
+*.OMA
+*.sqlite
+# Superseded jsymphonic source snapshot (runtime-lock pins the nightops-0.4.0 archive)
+packaging/sources/jsymphonic-628d5b7e481d-src.zip

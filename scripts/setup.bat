@@ -84,6 +84,24 @@ if exist "%ROOT%\frontend\dist\index.html" (
     echo  [OK] Dashboard built.
 )
 
+rem --- Electron (laptop GUI) ------------------------------------------
+if exist "%ROOT%\node_modules\electron\package.json" (
+    echo  [OK] Electron already installed - skipping.
+) else (
+    echo  [..] Installing Electron at repo root ...
+    pushd "%ROOT%"
+    call npm install
+    if errorlevel 1 (
+        popd
+        echo  [!] npm install at repo root failed. Check your internet connection.
+        echo.
+        pause
+        exit /b 1
+    )
+    popd
+    echo  [OK] Electron installed.
+)
+
 rem --- Next steps -----------------------------------------------------
 echo.
 echo  ================================================
@@ -100,8 +118,10 @@ if exist "%ROOT%\backend\vendor\jsymphonic.jar" (
 ) else (
     echo       [!] It is not there yet.
 )
-echo    2. Double-click START-WALKMAN-BRIDGE.bat in the project folder
-echo       ^(%ROOT%^) to launch the dashboard.
+echo    2. From the project folder, run:
+echo         npm run electron
+echo       That opens Night Ops as a laptop window (no browser tab).
+echo       Legacy: double-click START-WALKMAN-BRIDGE.bat for uvicorn + browser.
 echo.
 pause
 endlocal

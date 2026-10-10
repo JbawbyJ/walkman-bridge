@@ -1,0 +1,17 @@
+{
+  "status": "renamed",
+  "renamed": true,
+  "playlist": {
+    "id": "4",
+    "name": "Red Lotus Check",
+    "track_ids": [
+      "11",
+      "1"
+    ]
+  },
+  "backup": "hardware-proof\\branding-0.4.1\\state\\backups\\2026-09-06-160309",
+  "changed_paths": [
+    "OMGAUDIO/03GINF22.DAT"
+  ],
+  "audio_and_other_files_unchanged": true
+}

@@ -1,0 +1,34 @@
+{
+  "python": {
+    "version": "3.13.15",
+    "filename": "python-3.13.15-embed-amd64.zip",
+    "url": "https://www.python.org/ftp/python/3.13.15/python-3.13.15-embed-amd64.zip",
+    "sha256": "d1f04d990aee1253d8569e8e5104e30fa9f5fa830899f14843448872d936a2cf"
+  },
+  "ffmpeg": {
+    "version": "9.0.1",
+    "filename": "ffmpeg-9.0.1-essentials_build.zip",
+    "url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.1-essentials_build.zip",
+    "sha256": "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9"
+  },
+  "deno": {
+    "version": "2.9.5",
+    "filename": "deno-2.9.5-x86_64-pc-windows-msvc.zip",
+    "url": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip",
+    "sha256": "171efab55ac6b9881fd53ee4c20f8bf3bb1340ffc618483746909014db12216a"
+  },
+  "jdk": {
+    "version": "21.0.12",
+    "filename": "OpenJDK21U-jdk_x64_windows_hotspot_21.0.12_8.zip",
+    "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jdk_x64_windows_hotspot_21.0.12_8.zip",
+    "sha256": "9ba963ee2371874a74185d18bc7bb2ab9407df7683300855ed7606e0662321d0"
+  },
+  "jsymphonic": {
+    "repository": "JbawbyJ/jsymphonic",
+    "commit": "628d5b7e481d223ba8b110dce5801d5351e3c323",
+    "source_archive": "sources/jsymphonic-nightops-0.4.0-src.zip",
+    "sha256": "424c7878ae1adda012e5e7aed195b48c84c8a585d9f36d59182e069a1f00e569",
+    "source_revision": "nightops-0.4.0",
+    "source_description": "Release snapshot including local changes on the recorded base commit; archive SHA-256 identifies the complete source."
+  }
+}
