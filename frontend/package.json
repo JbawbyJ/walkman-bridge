@@ -18,7 +18,12 @@
     "@vitejs/plugin-react": "6.1.1",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
+    "braces": "file:overrides/braces",
     "tailwindcss": "^3.4.14",
     "vite": "8.2.2"
+  },
+  "overrides": {
+    "braces": "$braces",
+    "source-map-js": "1.2.2"
   }
 }
