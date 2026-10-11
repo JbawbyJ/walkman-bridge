@@ -364,6 +364,13 @@ jobs:
           npm ci
           node node_modules/electron/install.js
           npm --prefix frontend ci
+      - name: Enable the Electron sandbox helper
+        run: |
+          # GitHub's Ubuntu image blocks unprivileged user namespaces, so Electron
+          # uses chrome-sandbox and aborts unless that helper is setuid root.
+          sandbox="node_modules/electron/dist/chrome-sandbox"
+          sudo chown root:root "$sandbox"
+          sudo chmod 4755 "$sandbox"
       - name: Run zoom matrix
         env:
           ZOOM_MATRIX_DISPLAY_READY: '1'
