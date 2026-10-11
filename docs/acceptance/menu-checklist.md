@@ -134,7 +134,7 @@ The app ledger is one list. Artist and album browsing is on the Walkman, using t
 Checked in this revision:
 
 - `backend/jsymphonic.py` raises from a fatal event’s `message`. It does not read a fatal `code`.
-- Sony playlist edits are jobs. On failure the API returns `detail.code` of `playlist_failed` or `verify_device_state` (`backend/playlists.py`). Those are not the three HeadlessCli codes below.
+- Sony playlist edits are jobs. On failure the API returns `detail.code` of `playlist_failed` or `verify_device_state` (`backend/playlists.py`). Those are not the seven HeadlessCli codes below: `PLAYLIST_REF_MISSING`, `PLAYLIST_JOURNAL_PENDING`, `PLAYLIST_SLOTS_EXHAUSTED`, `PLAYLIST_LIBRARY_NOT_LOADED`, `DEVICE_FILE_LOCKED`, `DEVICE_FILE_READ_ONLY`, and `DEVICE_ROLLBACK_FAILED`.
 - `frontend/src/api.js` copies `detail.code` onto the error object. Manage music renders `e.message` only, so that code is not shown. A failed list is prefixed `Sony playlists are unavailable:`.
 - The workspace operation panel tracks jobs it already holds (import, transfer, rescan, prepare). It does not add the playlist `job_id`. The alert in Manage music is the visible failure text.
 - This repository does not reference `playlist-repair` or `playlist-recover`.

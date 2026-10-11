@@ -43,14 +43,6 @@ closes in the middle — the note is left on the Walkman. Later playlist saves
 stop until that note is resolved. That stop is `PLAYLIST_JOURNAL_PENDING`. The
 note does not delete your songs.
 
-## Album art on the Walkman
-
-Walkman Bridge can now set or clear album art on the Walkman. Only JPEG images
-are accepted, and very large images are refused. These changes go through the
-same journal, so an interrupted change is handled by inspect and recover like
-any other. Whether the Walkman actually displays the art hasn't been confirmed
-on hardware yet.
-
 ## What not to do
 
 - Do not unplug the Walkman while a sync or playlist save is running.
@@ -118,7 +110,7 @@ If the code is `PLAYLIST_LIBRARY_NOT_LOADED`, the Walkman's music list was empty
 
 ## A file is open in another program
 
-Use these steps when the code is `DEVICE_FILE_LOCKED`. This can happen while removing songs, while a song is added or replaced, or while Recover is finishing a save.
+Use these steps when the code is `DEVICE_FILE_LOCKED`. `DEVICE_FILE_LOCKED` and `DEVICE_FILE_READ_ONLY` can come from playlist writes as well as from adding, replacing, or removing songs. This can also happen while Recover is finishing a save.
 
 Another program, such as File Explorer, a media player, or antivirus, has a file on the Walkman open. Walkman Bridge stopped and nothing was changed. Close that program and try the change again. If Walkman Bridge shows a file location on the Walkman, that is the open file.
 
