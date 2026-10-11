@@ -6,6 +6,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -62,7 +66,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python packaging/test_stage.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          node --test frontend/src/*.test.js frontend/tests/*.test.mjs electron/*.test.cjs packaging/*.test.cjs
+          node --test frontend/src/*.test.js (Get-ChildItem frontend/tests/*.test.mjs -Exclude walkman-smoke.test.mjs) electron/*.test.cjs packaging/*.test.cjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Native helper tests and self-contained publish
         run: |
@@ -139,11 +143,26 @@ jobs:
             packaging/build/management-upgrade/*.json
             packaging/build/media-upgrade/*.json
 
-  # New Bot headless checks: node --test frontend/tests/walkman-smoke.test.mjs
-  # (also picked up by npm run test:frontend once that file exists). The file
-  # is not on main yet; a missing script is a clean skip, not a failure.
+  # hashFiles() is rejected on jobs.<job_id>.if. Record it after checkout, then
+  # skip headless-smoke at job level when the script is absent.
+  headless-smoke-present:
+    runs-on: windows-2022
+    outputs:
+      present: ${{ steps.mark.outputs.present }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: mark
+        name: Check headless smoke script
+        if: hashFiles('frontend/tests/walkman-smoke.test.mjs') != ''
+        shell: pwsh
+        run: echo "present=true" >> $env:GITHUB_OUTPUT
+
   headless-smoke:
-    runs-on: windows-latest
+    needs: headless-smoke-present
+    if: needs.headless-smoke-present.outputs.present == 'true'
+    runs-on: windows-2022
     timeout-minutes: 20
     defaults:
       run:
@@ -166,12 +185,6 @@ jobs:
           $LogDir = 'packaging/build/headless-smoke'
           New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
           $Log = Join-Path $LogDir 'output.log'
-          if (-not (Test-Path -LiteralPath $Smoke)) {
-            $Note = "Headless smoke script $Smoke is absent on this revision; skipping."
-            Write-Output $Note
-            Set-Content -LiteralPath $Log -Value $Note
-            exit 0
-          }
           npm --prefix frontend ci *> $Log
           if ($LASTEXITCODE) {
             Get-Content -LiteralPath $Log
