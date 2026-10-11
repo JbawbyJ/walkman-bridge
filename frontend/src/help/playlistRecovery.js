@@ -12,7 +12,7 @@ export const PLAYLIST_RECOVERY_HELP = {
   PLAYLIST_JOURNAL_PENDING: {
     title: 'A playlist save was interrupted',
     explanation: 'A previous playlist write stopped halfway, and its unfinished record is still on the Walkman.',
-    action: 'Inspect that record, then recover it. In-app inspect and recover are coming soon.',
+    action: 'Inspect first and read the result, then recover. Only a committed save is kept; otherwise redo that edit. In-app inspect and recover are coming soon.',
     actionId: 'inspect_recover',
   },
   PLAYLIST_SLOTS_EXHAUSTED: {

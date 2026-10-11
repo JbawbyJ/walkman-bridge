@@ -21,7 +21,7 @@ the fix by reading it.
 
 | Code | In plain words | What to do |
 | --- | --- | --- |
-| `PLAYLIST_JOURNAL_PENDING` | A previous playlist save was cut off. An unfinished record is still on the Walkman. | Inspect, then recover. |
+| `PLAYLIST_JOURNAL_PENDING` | A previous playlist save was cut off. An unfinished record is still on the Walkman. | Inspect, read the result, then recover. |
 | `PLAYLIST_REF_MISSING` | A playlist still names songs that are no longer on the Walkman. | Run playlist repair. |
 | `PLAYLIST_SLOTS_EXHAUSTED` | The Walkman's playlist table is full (2048 slots). | Delete or combine playlists. |
 | No code, or any other code | The change failed, and there is no specific recovery step. | Back up, wait until the app is idle, and try once more. |
@@ -59,10 +59,11 @@ copy has been checked. If a backup is interrupted, the app shows **Verify
 device state** and does not try that write again on its own.
 
 A backup matters most when you are unsure whether the last playlist save
-finished, and before the first write to a physical Walkman. Repair and recover
-change playlist tables. They do not delete songs on the Walkman, and they do
-not delete the original files on your PC. The backup is still the way back if
-the result is not what you expected.
+finished, and before the first write to a physical Walkman. Repair changes
+playlist membership. Recover either finishes a committed save or drops an
+interrupted one. Neither deletes songs on the Walkman, and neither deletes the
+original files on your PC. The backup is still the way back if the result is
+not what you expected.
 
 ## Inspect, then recover
 
@@ -71,13 +72,17 @@ Use these steps when the code is `PLAYLIST_JOURNAL_PENDING`.
 1. Leave the Walkman plugged into the same USB port. Wait until Walkman Bridge
    is not transferring, scanning, or saving.
 2. Make a full backup and confirm it completed.
-3. Inspect the unfinished record. Inspect only reads. It reports what is
-   waiting. It does not change playlists or music.
-4. Recover after you have read that report. If the record already contains a
-   durable commit mark, recover finishes that save. If it does not, recover
-   discards the record and leaves your playlists as they were before the
-   interrupted save.
-5. Try the playlist change again only after recover has finished.
+3. Inspect first, and read the result. Inspect only reads. It reports which of
+   the two recover outcomes applies: the journal has a commit marker, or it
+   does not. It does not change playlists or music.
+4. Recover only after that result. Plain `playlist-recover` rolls the change
+   forward only when the journal has a commit marker. With no commit marker it
+   discards the journal. The interrupted change is lost, and the Walkman keeps
+   the playlists it had before that change. You may need to redo your last
+   playlist edit after recovering.
+5. Redo that playlist edit only when inspect said there was no commit marker.
+   When inspect said the commit marker was already there, recover finishes
+   that save.
 
 In-app inspect and recover are coming soon. They are not in this version.
 
@@ -133,8 +138,8 @@ Wait until the app is idle. Pass the drive the same way as the other HeadlessCli
 commands (`--device` and the drive letter). Startup is described in
 [PROTOCOL.md](../PROTOCOL.md).
 
-- `playlist-recover --inspect` reads the unfinished record and changes nothing. Run this first.
-- `playlist-recover` finishes a save that already committed, or discards a record that never committed.
+- `playlist-recover --inspect` reads the unfinished record and changes nothing. It reports whether a commit marker is present. Run this first and read that result.
+- `playlist-recover` rolls the change forward only when the journal has a commit marker. With no commit marker it discards the journal: the interrupted edit is lost, the Walkman keeps its earlier playlists, and you may need to redo that edit.
 - `playlist-repair` removes playlist lines that name songs no longer on the Walkman.
 
 Leave `.jsymphonic-playlist-transaction` on the device and let `playlist-recover` resolve it. When in-app controls arrive, they follow this same order.
