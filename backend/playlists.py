@@ -51,6 +51,12 @@ class DevicePlaylistPatchBody(StrictBody):
     track_ids: list[str] | None = Field(default=None, max_length=200)
 
 
+def shim_fatal_code(exc):
+    """Lazy import: Player packages omit jsymphonic.py."""
+    from jsymphonic import fatal_code_of
+    return fatal_code_of(exc)
+
+
 def expected_etag(request):
     value = request.headers.get('if-match')
     if not value:
@@ -134,7 +140,9 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
             response.headers['ETag'] = device_playlist_etag(volume, tracks, playlists)
             return {'items': playlists}
         except RuntimeError as exc:
-            raise HTTPException(409, str(exc)) from exc
+            code = shim_fatal_code(exc)
+            detail = {'message': str(exc), 'fatal_code': code} if code else str(exc)
+            raise HTTPException(409, detail) from exc
         finally:
             coordinator.finish(ticket)
 
@@ -204,13 +212,16 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
             raise
         except Exception as exc:
             uncertain = bool(job and job.phase == 'device_writing')
+            fatal_code = shim_fatal_code(exc)
             if job:
                 job.needs_reconcile = uncertain
                 job.update_file(job_id, state='unknown' if uncertain else 'failed', detail=str(exc),
-                    reason_code='device_outcome_unknown' if uncertain else 'playlist_failed')
+                    reason_code='device_outcome_unknown' if uncertain else 'playlist_failed',
+                    fatal_code=fatal_code)
                 job.set_status(JobStatus.FAILED, 'Verify device state before another playlist edit' if uncertain else str(exc))
             raise HTTPException(409, {'code': 'verify_device_state' if uncertain else 'playlist_failed',
-                'message': job.message if job else str(exc), 'job_id': job_id}) from exc
+                'message': job.message if job else str(exc), 'job_id': job_id,
+                'fatal_code': fatal_code}) from exc
         finally:
             cache.clear()
             coordinator.finish(ticket)
