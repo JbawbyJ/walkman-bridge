@@ -23,9 +23,23 @@ export const PLAYLIST_RECOVERY_HELP = {
   },
   PLAYLIST_LIBRARY_NOT_LOADED: {
     title: 'The Walkman music list did not load',
-    explanation: 'The Walkman\'s music list didn\'t load, so repair stopped without changing anything.',
+    explanation: 'The Walkman\'s music list didn\'t load, or a song file on the device couldn\'t be read, so repair stopped without changing anything.',
     action: 'Reconnect the Walkman, wait for the library to load, then try repair again.',
     actionId: 'reconnect_retry',
+  },
+  DEVICE_FILE_LOCKED: {
+    title: 'A song file on the Walkman is open',
+    // {path} comes from the device (detail.fatal_path). Insert it as plain text only,
+    // never through innerHTML or markdown, and omit it when absent.
+    explanation: 'Another program (for example Explorer, a media player, or antivirus) has a song file on the Walkman open{path}. Nothing was changed.',
+    action: 'Close that program and try again.',
+    actionId: 'close_and_retry',
+  },
+  DEVICE_ROLLBACK_FAILED: {
+    title: 'The playlist save could not be undone',
+    explanation: 'The save failed and could not be fully undone.',
+    action: 'Stop making changes, keep the Walkman connected, and run Inspect first.',
+    actionId: 'inspect_recover',
   },
   GENERIC: {
     title: 'Playlist change failed',

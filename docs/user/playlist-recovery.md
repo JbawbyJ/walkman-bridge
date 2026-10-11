@@ -15,7 +15,7 @@ work.
 ## How to read a failure
 
 A failed playlist change can include a short code. Choose the fix from that
-code. If there is no code, or the code is not one of the four names below,
+code. If there is no code, or the code is not one of the six names below,
 treat it as a general failure. The longer message is not a code. Do not decide
 the fix by reading it.
 
@@ -24,7 +24,9 @@ the fix by reading it.
 | `PLAYLIST_JOURNAL_PENDING` | A previous playlist save was cut off. An unfinished record is still on the Walkman. | Inspect, read the result, then recover. |
 | `PLAYLIST_REF_MISSING` | A playlist still names songs that are no longer on the Walkman. | Run playlist repair. |
 | `PLAYLIST_SLOTS_EXHAUSTED` | The Walkman's playlist table is full (2048 slots). | Delete or combine playlists. |
-| `PLAYLIST_LIBRARY_NOT_LOADED` | The Walkman's music list did not load, so repair stopped without changing anything. | Reconnect the Walkman, wait for the library to load, then try repair again. |
+| `PLAYLIST_LIBRARY_NOT_LOADED` | The Walkman's music list did not load, or a song file on the device could not be read, so repair stopped without changing anything. | Reconnect the Walkman, wait for the library to load, then try repair again. |
+| `DEVICE_FILE_LOCKED` | Another program has a song file on the Walkman open. Nothing was changed. | Close that program and try again. |
+| `DEVICE_ROLLBACK_FAILED` | The save failed and could not be fully undone. The unfinished record is still on the Walkman. | Stop making changes, keep the Walkman connected, and run Inspect first. |
 | No code, or any other code | The change failed, and there is no specific recovery step. | Back up, wait until the app is idle, and try once more. |
 
 ## The unfinished record
@@ -103,7 +105,26 @@ saves stop so the app does not write a list it cannot trust.
 
 In-app repair is coming soon. It is not in this version.
 
-If the code is `PLAYLIST_LIBRARY_NOT_LOADED`, the Walkman's music list was empty or did not finish loading, so repair stopped. Nothing was written to the device. Repair refuses rather than emptying playlists when the track list did not load. Reconnect the Walkman, wait for the library to load, then try repair again.
+If the code is `PLAYLIST_LIBRARY_NOT_LOADED`, the Walkman's music list was empty or did not finish loading, or a song file on the device could not be read, so repair stopped. Nothing was written to the device. Repair refuses rather than emptying playlists when the track list did not load or a song file could not be read. Reconnect the Walkman, wait for the library to load, then try repair again.
+
+## A song file is open in another program
+
+Use these steps when the code is `DEVICE_FILE_LOCKED`.
+
+Another program, such as File Explorer, a media player, or antivirus, has a song file on the Walkman open. The save wrote nothing and left no unfinished record. The Walkman keeps the playlists it already had.
+
+1. Close the program that has the song open. If the message names a file, that name is the open file.
+2. Try the playlist change again.
+
+## A save could not be fully undone
+
+Use these steps when the code is `DEVICE_ROLLBACK_FAILED`.
+
+The save failed, and Walkman Bridge could not undo it completely. The unfinished record is still on the Walkman, so Inspect and recover still apply. Stop making further playlist changes.
+
+1. Leave the Walkman plugged into the same USB port.
+2. Make a full backup and confirm it completed.
+3. Run Inspect first, and read the result, then recover, using the steps under **Inspect, then recover**.
 
 ## Free a full playlist table
 
@@ -125,7 +146,7 @@ Inspect, recover, and repair do not add slots.
 
 ## A general failure
 
-Use these steps when there is no code, or the code is not one of the four
+Use these steps when there is no code, or the code is not one of the six
 names in the table.
 
 1. Leave the Walkman connected.

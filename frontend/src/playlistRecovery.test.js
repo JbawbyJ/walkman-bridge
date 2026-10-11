@@ -7,6 +7,8 @@ const CODES = [
   'PLAYLIST_JOURNAL_PENDING',
   'PLAYLIST_SLOTS_EXHAUSTED',
   'PLAYLIST_LIBRARY_NOT_LOADED',
+  'DEVICE_FILE_LOCKED',
+  'DEVICE_ROLLBACK_FAILED',
   'GENERIC',
 ]
 
@@ -25,6 +27,9 @@ test('playlist recovery help defines the fatal codes and GENERIC', () => {
   assert.equal(PLAYLIST_RECOVERY_HELP.PLAYLIST_JOURNAL_PENDING.actionId, 'inspect_recover')
   assert.equal(PLAYLIST_RECOVERY_HELP.PLAYLIST_SLOTS_EXHAUSTED.actionId, 'free_slots')
   assert.equal(PLAYLIST_RECOVERY_HELP.PLAYLIST_LIBRARY_NOT_LOADED.actionId, 'reconnect_retry')
+  assert.equal(PLAYLIST_RECOVERY_HELP.DEVICE_FILE_LOCKED.actionId, 'close_and_retry')
+  assert.match(PLAYLIST_RECOVERY_HELP.DEVICE_FILE_LOCKED.explanation, /\{path\}/)
+  assert.equal(PLAYLIST_RECOVERY_HELP.DEVICE_ROLLBACK_FAILED.actionId, 'inspect_recover')
   assert.equal(PLAYLIST_RECOVERY_HELP.GENERIC.actionId, null)
 })
 

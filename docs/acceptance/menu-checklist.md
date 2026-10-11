@@ -19,6 +19,9 @@ Title-bar version should be read and recorded. Source at this revision is **0.4.
 - [ ] Minimize, maximize/restore, and close work while nothing is transferring. Do not close during a device write for this pass.
   - **Result:** pass / fail
   - **Notes:**
+- [ ] Close the app while a track is playing. The window closes within a few seconds, and Task Manager shows no Walkman Bridge, Electron, or player process still running.
+  - **Result:** pass / fail
+  - **Notes:**
 - [ ] Buttons show a visible focus ring. Space plays or pauses when focus is outside a field, button, or dialog.
   - **Result:** pass / fail
   - **Notes:**
@@ -143,6 +146,12 @@ When passthrough and UI land, show the HeadlessCli `code` and message in the Man
   - **Result:** pass / fail
   - **Notes:**
 - [ ] `PLAYLIST_SLOTS_EXHAUSTED` is visible with the message. The UI says the 2048-slot playlist limit is reached and to delete a playlist before creating another.
+  - **Result:** pass / fail
+  - **Notes:**
+- [ ] `DEVICE_FILE_LOCKED` is visible with the message. The UI says another program has a song file on the Walkman open, nothing was changed, and to close that program and try again. A file path from the device is plain text when present and is omitted when absent. Nothing is written.
+  - **Result:** pass / fail
+  - **Notes:**
+- [ ] `DEVICE_ROLLBACK_FAILED` is visible with the message. The UI says the save failed and could not be fully undone, and to stop making changes, keep the Walkman connected, and run Inspect first. The unfinished record remains, so inspect and recover still apply.
   - **Result:** pass / fail
   - **Notes:**
 - [ ] A fatal with no `code` is a generic failure: message only, with none of the three repair instructions attached.
