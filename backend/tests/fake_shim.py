@@ -22,11 +22,15 @@ def emit_line(line: str) -> None:
     print(line, flush=True)
 
 
-# jsymphonic #4 @ 857b91e. Compact JSON, key order included. Do not reformat.
+# jsymphonic #4 @ ba26514. Compact JSON, key order included. Do not reformat.
 LOCKED_FATAL_LINE = '{"event":"fatal","message":"Device file is locked","code":"DEVICE_FILE_LOCKED","path":"OMGAUDIO/10F00/10000001.OMA"}'
-# Message text is a placeholder until Builder B confirms the head. Code and path are the contract.
 READ_ONLY_FATAL_LINE = '{"event":"fatal","message":"Device file is read-only","code":"DEVICE_FILE_READ_ONLY","path":"OMGAUDIO/10F00/10000001.OMA"}'
+# jsymphonic #4 @ 9d96537. playlist-create, playlist-update, playlist-delete, and playlist-repair emit this too.
 ROLLBACK_FATAL_LINE = '{"event":"fatal","message":"Database update failed; incomplete recovery requires a verified backup","code":"DEVICE_ROLLBACK_FAILED"}'
+# jsymphonic #4 @ 979b355. Compact JSON, key order included. Do not reformat.
+PROBE_RESTORE_FATAL_LINE = '{"event":"fatal","message":"Device file probe could not be restored","code":"DEVICE_PROBE_RESTORE_FAILED","path":"OMGAUDIO/10F00/10000001.OMA","probe_path":"OMGAUDIO/10F00/10000001.OMA.jsymphonic-probe"}'
+PROBE_CONFLICT_FATAL_LINE = '{"event":"fatal","message":"Device file probe conflicts with the track","code":"DEVICE_PROBE_CONFLICT","path":"OMGAUDIO/10F00/10000001.OMA","probe_path":"OMGAUDIO/10F00/10000001.OMA.jsymphonic-probe"}'
+PROBE_PENDING_WARNING_LINE = '{"event":"warning","code":"DEVICE_PROBE_PENDING","path":"OMGAUDIO/10F00/10000001.OMA","probe_path":"OMGAUDIO/10F00/10000001.OMA.jsymphonic-probe"}'
 
 
 def main() -> int:
@@ -239,6 +243,18 @@ def main() -> int:
     if scenario == "playlist_rollback_failed":
         emit_line(ROLLBACK_FATAL_LINE)
         return 1
+
+    if scenario == "playlist_probe_restore_failed":
+        emit_line(PROBE_RESTORE_FATAL_LINE)
+        return 1
+
+    if scenario == "playlist_probe_conflict":
+        emit_line(PROBE_CONFLICT_FATAL_LINE)
+        return 1
+
+    if scenario == "device_probe_pending":
+        emit_line(PROBE_PENDING_WARNING_LINE)
+        return 0
 
     if scenario == "playlist_fatal_nested_code":
         emit({"event": "fatal", "message": "PLAYLIST_REF_MISSING",

@@ -14,6 +14,7 @@ async function req(path, options = {}, includeHeaders = false) {
     error.code = detail?.code
     error.fatal_code = detail && typeof detail === 'object' ? detail.fatal_code ?? null : null
     error.fatal_path = detail && typeof detail === 'object' && typeof detail.fatal_path === 'string' ? detail.fatal_path : null
+    error.fatal_probe_path = detail && typeof detail === 'object' && typeof detail.fatal_probe_path === 'string' ? detail.fatal_probe_path : null
     error.recovery_action = detail && typeof detail === 'object' && typeof detail.recovery_action === 'string' ? detail.recovery_action : null
     throw error
   }
@@ -41,7 +42,16 @@ export const api = {
   prepare: id => req(`/media/${idPath(id)}/prepare`, json('POST', { format: 'flac' })),
   transfer: media_ids => req('/transfers', json('POST', { media_ids })),
   device: () => req('/device'),
-  tracks: () => req('/tracks', {}, true),
+  tracks: async () => {
+    const result = await req('/tracks', {}, true)
+    const body = result.items
+    if (Array.isArray(body)) return { items: body, etag: result.etag, warnings: [] }
+    return {
+      items: Array.isArray(body?.items) ? body.items : [],
+      etag: result.etag,
+      warnings: Array.isArray(body?.warnings) ? body.warnings : [],
+    }
+  },
   deleteTrack: (id, etag) => req(`/tracks/${idPath(id)}`, { method: 'DELETE', headers: { 'If-Match': etag } }),
   backup: () => req('/backup', { method: 'POST' }),
   job: id => req(`/jobs/${idPath(id)}`),
@@ -72,12 +82,13 @@ export const api = {
 // Recover can return inspect_recover for DEVICE_FILE_LOCKED and DEVICE_FILE_READ_ONLY.
 // Other writes keep close_and_retry and clear_read_only_retry for those codes.
 // Callers use error.recovery_action from the response. Message text does not select it.
+// manual_help has no endpoint and no button. fatal_probe_path is an opaque string.
 // GENERIC has no recovery action.
 const inspectRecover = [
   { id: 'inspect', method: 'GET', path: '/device/playlist-recovery/inspect', call: 'inspectPlaylistJournal' },
   { id: 'recover', method: 'POST', path: '/device/playlist-recovery/recover', call: 'recoverPlaylistJournal' },
 ]
-inspectRecover.fatal_codes = ['PLAYLIST_JOURNAL_PENDING', 'DEVICE_ROLLBACK_FAILED']
+inspectRecover.fatal_codes = ['PLAYLIST_JOURNAL_PENDING', 'DEVICE_ROLLBACK_FAILED', 'DEVICE_PROBE_RESTORE_FAILED']
 
 export const RECOVERY_ACTIONS = {
   inspect_recover: inspectRecover,
@@ -107,6 +118,10 @@ export const RECOVERY_ACTIONS = {
       { id: 'clear_read_only' },
       { id: 'retry' },
     ],
+  },
+  manual_help: {
+    fatal_code: 'DEVICE_PROBE_CONFLICT',
+    steps: [],
   },
   GENERIC: null,
 }

@@ -245,6 +245,8 @@ FATAL_CODES = (
     "DEVICE_FILE_LOCKED",
     "DEVICE_FILE_READ_ONLY",
     "DEVICE_ROLLBACK_FAILED",
+    "DEVICE_PROBE_RESTORE_FAILED",
+    "DEVICE_PROBE_CONFLICT",
 )
 
 
@@ -296,12 +298,13 @@ def test_fatal_without_code_stays_generic(monkeypatch):
 def test_message_text_does_not_invent_fatal_code(monkeypatch):
     scripted(monkeypatch, [{
         "event": "fatal",
-        "message": "blocked: PLAYLIST_REF_MISSING PLAYLIST_JOURNAL_PENDING PLAYLIST_SLOTS_EXHAUSTED PLAYLIST_LIBRARY_NOT_LOADED DEVICE_FILE_LOCKED DEVICE_FILE_READ_ONLY DEVICE_ROLLBACK_FAILED path OMGAUDIO/locked.mp3",
+        "message": "blocked: PLAYLIST_REF_MISSING PLAYLIST_JOURNAL_PENDING PLAYLIST_SLOTS_EXHAUSTED PLAYLIST_LIBRARY_NOT_LOADED DEVICE_FILE_LOCKED DEVICE_FILE_READ_ONLY DEVICE_ROLLBACK_FAILED DEVICE_PROBE_RESTORE_FAILED DEVICE_PROBE_CONFLICT DEVICE_PROBE_PENDING path OMGAUDIO/locked.mp3 probe_path OMGAUDIO/locked.mp3.jsymphonic-probe",
     }], exit_code=1)
     with pytest.raises(JSymphonicError) as error:
         jsymphonic.list_playlists(Path("X:/"))
     assert error.value.code is None
     assert error.value.path is None
+    assert error.value.probe_path is None
 
 
 def test_unknown_fatal_code_is_generic_and_does_not_crash(monkeypatch):
@@ -318,6 +321,70 @@ def test_non_string_fatal_code_is_generic(monkeypatch, raw):
     with pytest.raises(JSymphonicError) as error:
         jsymphonic.list_playlists(Path("X:/"))
     assert error.value.code is None
+
+
+def test_probe_fatals_reconcile_even_on_a_read(monkeypatch):
+    probe = "OMGAUDIO/<b>.jsymphonic-probe"
+    for code, action in (
+        ("DEVICE_PROBE_RESTORE_FAILED", "inspect_recover"),
+        ("DEVICE_PROBE_CONFLICT", "manual_help"),
+    ):
+        scripted(monkeypatch, [{
+            "event": "fatal",
+            "message": "probe",
+            "code": code,
+            "path": "OMGAUDIO/10F00/10000001.OMA",
+            "probe_path": probe,
+        }], exit_code=1)
+        with pytest.raises(JSymphonicError) as error:
+            jsymphonic.list_tracks(Path("X:/"))
+        assert error.value.code == code
+        assert error.value.needs_reconcile is True
+        assert error.value.probe_path == probe
+        assert jsymphonic.job_needs_reconcile(error.value, False) is True
+        assert jsymphonic.recovery_action_for(code) == action
+    assert jsymphonic.recovery_action_for("DEVICE_ROLLBACK_FAILED") == "inspect_recover"
+
+
+def test_probe_pending_warning_is_not_an_error(monkeypatch):
+    warning = {
+        "event": "warning",
+        "code": "DEVICE_PROBE_PENDING",
+        "path": "OMGAUDIO/<b>",
+        "probe_path": "OMGAUDIO/<b>.jsymphonic-probe",
+    }
+    copied = {
+        "code": "DEVICE_PROBE_PENDING",
+        "path": "OMGAUDIO/<b>",
+        "probe_path": "OMGAUDIO/<b>.jsymphonic-probe",
+    }
+    scripted(monkeypatch, [
+        warning,
+        {"event": "track", "id": "1", "title": "A", "artist": "A", "album": "A", "durationSeconds": 1},
+        {"event": "listEnd", "count": 1},
+    ])
+    rows = jsymphonic.list_tracks(Path("X:/"))
+    assert rows[0]["id"] == "1"
+    assert rows.warnings == [copied]
+
+    scripted(monkeypatch, [warning, {"event": "device", "ok": True}])
+    details = jsymphonic.device_details(Path("X:/"))
+    assert details["ok"] is True
+    assert details["warnings"] == [copied]
+
+    scripted(monkeypatch, [warning, {"event": "playlistsEnd", "count": 0}])
+    playlists = jsymphonic.list_playlists(Path("X:/"))
+    assert list(playlists) == []
+    assert playlists.warnings == [copied]
+
+    scripted(monkeypatch, [{
+        "event": "warning",
+        "code": "DEVICE_PROBE_PENDING",
+        "path": 3,
+        "probe_path": {"file": "OMGAUDIO/<b>.jsymphonic-probe"},
+    }, {"event": "playlistsEnd", "count": 0}])
+    bare = jsymphonic.list_playlists(Path("X:/"))
+    assert bare.warnings == [{"code": "DEVICE_PROBE_PENDING"}]
 
 
 def test_step_error_does_not_adopt_a_fatal_code(monkeypatch):

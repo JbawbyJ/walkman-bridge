@@ -353,10 +353,11 @@ class MediaService:
                 if result.needs_reconcile or outcome.state == 'unknown':
                     self.store.update(media_id, needs_reconcile=True)
         except Exception as exc:
-            from jsymphonic import fatal_code_of, fatal_path_of, job_needs_reconcile, recovery_action_for
+            from jsymphonic import fatal_code_of, fatal_path_of, fatal_probe_path_of, job_needs_reconcile, recovery_action_for
             uncertain = job_needs_reconcile(exc, writing)
             fatal_code = fatal_code_of(exc)
             path = fatal_path_of(exc)
+            probe = fatal_probe_path_of(exc)
             job.needs_reconcile = uncertain
             for media_id, _ in ready:
                 changes = dict(state='unknown' if uncertain else 'failed', detail=str(exc),
@@ -364,6 +365,8 @@ class MediaService:
                                fatal_code=fatal_code, recovery_action=recovery_action_for(fatal_code))
                 if path is not None:
                     changes['fatal_path'] = path
+                if probe is not None:
+                    changes['fatal_probe_path'] = probe
                 job.update_file(media_id, **changes)
                 if uncertain:
                     self.store.update(media_id, needs_reconcile=True)

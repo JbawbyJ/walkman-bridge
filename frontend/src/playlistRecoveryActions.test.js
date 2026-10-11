@@ -16,7 +16,13 @@ test('recovery action ids map onto inspect, recover, repair, and delete', async 
   assert.deepEqual(RECOVERY_ACTIONS.inspect_recover.fatal_codes, [
     'PLAYLIST_JOURNAL_PENDING',
     'DEVICE_ROLLBACK_FAILED',
+    'DEVICE_PROBE_RESTORE_FAILED',
   ])
+  assert.equal(RECOVERY_ACTIONS.manual_help.fatal_code, 'DEVICE_PROBE_CONFLICT')
+  assert.deepEqual(RECOVERY_ACTIONS.manual_help.steps, [])
+  assert.equal(RECOVERY_ACTIONS.manual_help.method, undefined)
+  assert.equal(RECOVERY_ACTIONS.manual_help.path, undefined)
+  assert.equal(RECOVERY_ACTIONS.manual_help.call, undefined)
   assert.equal(RECOVERY_ACTIONS.reconnect_retry.fatal_code, 'PLAYLIST_LIBRARY_NOT_LOADED')
   assert.equal(RECOVERY_ACTIONS.reconnect_retry.steps[1].call, 'repairPlaylists')
   assert.equal(RECOVERY_ACTIONS.close_and_retry.fatal_code, 'DEVICE_FILE_LOCKED')

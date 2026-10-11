@@ -130,12 +130,29 @@ test('api errors expose fatal_code from detail and leave it null when the payloa
     await assert.rejects(api.device(), error => {
       assert.equal(error.fatal_code, 'DEVICE_FILE_LOCKED')
       assert.equal(error.fatal_path, 'OMGAUDIO/10F00/10000001.OMA')
+      assert.equal(error.fatal_probe_path, null)
       assert.equal(error.recovery_action, 'inspect_recover')
       return true
     })
-    respond({ code: 'playlist_failed', message: 'locked', fatal_code: 'DEVICE_FILE_LOCKED', fatal_path: 3, recovery_action: 3 })
+    respond({
+      code: 'verify_device_state',
+      message: 'Device file probe conflicts with the track',
+      fatal_code: 'DEVICE_PROBE_CONFLICT',
+      fatal_path: 'OMGAUDIO/10F00/10000001.OMA',
+      fatal_probe_path: 'OMGAUDIO/<b>.jsymphonic-probe',
+      recovery_action: 'manual_help',
+    })
+    await assert.rejects(api.device(), error => {
+      assert.equal(error.fatal_code, 'DEVICE_PROBE_CONFLICT')
+      assert.equal(error.fatal_path, 'OMGAUDIO/10F00/10000001.OMA')
+      assert.equal(error.fatal_probe_path, 'OMGAUDIO/<b>.jsymphonic-probe')
+      assert.equal(error.recovery_action, 'manual_help')
+      return true
+    })
+    respond({ code: 'playlist_failed', message: 'locked', fatal_code: 'DEVICE_FILE_LOCKED', fatal_path: 3, fatal_probe_path: 3, recovery_action: 3 })
     await assert.rejects(api.device(), error => {
       assert.equal(error.fatal_path, null)
+      assert.equal(error.fatal_probe_path, null)
       assert.equal(error.recovery_action, null)
       return true
     })
@@ -156,9 +173,32 @@ test('api errors expose fatal_code from detail and leave it null when the payloa
     await assert.rejects(api.device(), error => {
       assert.equal(error.message, 'Connection lost')
       assert.equal(error.fatal_code, null)
+      assert.equal(error.fatal_probe_path, null)
       assert.equal(error.recovery_action, null)
       return true
     })
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test('tracks keeps array items and copies probe warnings unchanged', async () => {
+  const original = globalThis.fetch
+  const probe = 'OMGAUDIO/<b>.jsymphonic-probe'
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => '"etag"' },
+    json: async () => ({
+      items: [{ id: '1', title: 'Alpha' }],
+      warnings: [{ code: 'DEVICE_PROBE_PENDING', path: 'OMGAUDIO/<b>', probe_path: probe }],
+    }),
+  })
+  try {
+    const ledger = await api.tracks()
+    assert.deepEqual(ledger.items, [{ id: '1', title: 'Alpha' }])
+    assert.equal(ledger.etag, '"etag"')
+    assert.equal(ledger.warnings[0].probe_path, probe)
   } finally {
     globalThis.fetch = original
   }

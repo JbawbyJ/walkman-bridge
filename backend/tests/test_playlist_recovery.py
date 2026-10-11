@@ -347,12 +347,19 @@ def test_commands_use_device_flag_and_inspect_is_the_read_switch(monkeypatch, tm
 LOCKED_FATAL_LINE = '{"event":"fatal","message":"Device file is locked","code":"DEVICE_FILE_LOCKED","path":"OMGAUDIO/10F00/10000001.OMA"}'
 ROLLBACK_FATAL_LINE = '{"event":"fatal","message":"Database update failed; incomplete recovery requires a verified backup","code":"DEVICE_ROLLBACK_FAILED"}'
 READ_ONLY_FATAL_LINE = '{"event":"fatal","message":"Device file is read-only","code":"DEVICE_FILE_READ_ONLY","path":"OMGAUDIO/10F00/10000001.OMA"}'
+PROBE_RESTORE_FATAL_LINE = '{"event":"fatal","message":"Device file probe could not be restored","code":"DEVICE_PROBE_RESTORE_FAILED","path":"OMGAUDIO/10F00/10000001.OMA","probe_path":"OMGAUDIO/10F00/10000001.OMA.jsymphonic-probe"}'
+PROBE_CONFLICT_FATAL_LINE = '{"event":"fatal","message":"Device file probe conflicts with the track","code":"DEVICE_PROBE_CONFLICT","path":"OMGAUDIO/10F00/10000001.OMA","probe_path":"OMGAUDIO/10F00/10000001.OMA.jsymphonic-probe"}'
+PROBE_PENDING_WARNING_LINE = '{"event":"warning","code":"DEVICE_PROBE_PENDING","path":"OMGAUDIO/10F00/10000001.OMA","probe_path":"OMGAUDIO/10F00/10000001.OMA.jsymphonic-probe"}'
+MARKUP_PROBE_PATH = 'OMGAUDIO/<b>.jsymphonic-probe'
 
 
 def test_confirmed_fatal_lines_are_emitted_whole():
     for scenario, line in (
         ('playlist_file_locked', LOCKED_FATAL_LINE),
+        ('playlist_file_read_only', READ_ONLY_FATAL_LINE),
         ('playlist_rollback_failed', ROLLBACK_FATAL_LINE),
+        ('playlist_probe_restore_failed', PROBE_RESTORE_FATAL_LINE),
+        ('playlist_probe_conflict', PROBE_CONFLICT_FATAL_LINE),
     ):
         result = subprocess.run([sys.executable, str(FAKE_SHIM), scenario], capture_output=True, text=True, check=False)
         assert result.returncode == 1
@@ -360,14 +367,13 @@ def test_confirmed_fatal_lines_are_emitted_whole():
         assert result.stderr == ''
 
 
-def test_read_only_fatal_line_exposes_code_and_path():
-    """The message in this line is a placeholder, so it is not asserted."""
-    result = subprocess.run([sys.executable, str(FAKE_SHIM), 'playlist_file_read_only'], capture_output=True, text=True, check=False)
-    assert result.returncode == 1
+def test_probe_pending_warning_line_is_emitted_whole():
+    result = subprocess.run([sys.executable, str(FAKE_SHIM), 'device_probe_pending'], capture_output=True, text=True, check=False)
+    assert result.returncode == 0
+    assert result.stdout == PROBE_PENDING_WARNING_LINE + '\n'
+    assert result.stderr == ''
     event = json.loads(result.stdout)
-    assert event['code'] == 'DEVICE_FILE_READ_ONLY'
-    assert event['path'] == 'OMGAUDIO/10F00/10000001.OMA'
-    assert event['event'] == 'fatal'
+    assert 'message' not in event
 
 
 @pytest.mark.parametrize('path, scenario, reconcile, action, detail_code, file_state', [
@@ -510,6 +516,7 @@ def test_rollback_failure_needs_reconcile(context, monkeypatch):
     event = json.loads(ROLLBACK_FATAL_LINE)
     assert detail['fatal_code'] == event['code']
     assert detail['recovery_action'] == 'inspect_recover'
+    assert detail['recovery_action'] == jsymphonic.recovery_action_for('DEVICE_ROLLBACK_FAILED')
     assert detail['code'] == 'verify_device_state'
     assert 'path' not in event
     assert 'fatal_path' not in detail
@@ -518,6 +525,33 @@ def test_rollback_failure_needs_reconcile(context, monkeypatch):
     assert job['needs_reconcile'] is True
     assert job['files'][0]['state'] == 'unknown'
     assert job['files'][0]['fatal_code'] == 'DEVICE_ROLLBACK_FAILED'
+    assert 'fatal_path' not in job['files'][0]
+
+
+def test_playlist_create_rollback_needs_reconcile(context, monkeypatch):
+    from test_playlists import native_context
+    native_context(context)
+    monkeypatch.setattr(jsymphonic, 'SHIM_CMD_PREFIX', [sys.executable, str(FAKE_SHIM), 'playlist_rollback_failed'])
+    context.api.create_playlist = jsymphonic.create_playlist
+    etag = context.client.get('/api/device/playlists').headers['etag']
+    response = context.client.post(
+        '/api/device/playlists',
+        headers={'If-Match': etag},
+        json={'name': 'Walk', 'track_ids': ['1']},
+    )
+    assert response.status_code == 409, response.text
+    detail = response.json()['detail']
+    event = json.loads(ROLLBACK_FATAL_LINE)
+    assert detail['fatal_code'] == event['code']
+    assert detail['recovery_action'] == jsymphonic.recovery_action_for('DEVICE_ROLLBACK_FAILED')
+    assert detail['recovery_action'] == 'inspect_recover'
+    assert detail['code'] == 'verify_device_state'
+    assert 'fatal_path' not in detail
+    job = context.client.get('/api/jobs/' + detail['job_id']).json()
+    assert job['needs_reconcile'] is True
+    assert job['files'][0]['state'] == 'unknown'
+    assert job['files'][0]['fatal_code'] == 'DEVICE_ROLLBACK_FAILED'
+    assert job['files'][0]['detail'] == event['message']
     assert 'fatal_path' not in job['files'][0]
 
 
@@ -677,6 +711,104 @@ def test_rollback_needs_reconcile_even_on_a_read(monkeypatch):
         jsymphonic.inspect_playlist_journal('fixture')
     assert error.value.needs_reconcile is True
     assert error.value.code == 'DEVICE_ROLLBACK_FAILED'
+
+
+def _probe_warning():
+    event = json.loads(PROBE_PENDING_WARNING_LINE)
+    return {'code': event['code'], 'path': event['path'], 'probe_path': event['probe_path']}
+
+
+@pytest.mark.parametrize('path, line, action', [
+    (REPAIR, PROBE_RESTORE_FATAL_LINE, 'inspect_recover'),
+    (RECOVER, PROBE_RESTORE_FATAL_LINE, 'inspect_recover'),
+    (REPAIR, PROBE_CONFLICT_FATAL_LINE, 'manual_help'),
+    (RECOVER, PROBE_CONFLICT_FATAL_LINE, 'manual_help'),
+])
+def test_probe_fatals_need_reconcile(context, monkeypatch, path, line, action):
+    event = json.loads(line)
+    scenario = 'playlist_probe_restore_failed' if event['code'] == 'DEVICE_PROBE_RESTORE_FAILED' else 'playlist_probe_conflict'
+    use_fake(monkeypatch, context, scenario)
+    response = context.client.post(path)
+    assert response.status_code == 409, response.text
+    detail = response.json()['detail']
+    assert detail['fatal_code'] == event['code']
+    assert detail['fatal_path'] == event['path']
+    assert detail['fatal_probe_path'] == event['probe_path']
+    assert detail['recovery_action'] == action
+    assert detail['recovery_action'] == jsymphonic.recovery_action_for(event['code'])
+    assert detail['code'] == 'verify_device_state'
+    job = context.client.get('/api/jobs/' + detail['job_id']).json()
+    assert job['needs_reconcile'] is True
+    assert job['files'][0]['state'] == 'unknown'
+    assert job['files'][0]['fatal_code'] == event['code']
+    assert job['files'][0]['fatal_path'] == event['path']
+    assert job['files'][0]['fatal_probe_path'] == event['probe_path']
+
+
+def test_probe_path_markup_passes_through_unchanged(context, monkeypatch):
+    bind_script(context, monkeypatch, [{
+        'event': 'fatal',
+        'message': 'Device file probe conflicts with the track',
+        'code': 'DEVICE_PROBE_CONFLICT',
+        'path': 'OMGAUDIO/10F00/10000001.OMA',
+        'probe_path': MARKUP_PROBE_PATH,
+    }], 1)
+    response = context.client.post(REPAIR)
+    assert response.status_code == 409, response.text
+    detail = response.json()['detail']
+    assert detail['fatal_probe_path'] == MARKUP_PROBE_PATH
+    assert '<b>' in detail['fatal_probe_path']
+    job = context.client.get('/api/jobs/' + detail['job_id']).json()
+    assert job['files'][0]['fatal_probe_path'] == MARKUP_PROBE_PATH
+
+
+def test_probe_pending_warning_on_track_list(context, monkeypatch):
+    warning = json.loads(PROBE_PENDING_WARNING_LINE)
+    scripted(monkeypatch, [
+        warning,
+        {'event': 'track', 'id': '1', 'title': 'Alpha', 'artist': 'A', 'album': 'AA', 'durationSeconds': 1},
+        {'event': 'listEnd', 'count': 1},
+    ])
+    context.api.list_tracks = jsymphonic.list_tracks
+    response = context.client.get('/api/tracks')
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['items'][0]['id'] == '1'
+    assert body['warnings'] == [_probe_warning()]
+
+
+def test_probe_pending_warning_on_device_details(monkeypatch):
+    warning = json.loads(PROBE_PENDING_WARNING_LINE)
+    scripted(monkeypatch, [warning, {'event': 'device', 'ok': True, 'generation': 1}])
+    body = jsymphonic.device_details('fixture')
+    assert body['ok'] is True
+    assert body['warnings'] == [_probe_warning()]
+
+
+def test_probe_pending_warning_on_playlists(context, monkeypatch):
+    warning = json.loads(PROBE_PENDING_WARNING_LINE)
+    scripted(monkeypatch, [warning, {'event': 'playlistsEnd', 'count': 0}])
+    context.api.list_playlists = jsymphonic.list_playlists
+    response = context.client.get('/api/device/playlists')
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['items'] == []
+    assert body['warnings'] == [_probe_warning()]
+
+
+def test_probe_pending_warning_on_inspect(context, monkeypatch):
+    warning = json.loads(PROBE_PENDING_WARNING_LINE)
+    bind_script(context, monkeypatch, [
+        warning,
+        {'event': 'playlistJournal', 'state': 'none', 'files': []},
+        {'event': 'done'},
+    ])
+    response = context.client.get(INSPECT)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['state'] == 'none'
+    assert body['warnings'] == [_probe_warning()]
+    assert context.app.state.jobs.latest() is None
 
 
 def test_player_has_no_playlist_recovery_routes(tmp_path):

@@ -62,11 +62,19 @@ def shim_fatal_path(exc):
     return fatal_path_of(exc)
 
 
+def shim_fatal_probe_path(exc):
+    from jsymphonic import fatal_probe_path_of
+    return fatal_probe_path_of(exc)
+
+
 def with_fatal_path(fields, exc):
     path = shim_fatal_path(exc)
-    if path is None:
-        return fields
-    return {**fields, 'fatal_path': path}
+    probe = shim_fatal_probe_path(exc)
+    if path is not None:
+        fields = {**fields, 'fatal_path': path}
+    if probe is not None:
+        fields = {**fields, 'fatal_probe_path': probe}
+    return fields
 
 
 def with_recovery_action(fields, code, *, recover=False):
@@ -162,7 +170,11 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
         try:
             tracks, playlists = await asyncio.to_thread(read)
             response.headers['ETag'] = device_playlist_etag(volume, tracks, playlists)
-            return {'items': playlists}
+            body = {'items': playlists}
+            warnings = list(getattr(playlists, 'warnings', ()) or ())
+            if warnings:
+                body['warnings'] = warnings
+            return body
         except RuntimeError as exc:
             raise HTTPException(409, read_fatal_detail(exc)) from exc
         finally:
