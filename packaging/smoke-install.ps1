@@ -30,6 +30,13 @@ function ConvertTo-SmokeInstant($Value) {
     if ($instant.Kind -eq [DateTimeKind]::Utc) { return $instant }
     return $instant.ToUniversalTime()
 }
+function Test-SmokeStartedBefore($LiveStart, $SmokeStart) {
+    $live = ConvertTo-SmokeInstant $LiveStart
+    $smoke = ConvertTo-SmokeInstant $SmokeStart
+    if (-not $live -or -not $smoke) { return $false }
+    # Process.StartTime can sit a fraction of a millisecond after Win32_Process.CreationDate.
+    return $live -lt $smoke.AddMilliseconds(-1)
+}
 function Copy-OwnedProcess($Item) {
     [pscustomobject]@{
         Name = [string]$Item.Name
@@ -128,7 +135,7 @@ function Get-SmokeProcesses {
             $executablePath = [string]$item.ExecutablePath
             $ownedHit = ($command -and $command.IndexOf($owned, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or ($executablePath -and $executablePath.IndexOf($owned, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
             $itemStart = ConvertTo-SmokeInstant $item.CreationDate
-            if ($ownedHit -and $itemStart -and ($itemStart -ge $smokeStart)) {
+            if ($ownedHit -and $itemStart -and -not (Test-SmokeStartedBefore $itemStart $smokeStart)) {
                 [void]$found.Add((Copy-OwnedProcess $item)); $seen[$idKey] = $true
             }
         }
@@ -194,7 +201,7 @@ function Get-SmokeStopSkip {
     if ($recorded -and $liveStart -and ($recorded.Ticks -ne $liveStart.Ticks)) {
         return "Skip pid=$processId name=$name; PID reused (recorded start $($recorded.ToString('o')), current start $currentText)"
     }
-    if ($SmokeStart -and $liveStart -and ($liveStart -lt $SmokeStart)) {
+    if (Test-SmokeStartedBefore $liveStart $SmokeStart) {
         return "Skip pid=$processId name=$name; started before the smoke process (start $currentText, smoke $($SmokeStart.ToString('o')))"
     }
     return $null
