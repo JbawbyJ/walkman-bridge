@@ -14,6 +14,7 @@ async function req(path, options = {}, includeHeaders = false) {
     error.code = detail?.code
     error.fatal_code = detail && typeof detail === 'object' ? detail.fatal_code ?? null : null
     error.fatal_path = detail && typeof detail === 'object' && typeof detail.fatal_path === 'string' ? detail.fatal_path : null
+    error.recovery_action = detail && typeof detail === 'object' && typeof detail.recovery_action === 'string' ? detail.recovery_action : null
     throw error
   }
   return includeHeaders ? { items: body, etag: response.headers.get('etag') } : body
@@ -68,6 +69,9 @@ export const api = {
 // reconnect_retry has no endpoint: reconnect the Walkman, then call repairPlaylists again.
 // close_and_retry has no endpoint: show fatal_path, then the owner retries the original action.
 // clear_read_only_retry has no endpoint: show fatal_path, the owner clears the read-only flag, then retries.
+// Recover can return inspect_recover for DEVICE_FILE_LOCKED and DEVICE_FILE_READ_ONLY.
+// Other writes keep close_and_retry and clear_read_only_retry for those codes.
+// Callers use error.recovery_action from the response. Message text does not select it.
 // GENERIC has no recovery action.
 const inspectRecover = [
   { id: 'inspect', method: 'GET', path: '/device/playlist-recovery/inspect', call: 'inspectPlaylistJournal' },

@@ -69,11 +69,16 @@ def with_fatal_path(fields, exc):
     return {**fields, 'fatal_path': path}
 
 
+def with_recovery_action(fields, code, *, recover=False):
+    from jsymphonic import recovery_action_for
+    return {**fields, 'recovery_action': recovery_action_for(code, recover=recover)}
+
+
 def read_fatal_detail(exc):
     code = shim_fatal_code(exc)
     if not code:
         return str(exc)
-    return with_fatal_path({'message': str(exc), 'fatal_code': code}, exc)
+    return with_fatal_path(with_recovery_action({'message': str(exc), 'fatal_code': code}, code), exc)
 
 
 def expected_etag(request):
@@ -239,10 +244,10 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
                     reason_code='device_outcome_unknown' if uncertain else 'playlist_failed',
                     fatal_code=fatal_code), exc))
                 job.set_status(JobStatus.FAILED, 'Verify device state before another playlist edit' if uncertain else str(exc))
-            raise HTTPException(409, with_fatal_path({
+            raise HTTPException(409, with_fatal_path(with_recovery_action({
                 'code': 'verify_device_state' if uncertain else 'playlist_failed',
                 'message': job.message if job else str(exc), 'job_id': job_id,
-                'fatal_code': fatal_code}, exc)) from exc
+                'fatal_code': fatal_code}, fatal_code), exc)) from exc
         finally:
             cache.clear()
             coordinator.finish(ticket)
@@ -280,22 +285,18 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
         job = None
 
         def library_not_loaded():
-            return {
+            return with_recovery_action({
                 'code': 'library_not_loaded',
                 'message': 'Playlist repair refused: the Walkman library is not loaded',
                 'job_id': job_id,
                 'fatal_code': 'PLAYLIST_LIBRARY_NOT_LOADED',
-            }
+            }, 'PLAYLIST_LIBRARY_NOT_LOADED')
 
         def write():
             with coordinator.device_session(ticket) as mount:
                 if action == 'repair':
-                    rows = cache.get(volume.volume_id)
-                    if rows is None:
-                        rows = device_api.list_tracks(mount)
-                        cache.clear()
-                        cache[volume.volume_id] = rows
-                    # Empty library: refuse before device_writing and before playlist-repair.
+                    # Always list. A stale non-empty cache must not skip the empty-library refusal.
+                    rows = device_api.list_tracks(mount)
                     if not rows:
                         raise HTTPException(409, library_not_loaded())
                 job.set_status(JobStatus.RUNNING, 'Updating Walkman playlists')
@@ -336,7 +337,8 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
         except Exception as exc:
             from jsymphonic import job_needs_reconcile
             writing = bool(job and job.phase == 'device_writing')
-            uncertain = job_needs_reconcile(exc, writing)
+            recover = action == 'recover'
+            uncertain = job_needs_reconcile(exc, writing, recover=recover)
             fatal_code = shim_fatal_code(exc)
             if fatal_code == 'PLAYLIST_LIBRARY_NOT_LOADED':
                 detail_code = 'library_not_loaded'
@@ -358,10 +360,10 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
                 job.update_file(job_id, **with_fatal_path(dict(
                     state=file_state, detail=str(exc), reason_code=reason, fatal_code=fatal_code), exc))
                 job.set_status(JobStatus.FAILED, status)
-            raise HTTPException(409, with_fatal_path({
+            raise HTTPException(409, with_fatal_path(with_recovery_action({
                 'code': detail_code,
                 'message': job.message if job else str(exc), 'job_id': job_id,
-                'fatal_code': fatal_code}, exc)) from exc
+                'fatal_code': fatal_code}, fatal_code, recover=recover), exc)) from exc
         finally:
             cache.clear()
             coordinator.finish(ticket)

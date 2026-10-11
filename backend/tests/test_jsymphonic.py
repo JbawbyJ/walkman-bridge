@@ -252,6 +252,30 @@ def test_fatal_codes_are_defined_once():
     assert tuple(code.value for code in jsymphonic.FatalCode) == FATAL_CODES
 
 
+def test_recover_endpoint_overrides_locked_and_read_only():
+    locked = jsymphonic.JSymphonicError(
+        'roll-forward already committed; journal still pending',
+        code='DEVICE_FILE_LOCKED',
+        path='OMGAUDIO/10F00/10000001.OMA',
+        needs_reconcile=False,
+    )
+    read_only = jsymphonic.JSymphonicError(
+        'Device file is read-only',
+        code='DEVICE_FILE_READ_ONLY',
+        path='OMGAUDIO/10F00/10000001.OMA',
+        needs_reconcile=False,
+    )
+    assert jsymphonic.job_needs_reconcile(locked, True, recover=True) is True
+    assert jsymphonic.job_needs_reconcile(locked, True) is False
+    assert jsymphonic.job_needs_reconcile(read_only, True, recover=True) is True
+    assert jsymphonic.job_needs_reconcile(read_only, False) is False
+    assert jsymphonic.recovery_action_for(locked.code, recover=True) == 'inspect_recover'
+    assert jsymphonic.recovery_action_for(locked.code) == 'close_and_retry'
+    assert jsymphonic.recovery_action_for(read_only.code, recover=True) == 'inspect_recover'
+    assert jsymphonic.recovery_action_for(read_only.code) == 'clear_read_only_retry'
+    assert jsymphonic.recovery_action_for('PLAYLIST_OTHER') is None
+
+
 @pytest.mark.parametrize("code", FATAL_CODES)
 def test_known_fatal_code_passes_through(monkeypatch, code):
     scripted(monkeypatch, [{"event": "fatal", "message": "playlist blocked", "code": code}], exit_code=1)

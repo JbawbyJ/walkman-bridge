@@ -31,6 +31,15 @@ CODES = (
     'PLAYLIST_SLOTS_EXHAUSTED',
     'DEVICE_ROLLBACK_FAILED',
 )
+RECOVERY_BY_CODE = {
+    'PLAYLIST_REF_MISSING': 'repair',
+    'PLAYLIST_JOURNAL_PENDING': 'inspect_recover',
+    'PLAYLIST_SLOTS_EXHAUSTED': 'free_slots',
+    'PLAYLIST_LIBRARY_NOT_LOADED': 'reconnect_retry',
+    'DEVICE_ROLLBACK_FAILED': 'inspect_recover',
+    'DEVICE_FILE_LOCKED': 'close_and_retry',
+    'DEVICE_FILE_READ_ONLY': 'clear_read_only_retry',
+}
 
 
 def use_fake(monkeypatch, context, scenario):
@@ -150,6 +159,7 @@ def test_repair_empty_mount_fatal_is_library_not_loaded(context, monkeypatch):
     detail = response.json()['detail']
     assert detail['code'] == 'library_not_loaded'
     assert detail['fatal_code'] == 'PLAYLIST_LIBRARY_NOT_LOADED'
+    assert detail['recovery_action'] == 'reconnect_retry'
     assert 'empty_mount' not in detail
     assert 'fatal_path' not in detail
     assert 'Playlist repair refused' in detail['message']
@@ -168,6 +178,7 @@ def test_repair_refuses_an_empty_track_list_before_the_shim(context, monkeypatch
     detail = response.json()['detail']
     assert detail['code'] == 'library_not_loaded'
     assert detail['fatal_code'] == 'PLAYLIST_LIBRARY_NOT_LOADED'
+    assert detail['recovery_action'] == 'reconnect_retry'
     assert 'empty_mount' not in detail
     assert context.calls['list'] == 1
     job = context.client.get('/api/jobs/' + detail['job_id']).json()
@@ -176,20 +187,50 @@ def test_repair_refuses_an_empty_track_list_before_the_shim(context, monkeypatch
     assert job['files'][0]['fatal_code'] == 'PLAYLIST_LIBRARY_NOT_LOADED'
 
 
-def test_repair_reuses_a_cached_empty_track_list(context, monkeypatch):
-    context.tracks.clear()
-    assert context.client.get('/api/tracks').json() == []
+def test_repair_lists_again_when_the_cache_is_stale(context, monkeypatch):
+    assert context.client.get('/api/tracks').json()
     assert context.calls['list'] == 1
-
-    def explode(mount):
-        raise AssertionError('cached track list should be reused')
-
-    context.api.list_tracks = explode
-    use_fake(monkeypatch, context, 'playlist_repair_some')
+    context.tracks.clear()
+    repaired = []
+    context.api.repair_playlists = lambda mount: repaired.append(mount)
     response = context.client.post(REPAIR)
     assert response.status_code == 409, response.text
-    assert response.json()['detail']['fatal_code'] == 'PLAYLIST_LIBRARY_NOT_LOADED'
-    assert response.json()['detail']['code'] == 'library_not_loaded'
+    detail = response.json()['detail']
+    assert detail['code'] == 'library_not_loaded'
+    assert detail['fatal_code'] == 'PLAYLIST_LIBRARY_NOT_LOADED'
+    assert detail['recovery_action'] == 'reconnect_retry'
+    assert repaired == []
+    assert context.calls['list'] == 2
+    job = context.client.get('/api/jobs/' + detail['job_id']).json()
+    assert job['needs_reconcile'] is False
+
+
+def test_repair_refreshes_a_cached_empty_list_before_refusing(context, monkeypatch):
+    context.tracks.clear()
+    assert context.client.get('/api/tracks').json() == []
+    use_fake(monkeypatch, context, 'playlist_repair_zero')
+    context.tracks.append({'id': '1', 'title': 'Track', 'artist': 'A', 'album': 'B'})
+    response = context.client.post(REPAIR)
+    assert response.status_code == 200, response.text
+    assert context.calls['list'] == 2
+
+
+def test_repair_surfaces_a_listing_failure_and_does_not_repair(context):
+    def fail(mount):
+        raise jsymphonic.JSymphonicError('device list failed', code='PLAYLIST_JOURNAL_PENDING')
+
+    context.api.list_tracks = fail
+    repaired = []
+    context.api.repair_playlists = lambda mount: repaired.append(mount)
+    response = context.client.post(REPAIR)
+    assert response.status_code == 409, response.text
+    detail = response.json()['detail']
+    assert detail['message'] == 'device list failed'
+    assert detail['fatal_code'] == 'PLAYLIST_JOURNAL_PENDING'
+    assert detail['recovery_action'] == 'inspect_recover'
+    assert repaired == []
+    job = context.client.get('/api/jobs/' + detail['job_id']).json()
+    assert job['needs_reconcile'] is False
 
 
 def test_inspect_is_read_only_and_keeps_the_track_cache(context, monkeypatch):
@@ -218,7 +259,7 @@ def test_successful_mutation_clears_the_track_cache(context, monkeypatch, scenar
     job = client.get('/api/jobs/' + result.json()['job_id']).json()
     assert job['status'] == 'done' and job['needs_reconcile'] is False
     assert client.get('/api/tracks').status_code == 200
-    assert context.calls['list'] == 2
+    assert context.calls['list'] == (3 if path == REPAIR else 2)
 
 
 def test_inspect_fatal_is_not_mutating(monkeypatch):
@@ -250,7 +291,11 @@ def test_inspect_passes_fatal_code_like_a_read(context, monkeypatch, code):
     if code is None:
         assert response.json()['detail'] == 'blocked PLAYLIST_JOURNAL_PENDING'
     else:
-        assert response.json()['detail'] == {'message': 'blocked PLAYLIST_JOURNAL_PENDING', 'fatal_code': code}
+        assert response.json()['detail'] == {
+            'message': 'blocked PLAYLIST_JOURNAL_PENDING',
+            'fatal_code': code,
+            'recovery_action': RECOVERY_BY_CODE[code],
+        }
     assert context.app.state.jobs.latest() is None
 
 
@@ -266,6 +311,7 @@ def test_mutation_passes_fatal_code_on_the_write_error(context, monkeypatch, pat
     detail = response.json()['detail']
     assert detail['code'] == 'verify_device_state'
     assert detail['fatal_code'] == (code if code in CODES else None)
+    assert detail['recovery_action'] == RECOVERY_BY_CODE.get(detail['fatal_code'])
     assert 'Verify device state' in detail['message']
     assert 'empty_mount' not in detail
     job = context.client.get('/api/jobs/' + detail['job_id']).json()
@@ -324,39 +370,106 @@ def test_read_only_fatal_line_exposes_code_and_path():
     assert event['event'] == 'fatal'
 
 
-def test_locked_file_passes_path_and_does_not_reconcile(context, monkeypatch):
-    use_fake(monkeypatch, context, 'playlist_file_locked')
-    response = context.client.post(RECOVER)
+@pytest.mark.parametrize('path, scenario, reconcile, action, detail_code, file_state', [
+    (RECOVER, 'playlist_file_locked', True, 'inspect_recover', 'verify_device_state', 'unknown'),
+    (REPAIR, 'playlist_file_locked', False, 'close_and_retry', 'playlist_failed', 'failed'),
+    (RECOVER, 'playlist_file_read_only', True, 'inspect_recover', 'verify_device_state', 'unknown'),
+    (REPAIR, 'playlist_file_read_only', False, 'clear_read_only_retry', 'playlist_failed', 'failed'),
+])
+def test_file_fatal_action_comes_from_the_endpoint(context, monkeypatch, path, scenario, reconcile, action, detail_code, file_state):
+    use_fake(monkeypatch, context, scenario)
+    response = context.client.post(path)
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
-    event = json.loads(LOCKED_FATAL_LINE)
+    if scenario == 'playlist_file_locked':
+        event = json.loads(LOCKED_FATAL_LINE)
+        assert detail['fatal_code'] == event['code']
+        assert detail['fatal_path'] == event['path']
+    else:
+        assert detail['fatal_code'] == 'DEVICE_FILE_READ_ONLY'
+        assert detail['fatal_path'] == 'OMGAUDIO/10F00/10000001.OMA'
+    assert detail['recovery_action'] == action
+    assert detail['code'] == detail_code
+    job = context.client.get('/api/jobs/' + detail['job_id']).json()
+    assert job['needs_reconcile'] is reconcile
+    assert job['files'][0]['state'] == file_state
+    assert job['files'][0]['fatal_code'] == detail['fatal_code']
+    assert job['files'][0]['fatal_path'] == detail['fatal_path']
+
+
+def test_locked_action_ignores_message_text(context, monkeypatch):
+    committed = {
+        'event': 'fatal',
+        'message': 'roll-forward already committed; journal still pending',
+        'code': 'DEVICE_FILE_LOCKED',
+        'path': 'OMGAUDIO/10F00/10000001.OMA',
+    }
+    bind_script(context, monkeypatch, [committed], 1)
+    repair = context.client.post(REPAIR)
+    assert repair.status_code == 409, repair.text
+    repair_detail = repair.json()['detail']
+    assert repair_detail['recovery_action'] == 'close_and_retry'
+    assert repair_detail['fatal_path'] == committed['path']
+    repair_job = context.client.get('/api/jobs/' + repair_detail['job_id']).json()
+    assert repair_job['needs_reconcile'] is False
+    untouched = {
+        'event': 'fatal',
+        'message': 'Nothing was written and no journal is left',
+        'code': 'DEVICE_FILE_LOCKED',
+        'path': 'OMGAUDIO/10F00/10000001.OMA',
+    }
+    bind_script(context, monkeypatch, [untouched], 1)
+    recover = context.client.post(RECOVER)
+    assert recover.status_code == 409, recover.text
+    recover_detail = recover.json()['detail']
+    assert recover_detail['fatal_code'] == 'DEVICE_FILE_LOCKED'
+    assert recover_detail['recovery_action'] == 'inspect_recover'
+    assert recover_detail['fatal_path'] == untouched['path']
+    recover_job = context.client.get('/api/jobs/' + recover_detail['job_id']).json()
+    assert recover_job['needs_reconcile'] is True
+
+
+@pytest.mark.parametrize('line, action', [
+    (LOCKED_FATAL_LINE, 'close_and_retry'),
+    (READ_ONLY_FATAL_LINE, 'clear_read_only_retry'),
+])
+def test_delete_file_fatal_does_not_reconcile(context, monkeypatch, line, action):
+    event = json.loads(line)
+    scripted(monkeypatch, [event], 1)
+    context.api.remove_track = jsymphonic.remove_track
+    etag = context.client.get('/api/tracks').headers['etag']
+    deleted = context.client.delete('/api/tracks/1', headers={'If-Match': etag})
+    assert deleted.status_code == 409, deleted.text
+    detail = deleted.json()['detail']
     assert detail['fatal_code'] == event['code']
-    assert detail['message'] == event['message']
     assert detail['fatal_path'] == event['path']
-    assert detail['code'] == 'playlist_failed'
+    assert detail['recovery_action'] == action
+    assert detail['code'] == 'delete_failed'
     job = context.client.get('/api/jobs/' + detail['job_id']).json()
     assert job['needs_reconcile'] is False
     assert job['files'][0]['state'] == 'failed'
-    assert job['files'][0]['fatal_code'] == event['code']
     assert job['files'][0]['fatal_path'] == event['path']
 
 
-def test_read_only_file_passes_path_and_does_not_reconcile(context, monkeypatch):
-    use_fake(monkeypatch, context, 'playlist_file_read_only')
-    response = context.client.post(RECOVER)
-    assert response.status_code == 409, response.text
-    detail = response.json()['detail']
-    event = json.loads(READ_ONLY_FATAL_LINE)
-    assert detail['fatal_code'] == event['code']
-    assert detail['fatal_path'] == event['path']
-    assert detail['code'] == 'playlist_failed'
-    assert detail['fatal_code'] == 'DEVICE_FILE_READ_ONLY'
-    assert detail['fatal_path'] == 'OMGAUDIO/10F00/10000001.OMA'
-    job = context.client.get('/api/jobs/' + detail['job_id']).json()
-    assert job['needs_reconcile'] is False
-    assert job['files'][0]['state'] == 'failed'
-    assert job['files'][0]['fatal_code'] == 'DEVICE_FILE_READ_ONLY'
-    assert job['files'][0]['fatal_path'] == 'OMGAUDIO/10F00/10000001.OMA'
+@pytest.mark.parametrize('line, action', [
+    (LOCKED_FATAL_LINE, 'close_and_retry'),
+    (READ_ONLY_FATAL_LINE, 'clear_read_only_retry'),
+])
+def test_add_file_fatal_does_not_reconcile(context, monkeypatch, line, action):
+    from test_api import imported
+    event = json.loads(line)
+    scripted(monkeypatch, [event], 1)
+    context.api.add_tracks = jsymphonic.add_tracks
+    job = imported(context)
+    response = context.client.post('/api/transfers', json={'media_ids': [job['files'][0]['media_id']]})
+    assert response.status_code == 200, response.text
+    result = context.client.get('/api/jobs/' + response.json()['job_id']).json()
+    assert result['needs_reconcile'] is False
+    row = result['files'][0]
+    assert row['state'] == 'failed'
+    assert row['fatal_code'] == event['code']
+    assert row['fatal_path'] == event['path']
+    assert row['recovery_action'] == action
 
 
 def test_inspect_read_only_file_passes_the_path(context, monkeypatch):
@@ -366,6 +479,7 @@ def test_inspect_read_only_file_passes_the_path(context, monkeypatch):
     detail = response.json()['detail']
     assert detail['fatal_code'] == 'DEVICE_FILE_READ_ONLY'
     assert detail['fatal_path'] == 'OMGAUDIO/10F00/10000001.OMA'
+    assert detail['recovery_action'] == 'clear_read_only_retry'
     assert context.app.state.jobs.latest() is None
 
 
@@ -380,6 +494,8 @@ def test_locked_file_without_a_string_path_omits_fatal_path(context, monkeypatch
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
     assert detail['fatal_code'] == 'DEVICE_FILE_LOCKED'
+    assert detail['recovery_action'] == 'close_and_retry'
+    assert detail['code'] == 'playlist_failed'
     assert 'fatal_path' not in detail
     job = context.client.get('/api/jobs/' + detail['job_id']).json()
     assert job['needs_reconcile'] is False
@@ -393,6 +509,7 @@ def test_rollback_failure_needs_reconcile(context, monkeypatch):
     detail = response.json()['detail']
     event = json.loads(ROLLBACK_FATAL_LINE)
     assert detail['fatal_code'] == event['code']
+    assert detail['recovery_action'] == 'inspect_recover'
     assert detail['code'] == 'verify_device_state'
     assert 'path' not in event
     assert 'fatal_path' not in detail
@@ -413,6 +530,7 @@ def test_inspect_locked_file_passes_the_path(context, monkeypatch):
         'message': event['message'],
         'fatal_code': event['code'],
         'fatal_path': event['path'],
+        'recovery_action': 'close_and_retry',
     }
     assert context.app.state.jobs.latest() is None
 
@@ -489,6 +607,60 @@ def test_inspect_holds_the_shim_lock_until_it_finishes(monkeypatch):
         watcher.join(5)
     assert held.is_set()
     assert jsymphonic.wait_for_idle(0)
+
+
+@pytest.mark.parametrize('path', [RECOVER, REPAIR])
+def test_concurrent_recovery_requests_do_not_interleave(context, monkeypatch, tmp_path, path):
+    stamp_dir = tmp_path / 'stamps'
+    stamp_dir.mkdir()
+    script = tmp_path / 'recovery_stamp.py'
+    script.write_text(
+        'import json, os, sys, time\n'
+        'from pathlib import Path\n'
+        f'stamp_dir = Path({str(stamp_dir)!r})\n'
+        'command = sys.argv[1]\n'
+        'if command == "list":\n'
+        '    print(json.dumps({"event": "track", "id": "1", "title": "Track", "artist": "A", "album": "B"}), flush=True)\n'
+        '    print(json.dumps({"event": "listEnd", "count": 1}), flush=True)\n'
+        '    raise SystemExit(0)\n'
+        'if command in ("playlist-recover", "playlist-repair"):\n'
+        '    start = time.time()\n'
+        '    time.sleep(0.35)\n'
+        '    end = time.time()\n'
+        '    Path(stamp_dir, str(os.getpid())).write_text(json.dumps({"start": start, "end": end}))\n'
+        '    if command == "playlist-repair":\n'
+        '        print(json.dumps({"event": "playlistRepair", "prunedCount": 0, "prunedTrackIds": [], "playlistIds": []}), flush=True)\n'
+        '    else:\n'
+        '        print(json.dumps({"event": "playlistJournal", "state": "none", "outcome": "none"}), flush=True)\n'
+        '    print(json.dumps({"event": "done"}), flush=True)\n'
+        '    raise SystemExit(0)\n'
+        'print(json.dumps({"event": "fatal", "message": "unexpected " + command}), flush=True)\n'
+        'raise SystemExit(1)\n'
+    )
+    monkeypatch.setattr(jsymphonic, 'SHIM_CMD_PREFIX', [sys.executable, str(script)])
+    context.api.list_tracks = jsymphonic.list_tracks
+    context.api.recover_playlist_journal = jsymphonic.recover_playlist_journal
+    context.api.repair_playlists = jsymphonic.repair_playlists
+    responses = []
+    barrier = threading.Barrier(2)
+
+    def post():
+        barrier.wait(5)
+        responses.append(context.client.post(path))
+
+    threads = [threading.Thread(target=post) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(20)
+    assert not any(thread.is_alive() for thread in threads)
+    assert len(responses) == 2
+    assert [response.status_code for response in responses] == [200, 200]
+    stamps = [json.loads(item.read_text()) for item in stamp_dir.iterdir()]
+    assert len(stamps) == 2
+    (first, second) = sorted(stamps, key=lambda item: item['start'])
+    assert first['end'] <= second['start']
+    assert context.client.get('/api/engine-busy').json()['busy'] is False
 
 
 def test_recovery_routes_reject_after_drain(context):

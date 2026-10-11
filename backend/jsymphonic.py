@@ -68,13 +68,16 @@ class FatalCode(enum.StrEnum):
     PLAYLIST_SLOTS_EXHAUSTED: all 2048 lifetime playlist slots are used.
     PLAYLIST_LIBRARY_NOT_LOADED: playlist repair refused because the mount
     is empty or the library is not loaded. Nothing was written.
-    DEVICE_FILE_LOCKED: a device file is locked. The device is still on its
-    previous snapshot and no journal is left. The fatal event carries a
-    top-level `path`, an opaque string relative to the mount. It is copied
-    unchanged and is never joined or reformatted.
-    DEVICE_FILE_READ_ONLY: the pre-write rename probe found a read-only
-    device file. Nothing was written. It carries the same opaque mount-relative
-    `path` as DEVICE_FILE_LOCKED.
+    DEVICE_FILE_LOCKED: a device file is locked. On recover during
+    roll-forward the save may already be committed and the journal still
+    pending, so that endpoint reconciles. Every other write leaves the
+    previous snapshot in place and leaves no journal. The fatal event
+    carries a top-level `path`, an opaque string relative to the mount.
+    It is copied unchanged and is never joined or reformatted.
+    DEVICE_FILE_READ_ONLY: a device file is read-only. Recover treats it
+    like the locked roll-forward case. Every other write is the pre-write
+    rename probe and writes nothing. It carries the same opaque
+    mount-relative `path` as DEVICE_FILE_LOCKED.
     DEVICE_ROLLBACK_FAILED: rollback did not restore a known snapshot, so
     the device state is uncertain.
 
@@ -132,15 +135,19 @@ def _fatal_needs_reconcile(mutating: bool, code) -> bool:
     return bool(mutating)
 
 
-def job_needs_reconcile(exc, writing: bool) -> bool:
+def job_needs_reconcile(exc, writing: bool, *, recover: bool = False) -> bool:
     """Job flag for a failed device operation.
 
     PLAYLIST_LIBRARY_NOT_LOADED, DEVICE_FILE_LOCKED, and DEVICE_FILE_READ_ONLY
-    leave the previous snapshot in place. DEVICE_ROLLBACK_FAILED leaves the
-    device uncertain.
-    Any other failure is reconciled only after a write has started.
+    leave the previous snapshot in place, except on the recover endpoint.
+    Roll-forward can already be committed while the journal is still pending,
+    so those two codes reconcile there. DEVICE_ROLLBACK_FAILED leaves the
+    device uncertain. Any other failure is reconciled only after a write
+    has started. The endpoint chooses; message text does not.
     """
     code = fatal_code_of(exc)
+    if recover and code in {FatalCode.DEVICE_FILE_LOCKED.value, FatalCode.DEVICE_FILE_READ_ONLY.value}:
+        return True
     if code == FatalCode.DEVICE_ROLLBACK_FAILED.value:
         return True
     if code in {FatalCode.PLAYLIST_LIBRARY_NOT_LOADED.value, FatalCode.DEVICE_FILE_LOCKED.value, FatalCode.DEVICE_FILE_READ_ONLY.value}:
@@ -148,6 +155,30 @@ def job_needs_reconcile(exc, writing: bool) -> bool:
     if not writing:
         return False
     return getattr(exc, "needs_reconcile", True) is not False
+
+
+_RECOVERY_ACTIONS = {
+    FatalCode.PLAYLIST_JOURNAL_PENDING.value: "inspect_recover",
+    FatalCode.DEVICE_ROLLBACK_FAILED.value: "inspect_recover",
+    FatalCode.PLAYLIST_REF_MISSING.value: "repair",
+    FatalCode.PLAYLIST_SLOTS_EXHAUSTED.value: "free_slots",
+    FatalCode.PLAYLIST_LIBRARY_NOT_LOADED.value: "reconnect_retry",
+    FatalCode.DEVICE_FILE_LOCKED.value: "close_and_retry",
+    FatalCode.DEVICE_FILE_READ_ONLY.value: "clear_read_only_retry",
+}
+
+
+def recovery_action_for(code, *, recover: bool = False) -> str | None:
+    """UI action for a fatal code. Recover's locked and read-only fatals use inspect_recover.
+
+    The choice is the endpoint plus the fatal `code`. Message text is ignored.
+    """
+    normalized = normalize_fatal_code(code)
+    if recover and normalized in {FatalCode.DEVICE_FILE_LOCKED, FatalCode.DEVICE_FILE_READ_ONLY}:
+        return "inspect_recover"
+    if normalized is None:
+        return None
+    return _RECOVERY_ACTIONS.get(normalized)
 
 
 class JSymphonicError(RuntimeError):
