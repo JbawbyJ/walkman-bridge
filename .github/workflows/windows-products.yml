@@ -15,7 +15,9 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Pull requests supersede themselves. Pushes to main and integration branches
+  # finish so a later commit does not drop an in-flight verification.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -217,6 +219,7 @@ jobs:
   # skip headless-smoke at job level when the script is absent.
   headless-smoke-present:
     runs-on: windows-2022
+    timeout-minutes: 5
     outputs:
       present: ${{ steps.mark.outputs.present }}
     steps:
@@ -271,3 +274,47 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
           path: packaging/build/headless-smoke/**
+
+  # Same Electron matrix as `npm run test:zoom-matrix` on Linux. The hosted
+  # Windows desktop is 1024x768, which clamps the 1140/1380/1920 cells, so the
+  # job raises it to a supported 1920x1080 mode before Electron starts.
+  zoom-matrix:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - name: Install locked dependencies
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node node_modules/electron/install.js
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Set display resolution for the zoom matrix
+        shell: powershell
+        run: Set-DisplayResolution -Width 1920 -Height 1080 -Force
+      - name: Run zoom matrix
+        run: |
+          Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+          npm run test:zoom-matrix
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: windows-zoom-matrix
+          if-no-files-found: warn
+          retention-days: 14
+          path: frontend/test-output/zoom-matrix

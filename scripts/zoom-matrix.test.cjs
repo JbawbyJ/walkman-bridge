@@ -35,6 +35,26 @@ function killChild(child) {
   }
 }
 
+// killChild returns once the leader has exited. A normal exit can still leave
+// Electron helpers in the detached group, so the finally block sweeps them too.
+function sweepChildGroup(child) {
+  if (!child || child.pid == null) return
+  if (process.platform === 'win32') {
+    try {
+      process.kill(child.pid, 0)
+    } catch (error) {
+      if (error && error.code === 'ESRCH') return
+    }
+    spawnSync('taskkill', ['/T', '/F', '/PID', String(child.pid)], { stdio: 'ignore' })
+    return
+  }
+  try {
+    process.kill(-child.pid, 'SIGKILL')
+  } catch (error) {
+    if (!error || error.code !== 'ESRCH') throw error
+  }
+}
+
 function electronBinary() {
   const saved = process.env.ELECTRON_RUN_AS_NODE
   delete process.env.ELECTRON_RUN_AS_NODE
@@ -102,6 +122,7 @@ test('Electron zoom matrix keeps zoomed layouts inside the viewport', { timeout:
     process.removeListener('SIGINT', onSignal)
     process.removeListener('SIGTERM', onSignal)
     killChild(child)
+    sweepChildGroup(child)
     removeProfile()
   }
 })
