@@ -1,5 +1,5 @@
-// Shared zoom-matrix budget. The harness, the node:test wrapper, and the
-// windows-products zoom-matrix job must stay in this order:
+// Shared zoom-matrix budget. The harness, the node:test wrapper, and both
+// windows-products jobs (zoom-matrix and zoom-matrix-linux) must stay in this order:
 //   harness limit < wrapper timeout (harness + 60s) < job timeout-minutes
 'use strict'
 

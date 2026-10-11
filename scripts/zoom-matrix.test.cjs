@@ -11,24 +11,30 @@ const budget = require('../frontend/tests/zoom-matrix-budget.cjs')
 const root = path.resolve(__dirname, '..')
 const profile = path.join(root, 'frontend', 'test-output', 'zoom-matrix', 'profile')
 
-// Harness limit, this wrapper, and the zoom-matrix job timeout are one budget.
-// frontend/tests/zoom-matrix-budget.cjs throws if they are out of order.
-function zoomMatrixJobTimeoutMinutes() {
-  const workflow = fs.readFileSync(path.join(root, '.github/workflows/windows-products.yml'), 'utf8').replace(/\r\n/g, '\n')
-  const header = '\n  zoom-matrix:\n'
+// Harness limit, this wrapper, and both zoom-matrix job timeouts are one budget.
+// frontend/tests/zoom-matrix-budget.cjs throws if harness < wrapper < job is broken.
+// Headers include the colon so `zoom-matrix` cannot match `zoom-matrix-linux`.
+function zoomMatrixJobTimeoutMinutes(workflow, jobName) {
+  const header = `\n  ${jobName}:\n`
   const start = workflow.indexOf(header)
-  assert.notEqual(start, -1, 'zoom-matrix job missing from windows-products.yml')
+  assert.notEqual(start, -1, `${jobName} job missing from windows-products.yml`)
   const body = workflow.slice(start + header.length)
   const nextJob = body.search(/\n {2}[A-Za-z]/)
   const section = nextJob === -1 ? body : body.slice(0, nextJob)
+  if (jobName === 'zoom-matrix') {
+    assert.equal(section.includes('\n  zoom-matrix-linux:'), false, 'zoom-matrix timeout was read from zoom-matrix-linux')
+  }
   const match = section.match(/\n    timeout-minutes:\s*(\d+)/)
-  assert.ok(match, 'zoom-matrix job is missing timeout-minutes')
+  assert.ok(match, `${jobName} job is missing timeout-minutes`)
   return Number(match[1])
 }
 
-const jobTimeoutMinutes = zoomMatrixJobTimeoutMinutes()
-assert.equal(jobTimeoutMinutes, budget.JOB_TIMEOUT_MINUTES)
-assert.ok(budget.HARNESS_MS < budget.WRAPPER_MS && budget.WRAPPER_MS < jobTimeoutMinutes * 60 * 1000)
+const workflowText = fs.readFileSync(path.join(root, '.github/workflows/windows-products.yml'), 'utf8').replace(/\r\n/g, '\n')
+for (const jobName of ['zoom-matrix', 'zoom-matrix-linux']) {
+  const jobTimeoutMinutes = zoomMatrixJobTimeoutMinutes(workflowText, jobName)
+  assert.equal(jobTimeoutMinutes, budget.JOB_TIMEOUT_MINUTES, jobName)
+  assert.ok(budget.HARNESS_MS < budget.WRAPPER_MS && budget.WRAPPER_MS < jobTimeoutMinutes * 60 * 1000, jobName)
+}
 
 function removeProfile() {
   for (let attempt = 0; attempt < 10; attempt++) {
@@ -107,10 +113,11 @@ test('Electron zoom matrix keeps zoomed layouts inside the viewport', { timeout:
   const electronArgs = ['--disable-gpu', '--disable-dev-shm-usage', harness]
   let command = electronPath
   let args = electronArgs
-  if (process.platform === 'linux') {
+  if (process.platform === 'linux' && process.env.ZOOM_MATRIX_DISPLAY_READY !== '1') {
     command = 'xvfb-run'
-    // 1920x1400 fits every cell, including 800x1200, so Linux runs the full matrix.
-    args = ['-a', '-s', '-screen 0 1920x1400x24', electronPath, ...electronArgs]
+    // 1440px is above the 800x1200 row, so Linux can run every cell. The
+    // zoom-matrix-linux job starts this same screen and sets ZOOM_MATRIX_DISPLAY_READY.
+    args = ['-a', '-s', '-screen 0 1920x1440x24', electronPath, ...electronArgs]
   }
   const posix = process.platform !== 'win32'
   const child = spawn(command, args, {
@@ -153,8 +160,10 @@ test('Electron zoom matrix keeps zoomed layouts inside the viewport', { timeout:
     assert.equal(report.harnessTimeoutMs, budget.HARNESS_MS)
     const unexpected = (report.notRunCells || []).filter(cell => !budget.isExpectedNotRun(cell))
     assert.deepEqual(unexpected, [], `not-run cells outside the 800x1200 row: ${JSON.stringify(unexpected)}`)
-    if (process.platform === 'linux') {
-      assert.equal(report.notRun, 0)
+    // Any not-run cell fails on Linux and in zoom-matrix-linux. Windows may still
+    // skip only the listed 800x1200 cells when that height exceeds the work area.
+    if (process.platform === 'linux' || process.env.ZOOM_MATRIX_FORBID_NOT_RUN === '1') {
+      assert.equal(report.notRun, 0, `not-run cells are not allowed here: ${JSON.stringify(report.notRunCells || [])}`)
       assert.equal(report.passed, report.cases)
     }
   } finally {
