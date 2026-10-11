@@ -12,6 +12,7 @@ async function req(path, options = {}, includeHeaders = false) {
     const error = new Error(typeof detail === 'string' ? detail : detail?.message || `Request failed (${response.status}).`)
     error.status = response.status
     error.code = detail?.code
+    error.fatal_code = detail && typeof detail === 'object' ? detail.fatal_code ?? null : null
     throw error
   }
   return includeHeaders ? { items: body, etag: response.headers.get('etag') } : body
