@@ -12,6 +12,14 @@ const ORIGIN = 'http://127.0.0.1:45679'
 const source = fs.readFileSync(path.join(__dirname, 'main.cjs'), 'utf8')
 const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes }); return { promise, resolve } }
 const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(setImmediate) }
+const waitUntil = async (predicate, timeoutMs = 2000) => {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) return false
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  return true
+}
 
 // Execute the production entry point with only OS/Electron boundaries replaced.
 // No backend, socket, helper, device or user-data file is created by these tests.
@@ -72,7 +80,10 @@ function harness(options = {}) {
   const context = vm.createContext({
     __dirname, process: { argv: options.smoke ? ['--smoke'] : [], env: { LOCALAPPDATA: 'C:\\review-no-files' } },
     console: { log() {}, error() {} }, Buffer, URL, AbortSignal, AbortController,
-    setTimeout: (fn, ms, ...args) => realSetTimeout(fn, options.immediateAckTimeout && ms === 10000 ? 0 : ms, ...args),
+    setTimeout: (fn, ms, ...args) => realSetTimeout(fn, (
+      (options.immediateAckTimeout && ms === 10000) ||
+      (options.immediateReadyTimeout && (ms === 3000 || ms === 20000))
+    ) ? 0 : ms, ...args),
     clearTimeout,
     fetch: async (url, init) => {
       state.requests.push(new URL(url).pathname)
@@ -243,13 +254,84 @@ test('playback stop waits until the renderer registers its handler', async () =>
 test('smoke close deferral exits non-zero instead of hanging', async () => {
   const started = Date.now()
   const h = harness({ smoke: true, noStopAck: true, immediateAckTimeout: true })
-  await flush()
+  assert.equal(await waitUntil(() => h.state.exits >= 1), true)
   assert.equal(h.state.exitCode, 1)
-  assert.ok(h.state.exits >= 1)
   assert.equal(h.state.dialogs.length, 0)
   assert.equal(h.state.kills, 1)
+  assert.equal(h.state.windows[0].options.webPreferences.backgroundThrottling, false)
   assert.match(h.state.logs.join('\n'), /SMOKE OK/)
   assert.match(h.state.logs.join('\n'), /Close deferred: Renderer did not stop playback/)
+  assert.ok(Date.now() - started < 2000)
+})
+
+test('forced close while the backend is busy destroys the window before the lease and waits out the write', async () => {
+  let busy = true
+  let destroyedBeforeRelease
+  const h = harness({ noStopAck: true, immediateAckTimeout: true, fetch: async url => {
+    const pathname = new URL(url).pathname
+    if (pathname === '/api/health') return { ok: true, json: async () => ({ ok: true, product: 'bridge' }) }
+    if (pathname === '/api/internal/playback/release') destroyedBeforeRelease = h.state.windows[0].isDestroyed()
+    if (pathname === '/api/engine-busy') return { ok: true, json: async () => ({ draining: true, busy }) }
+    return { ok: true, json: async () => ({ draining: true, busy: false }) }
+  } })
+  await flush()
+  let settled = false
+  const closing = h.invoke('closeSafely()').then(() => { settled = true })
+  assert.equal(await waitUntil(() => h.state.requests.includes('/api/engine-busy')), true)
+  assert.equal(settled, false)
+  assert.equal(h.state.kills, 0)
+  assert.equal(h.state.windows[0].isDestroyed(), true)
+  assert.equal(destroyedBeforeRelease, true)
+  assert.match(h.state.logs.join('\n'), /Close forced: Renderer did not stop playback/)
+  const releaseAt = h.state.requests.indexOf('/api/internal/playback/release')
+  const busyAt = h.state.requests.indexOf('/api/engine-busy')
+  assert.ok(releaseAt > 0 && releaseAt < busyAt)
+  busy = false
+  await closing
+  assert.equal(h.state.kills, 1)
+  assert.ok(h.state.quits > 0)
+  assert.equal(h.state.dialogs.length, 0)
+})
+
+test('reload clears playback ready so stop waits for the new registration', async () => {
+  const h = harness()
+  await flush()
+  h.state.windows[0].webContents.emit('did-start-navigation', {}, ORIGIN, false, true)
+  let settled = false
+  const closing = h.invoke('closeSafely()').then(() => { settled = true })
+  await flush()
+  assert.equal(settled, false)
+  assert.equal(h.state.stopSends, 0)
+  h.emitPlaybackReady()
+  await closing
+  assert.equal(settled, true)
+  assert.equal(h.state.stopSends, 1)
+  assert.ok(h.state.quits > 0)
+})
+
+test('startup screen ready timeout closes without hanging', async () => {
+  const started = Date.now()
+  const h = harness({ holdPlaybackReady: true, immediateReadyTimeout: true })
+  await flush()
+  assert.equal(h.state.windows[0].options.webPreferences.backgroundThrottling, true)
+  await h.invoke('closeSafely()')
+  assert.ok(h.state.quits > 0)
+  assert.equal(h.state.windows[0].isDestroyed(), true)
+  assert.equal(h.state.kills, 1)
+  assert.equal(h.state.dialogs.length, 0)
+  assert.match(h.state.logs.join('\n'), /Close forced: Renderer did not register playback stop/)
+  assert.ok(Date.now() - started < 2000)
+})
+
+test('smoke exits non-zero when the startup screen never registers playback stop', async () => {
+  const started = Date.now()
+  const h = harness({ smoke: true, holdPlaybackReady: true, immediateReadyTimeout: true })
+  assert.equal(await waitUntil(() => h.state.exits >= 1), true)
+  assert.equal(h.state.exitCode, 1)
+  assert.equal(h.state.dialogs.length, 0)
+  assert.equal(h.state.kills, 1)
+  assert.doesNotMatch(h.state.logs.join('\n'), /SMOKE OK/)
+  assert.match(h.state.logs.join('\n'), /Smoke failed: renderer did not register playback stop/)
   assert.ok(Date.now() - started < 2000)
 })
 
