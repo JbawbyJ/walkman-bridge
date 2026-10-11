@@ -138,3 +138,53 @@ jobs:
             frontend/test-output/resize*/**/*
             packaging/build/management-upgrade/*.json
             packaging/build/media-upgrade/*.json
+
+  # New Bot headless checks: node --test frontend/tests/walkman-smoke.test.mjs
+  # (also picked up by npm run test:frontend once that file exists). The file
+  # is not on main yet; a missing script is a clean skip, not a failure.
+  headless-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - name: Run headless smoke tests
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $Smoke = 'frontend/tests/walkman-smoke.test.mjs'
+          $LogDir = 'packaging/build/headless-smoke'
+          New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+          $Log = Join-Path $LogDir 'output.log'
+          if (-not (Test-Path -LiteralPath $Smoke)) {
+            $Note = "Headless smoke script $Smoke is absent on this revision; skipping."
+            Write-Output $Note
+            Set-Content -LiteralPath $Log -Value $Note
+            exit 0
+          }
+          npm --prefix frontend ci *> $Log
+          if ($LASTEXITCODE) {
+            Get-Content -LiteralPath $Log
+            exit $LASTEXITCODE
+          }
+          node --test $Smoke *>> $Log
+          $Code = $LASTEXITCODE
+          Get-Content -LiteralPath $Log
+          exit $Code
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: windows-headless-smoke
+          if-no-files-found: warn
+          retention-days: 14
+          path: packaging/build/headless-smoke/**
