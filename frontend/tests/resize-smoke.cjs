@@ -1,5 +1,9 @@
-// Run with the real Electron binary after building frontend. This fixture owns
-// its loopback API and never starts a backend, scanner, installer or device.
+// Windows Electron acceptance for both products, including setZoomFactor and
+// screenshot evidence. The headless Bridge Listening/Walkman/Transfer viewport
+// checks live in walkman-smoke.test.mjs and run with `npm run test:frontend`.
+// Run this file with the real Electron binary after building the frontend.
+// This fixture owns its loopback API and never starts a backend, scanner,
+// installer or device.
 'use strict'
 const { app, BrowserWindow } = require('electron')
 const http = require('node:http')
