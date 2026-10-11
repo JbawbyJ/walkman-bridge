@@ -84,6 +84,31 @@ startup and a clean drain, and uninstalls only after the test process exits.
 It retains logs and the installer hash in `packaging/build/install-smoke`.
 Physical Walkman tests remain separately controlled by the operator.
 
+`npm run test:frontend` includes the headless Bridge renderer and resize checks:
+
+```powershell
+node --test frontend/tests/walkman-smoke.test.mjs
+```
+
+The test builds the frontend, serves a local API fixture, and opens headless
+Chrome or Edge. Set `WALKMAN_CHROME` to the browser executable when it is not
+on the default Windows or Linux path. It renders Listening, Walkman and
+Transfer at representative sizes, including the 640×560 minimum and the
+320×280 CSS viewport of that window at 200% zoom. It asserts the shell does
+not overflow, controls are not clipped, transport stays on screen, dialogs
+stay inside the viewport, and the renderer boots with no console or page
+errors. It does not write screenshots, audio, or databases.
+
+Still manual, or still only on the Windows Electron acceptance harness:
+
+- `frontend/tests/resize-smoke.cjs` — Electron `setZoomFactor` matrix for both products, plus screenshot evidence. That zoom is not an operating-system DPI change.
+- `frontend/tests/renderer-smoke.cjs` — real WAV decode, paused restore, seek, queue advance, and playback DSP in Electron.
+- `frontend/tests/dsp-offline.cjs`, the management and media-import Electron harnesses, lifecycle, and the install/uninstall smoke above.
+- Physical NW-S705F firmware menu display and listening, only after a verified full backup.
+- Real UAC elevation of the scanner helper.
+- Clean Windows Sandbox or Hyper-V guest install, upgrade, and Defender acceptance.
+- Human listening comparison.
+
 `verify-asar.cjs` runs after both products are built. It rejects unexpected archive
 entries, including test-only scanner harnesses, and compares packaged Electron
 modules with the verified checkout. CI also executes the real Electron renderer,

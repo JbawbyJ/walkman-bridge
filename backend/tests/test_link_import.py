@@ -202,6 +202,10 @@ def _install_fake_yt_dlp(monkeypatch):
     )
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="yt-dlp is given the Windows deno.exe path; pathlib renders that path differently off Windows",
+)
 def test_download_uses_locked_down_yt_dlp_and_returns_media(tmp_path, monkeypatch):
     _install_fake_yt_dlp(monkeypatch)
     cache = tmp_path / "managed" / "reservation"

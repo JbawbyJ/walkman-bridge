@@ -105,8 +105,11 @@ function validRequest(request) {
     /^[a-f0-9]{64}$/i.test(request.sha256 || '') && Number.isSafeInteger(request.size_bytes) && request.size_bytes >= 0)
 }
 function isManagedPath(candidate, root) {
-  const relative = path.relative(path.resolve(root), path.resolve(candidate))
-  return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative)
+  // Cache and device paths are Windows paths. path.win32 keeps drive-letter
+  // classification identical on every host.
+  const windows = path.win32
+  const relative = windows.relative(windows.resolve(root), windows.resolve(candidate))
+  return relative !== '' && !relative.startsWith(`..${windows.sep}`) && relative !== '..' && !windows.isAbsolute(relative)
 }
 function same(left, right) {
   const a = Buffer.from(String(left)), b = Buffer.from(String(right))

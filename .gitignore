@@ -38,6 +38,17 @@ hardware-proof/**/postflight-state/
 hardware-proof/*.wav
 hardware-proof/playlist-prewrite-backup.json
 *.OMA
+# Case-insensitive audio and Sony device trees. The *.OMA rule above does not
+# match other casings on Linux.
+*.[oO][mM][aA]
+*.[mM][pP]3
+*.[fF][lL][aA][cC]
+*.[mM]4[aA]
+hardware-proof/**/*.[wW][aA][vV]
+**/OMGAUDIO/
+**/[oO][mM][gG][aA][uU][dD][iI][oO]/
+hardware-proof/**/*.DAT
+hardware-proof/**/*.[dD][aA][tT]
 *.sqlite
 # Superseded jsymphonic source snapshot (runtime-lock pins the nightops-0.4.0 archive)
 packaging/sources/jsymphonic-628d5b7e481d-src.zip
