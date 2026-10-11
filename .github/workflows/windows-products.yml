@@ -13,6 +13,12 @@ on:
       - 'agent/**'
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Pull requests supersede themselves. Pushes to main and integration branches
+  # finish so a later commit does not drop an in-flight verification.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -84,7 +90,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python packaging/test_stage.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          node --test frontend/src/*.test.js frontend/tests/*.test.mjs electron/*.test.cjs packaging/*.test.cjs
+          node --test frontend/src/*.test.js (Get-ChildItem frontend/tests/*.test.mjs -Exclude walkman-smoke.test.mjs) electron/*.test.cjs packaging/*.test.cjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Native helper tests and self-contained publish
         run: |
@@ -208,3 +214,174 @@ jobs:
             frontend/test-output/resize*/**/*
             packaging/build/management-upgrade/*.json
             packaging/build/media-upgrade/*.json
+
+  # hashFiles() is rejected on jobs.<job_id>.if. Record it after checkout, then
+  # skip headless-smoke at job level when the script is absent.
+  headless-smoke-present:
+    runs-on: windows-2022
+    timeout-minutes: 5
+    outputs:
+      present: ${{ steps.mark.outputs.present }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: mark
+        name: Check headless smoke script
+        if: hashFiles('frontend/tests/walkman-smoke.test.mjs') != ''
+        shell: pwsh
+        run: echo "present=true" >> $env:GITHUB_OUTPUT
+
+  headless-smoke:
+    needs: headless-smoke-present
+    if: needs.headless-smoke-present.outputs.present == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - name: Run headless smoke tests
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $Smoke = 'frontend/tests/walkman-smoke.test.mjs'
+          $LogDir = 'packaging/build/headless-smoke'
+          New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+          $Log = Join-Path $LogDir 'output.log'
+          npm --prefix frontend ci *> $Log
+          if ($LASTEXITCODE) {
+            Get-Content -LiteralPath $Log
+            exit $LASTEXITCODE
+          }
+          node --test $Smoke *>> $Log
+          $Code = $LASTEXITCODE
+          Get-Content -LiteralPath $Log
+          exit $Code
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: windows-headless-smoke
+          if-no-files-found: warn
+          retention-days: 14
+          path: packaging/build/headless-smoke/**
+
+  # Same Electron matrix as `npm run test:zoom-matrix` on Linux. The hosted
+  # Windows desktop is 1024x768, which clamps the 1140/1380/1920 cells, so the
+  # job raises it to a supported 1920x1080 mode before Electron starts.
+  # timeout-minutes stays above the wrapper in frontend/tests/zoom-matrix-budget.cjs
+  # (harness limit + 60s). Order: harness < wrapper < this job.
+  zoom-matrix:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - name: Install locked dependencies
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node node_modules/electron/install.js
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm --prefix frontend ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Set display resolution for the zoom matrix
+        shell: powershell
+        run: Set-DisplayResolution -Width 1920 -Height 1080 -Force
+      - name: Run zoom matrix
+        run: |
+          Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+          npm run test:zoom-matrix
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: windows-zoom-matrix
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            frontend/test-output/zoom-matrix/report.json
+            !frontend/test-output/zoom-matrix/profile/**
+
+  # The Windows desktop cannot fit 800x1200, so this job runs the same matrix
+  # on a taller xvfb screen. timeout-minutes matches zoom-matrix-budget.cjs:
+  # harness < wrapper < this job. Workflow permissions stay contents: read.
+  zoom-matrix-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - name: Install Electron libraries and xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libnss3 libgbm1 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxshmfence1 libxss1 libxtst6
+          pkgs=""
+          for spec in \
+            "libgtk-3-0t64|libgtk-3-0" \
+            "libasound2t64|libasound2" \
+            "libatk-bridge2.0-0t64|libatk-bridge2.0-0" \
+            "libatk1.0-0t64|libatk1.0-0" \
+            "libcups2t64|libcups2"
+          do
+            preferred="${spec%%|*}"
+            fallback="${spec#*|}"
+            if apt-cache show "$preferred" >/dev/null 2>&1; then pkgs="$pkgs $preferred"
+            else pkgs="$pkgs $fallback"
+            fi
+          done
+          sudo apt-get install -y $pkgs
+      - name: Install locked dependencies
+        run: |
+          npm ci
+          node node_modules/electron/install.js
+          npm --prefix frontend ci
+      - name: Enable the Electron sandbox helper
+        run: |
+          # GitHub's Ubuntu image blocks unprivileged user namespaces, so Electron
+          # uses chrome-sandbox and aborts unless that helper is setuid root.
+          sandbox="node_modules/electron/dist/chrome-sandbox"
+          sudo chown root:root "$sandbox"
+          sudo chmod 4755 "$sandbox"
+      - name: Run zoom matrix
+        env:
+          ZOOM_MATRIX_DISPLAY_READY: '1'
+          ZOOM_MATRIX_FORBID_NOT_RUN: '1'
+        run: xvfb-run -a -s "-screen 0 1920x1440x24" npm run test:zoom-matrix
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: linux-zoom-matrix
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            frontend/test-output/zoom-matrix/report.json
+            !frontend/test-output/zoom-matrix/profile/**
