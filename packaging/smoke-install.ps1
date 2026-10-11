@@ -13,6 +13,9 @@ $ShutdownGraceSeconds = 45
 $DiagnosticsWritten = $false
 $HangRecorded = $false
 $GraceConsumed = $false
+$SmokeStart = $null
+$SmokeGraceSeconds = $null
+$SmokeShortPathOverride = $null
 function Registrations {
     $RegistryRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
     if (-not (Test-Path -LiteralPath $RegistryRoot -ErrorAction Stop)) { return @() }
@@ -37,26 +40,45 @@ function Copy-OwnedProcess($Item) {
         CreationDate = ConvertTo-SmokeInstant $Item.CreationDate
     }
 }
+function Get-SmokeShortPath([string]$Path) {
+    if (-not $Path) { return $null }
+    $key = $Path.TrimEnd('\', '/')
+    if ($script:SmokeShortPathOverride -and $script:SmokeShortPathOverride.ContainsKey($key)) {
+        $override = [string]$script:SmokeShortPathOverride[$key]
+        if ($override -and ($override.TrimEnd('\', '/') -ne $key)) { return $override.TrimEnd('\', '/') }
+        return $null
+    }
+    try {
+        $short = [string](New-Object -ComObject Scripting.FileSystemObject).GetFolder($Path).ShortPath
+        if ($short -and ($short.TrimEnd('\', '/') -ne $key)) { return $short.TrimEnd('\', '/') }
+    } catch { }
+    return $null
+}
 function Hide-SmokePath([string]$Text) {
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
-    $pairs = @(
+    $pairs = [System.Collections.Generic.List[object]]::new()
+    foreach ($entry in @(
         @{ Path = [string]$Repo; Token = '<REPO>' },
         @{ Path = [string]$env:USERPROFILE; Token = '<USERPROFILE>' }
-    ) | Sort-Object { $_.Path.Length } -Descending
-    foreach ($pair in $pairs) {
-        $path = [string]$pair.Path
+    )) {
+        $path = [string]$entry.Path
         if (-not $path) { continue }
         $path = $path.TrimEnd('\', '/')
-        $segments = @($path -split '[\\/]+' | Where-Object { $_ })
+        [void]$pairs.Add([pscustomobject]@{ Path = $path; Token = [string]$entry.Token })
+        $short = Get-SmokeShortPath $path
+        if ($short) { [void]$pairs.Add([pscustomobject]@{ Path = $short; Token = [string]$entry.Token }) }
+    }
+    foreach ($pair in ($pairs | Sort-Object { $_.Path.Length } -Descending)) {
+        $segments = @([string]$pair.Path -split '[\\/]+' | Where-Object { $_ })
         if (-not $segments) { continue }
-        $body = (($segments | ForEach-Object { [regex]::Escape($_) }) -join '[\\/]')
-        $pattern = $body + '(?=$|[\\/]|[\s"''])'
-        $Text = [regex]::Replace($Text, $pattern, $pair.Token, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        $body = (($segments | ForEach-Object { [regex]::Escape($_) }) -join '(?:\\\\|[\\/])')
+        $pattern = $body + '(?=(?:\.(?=$|\s))|(?![A-Za-z0-9_.~-]))'
+        $Text = [regex]::Replace($Text, $pattern, [string]$pair.Token, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     }
     return $Text
 }
 function Get-SmokeProcesses {
-    param([int]$RootProcessId, [string]$OwnedPath)
+    param([int]$RootProcessId, [string]$OwnedPath, $SmokeStart)
     try { $snapshot = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop) }
     catch { throw "Win32_Process query failed: $($_.Exception.Message)" }
     $byId = @{}
@@ -93,8 +115,8 @@ function Get-SmokeProcesses {
             foreach ($child in $childrenOf[$current]) { $pending.Enqueue([string][int]$child.ProcessId) }
         }
     }
-    $smokeStart = $null
-    if ($RootProcessId -gt 0 -and $byId.ContainsKey([string]$RootProcessId)) {
+    $smokeStart = ConvertTo-SmokeInstant $SmokeStart
+    if (-not $smokeStart -and $RootProcessId -gt 0 -and $byId.ContainsKey([string]$RootProcessId)) {
         $smokeStart = ConvertTo-SmokeInstant $byId[[string]$RootProcessId].CreationDate
     }
     $owned = if ($OwnedPath) { $OwnedPath.TrimEnd('\') } else { '' }
@@ -114,19 +136,21 @@ function Get-SmokeProcesses {
     return @($found | Where-Object { [int]$_.ProcessId -gt 0 -and [int]$_.ProcessId -ne $PID })
 }
 function Test-SmokeTreeClear {
-    param($Process, [string]$OwnedPath)
+    param($Process, [string]$OwnedPath, $SmokeStart)
     if ($Process) { try { $Process.Refresh() } catch { } }
     $rootId = if ($Process) { [int]$Process.Id } else { 0 }
     if ($Process -and -not $Process.HasExited) { return $false }
-    $extras = @(Get-SmokeProcesses -RootProcessId $rootId -OwnedPath $OwnedPath | Where-Object { [int]$_.ProcessId -ne $rootId })
+    if (-not $SmokeStart) { $SmokeStart = $script:SmokeStart }
+    $extras = @(Get-SmokeProcesses -RootProcessId $rootId -OwnedPath $OwnedPath -SmokeStart $SmokeStart | Where-Object { [int]$_.ProcessId -ne $rootId })
     return ($extras.Count -eq 0)
 }
 function Wait-SmokeShutdown {
-    param($Process, [string]$OwnedPath, [int]$GraceSeconds)
+    param($Process, [string]$OwnedPath, [int]$GraceSeconds, $SmokeStart)
     $script:SmokeGraceSeconds = $GraceSeconds
+    if (-not $SmokeStart) { $SmokeStart = $script:SmokeStart }
     $deadline = [datetime]::UtcNow.AddSeconds($GraceSeconds)
     while ($true) {
-        if (Test-SmokeTreeClear -Process $Process -OwnedPath $OwnedPath) { return $true }
+        if (Test-SmokeTreeClear -Process $Process -OwnedPath $OwnedPath -SmokeStart $SmokeStart) { return $true }
         if ([datetime]::UtcNow -ge $deadline) { return $false }
         Start-Sleep -Seconds 1
     }
@@ -176,15 +200,18 @@ function Get-SmokeStopSkip {
     return $null
 }
 function Stop-SmokeLeftovers {
-    param($Processes, $Process)
+    param($Processes, $Process, $SmokeStart)
     $pending = [System.Collections.Generic.List[object]]::new()
     foreach ($item in @($Processes)) {
         if ([int]$item.ProcessId -gt 0 -and [int]$item.ProcessId -ne $PID) { [void]$pending.Add($item) }
     }
     $smokeProcessId = if ($Process) { [int]$Process.Id } else { 0 }
-    $smokeStart = $null
-    foreach ($item in @($pending)) {
-        if ($smokeProcessId -and [int]$item.ProcessId -eq $smokeProcessId -and $item.CreationDate) { $smokeStart = ConvertTo-SmokeInstant $item.CreationDate; break }
+    $smokeStart = ConvertTo-SmokeInstant $SmokeStart
+    if (-not $smokeStart) { $smokeStart = ConvertTo-SmokeInstant $script:SmokeStart }
+    if (-not $smokeStart) {
+        foreach ($item in @($pending)) {
+            if ($smokeProcessId -and [int]$item.ProcessId -eq $smokeProcessId -and $item.CreationDate) { $smokeStart = ConvertTo-SmokeInstant $item.CreationDate; break }
+        }
     }
     if ($Process -and -not $Process.HasExited -and $smokeProcessId -ne $PID) {
         if (-not @($pending | Where-Object { [int]$_.ProcessId -eq $smokeProcessId })) {
@@ -223,17 +250,18 @@ function Stop-SmokeLeftovers {
     if ($Process) { try { $Process.Refresh() } catch { } }
 }
 function Publish-SmokeHang {
-    param($Process)
+    param($Process, $SmokeStart)
+    if (-not $SmokeStart) { $SmokeStart = $script:SmokeStart }
     $rootId = if ($Process) { [int]$Process.Id } else { 0 }
-    $remaining = @(Get-SmokeProcesses -RootProcessId $rootId -OwnedPath $Run)
+    $remaining = @(Get-SmokeProcesses -RootProcessId $rootId -OwnedPath $Run -SmokeStart $SmokeStart)
     if (-not $script:DiagnosticsWritten) {
         Write-SmokeDiagnostics -Processes $remaining -LogPath $Log -Process $Process
         $script:DiagnosticsWritten = $true
     }
-    Stop-SmokeLeftovers -Processes $remaining -Process $Process
+    Stop-SmokeLeftovers -Processes $remaining -Process $Process -SmokeStart $SmokeStart
     $settle = [datetime]::UtcNow.AddSeconds(5)
     do {
-        if (Test-SmokeTreeClear -Process $Process -OwnedPath $Run) { break }
+        if (Test-SmokeTreeClear -Process $Process -OwnedPath $Run -SmokeStart $SmokeStart) { break }
         if ([datetime]::UtcNow -ge $settle) { break }
         Start-Sleep -Seconds 1
     } while ($true)
@@ -278,11 +306,12 @@ try {
     if (-not (Test-Path -LiteralPath $AppPath)) { throw 'Installer did not create the expected executable' }
     $Process = Start-Process -FilePath $AppPath -ArgumentList '--smoke' -WindowStyle Hidden -PassThru
     $null = $Process.Handle
+    try { $script:SmokeStart = $Process.StartTime.ToUniversalTime() } catch { $script:SmokeStart = $null }
     $smokeExited = $Process.WaitForExit(120000)
     if ($smokeExited) { $Process.WaitForExit(); $Process.Refresh() }
     $script:GraceConsumed = $true
-    if (-not (Wait-SmokeShutdown -Process $Process -OwnedPath $Run -GraceSeconds $ShutdownGraceSeconds)) {
-        Publish-SmokeHang -Process $Process
+    if (-not (Wait-SmokeShutdown -Process $Process -OwnedPath $Run -GraceSeconds $ShutdownGraceSeconds -SmokeStart $script:SmokeStart)) {
+        Publish-SmokeHang -Process $Process -SmokeStart $script:SmokeStart
     }
     $Process.WaitForExit(); $Process.Refresh()
     if ($Process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $Log) -or -not (Select-String -LiteralPath $Log -Pattern 'SMOKE OK' -Quiet)) {
@@ -296,14 +325,14 @@ try {
 } finally {
     try {
       if ($Installed) {
-        if (-not $script:GraceConsumed -and -not (Test-SmokeTreeClear -Process $Process -OwnedPath $Run)) {
+        if (-not $script:GraceConsumed -and -not (Test-SmokeTreeClear -Process $Process -OwnedPath $Run -SmokeStart $script:SmokeStart)) {
             $script:GraceConsumed = $true
-            if (-not (Wait-SmokeShutdown -Process $Process -OwnedPath $Run -GraceSeconds $ShutdownGraceSeconds)) {
-                Publish-SmokeHang -Process $Process
+            if (-not (Wait-SmokeShutdown -Process $Process -OwnedPath $Run -GraceSeconds $ShutdownGraceSeconds -SmokeStart $script:SmokeStart)) {
+                Publish-SmokeHang -Process $Process -SmokeStart $script:SmokeStart
             }
         }
-        if (-not (Test-SmokeTreeClear -Process $Process -OwnedPath $Run)) {
-            if (-not $script:HangRecorded) { Publish-SmokeHang -Process $Process }
+        if (-not (Test-SmokeTreeClear -Process $Process -OwnedPath $Run -SmokeStart $script:SmokeStart)) {
+            if (-not $script:HangRecorded) { Publish-SmokeHang -Process $Process -SmokeStart $script:SmokeStart }
             $grace = if ($null -ne $script:SmokeGraceSeconds) { $script:SmokeGraceSeconds } else { $ShutdownGraceSeconds }
             throw "Product remains running after ${grace}s shutdown grace; diagnostics logged and leftovers terminated."
         }
@@ -330,7 +359,8 @@ try {
         $env:APPDATA = $OldRoaming
         $env:ELECTRON_RUN_AS_NODE = $OldNode
         $Proof.passed = $BodyPassed -and $Proof.cleanup.passed
-        $Proof | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Run 'result.json') -Encoding utf8
+        $redactedProof = Hide-SmokePath ($Proof | ConvertTo-Json -Depth 5)
+        Set-Content -LiteralPath (Join-Path $Run 'result.json') -Encoding utf8 -Value $redactedProof
     }
 }
-Write-Host "Installed smoke passed: $Product ($Run)"
+Write-Host (Hide-SmokePath "Installed smoke passed: $Product ($Run)")
