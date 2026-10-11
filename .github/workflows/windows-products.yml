@@ -13,6 +13,10 @@ on:
       - 'agent/**'
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -84,7 +88,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python packaging/test_stage.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          node --test frontend/src/*.test.js frontend/tests/*.test.mjs electron/*.test.cjs packaging/*.test.cjs
+          node --test frontend/src/*.test.js (Get-ChildItem frontend/tests/*.test.mjs -Exclude walkman-smoke.test.mjs) electron/*.test.cjs packaging/*.test.cjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Native helper tests and self-contained publish
         run: |
@@ -208,3 +212,62 @@ jobs:
             frontend/test-output/resize*/**/*
             packaging/build/management-upgrade/*.json
             packaging/build/media-upgrade/*.json
+
+  # hashFiles() is rejected on jobs.<job_id>.if. Record it after checkout, then
+  # skip headless-smoke at job level when the script is absent.
+  headless-smoke-present:
+    runs-on: windows-2022
+    outputs:
+      present: ${{ steps.mark.outputs.present }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: mark
+        name: Check headless smoke script
+        if: hashFiles('frontend/tests/walkman-smoke.test.mjs') != ''
+        shell: pwsh
+        run: echo "present=true" >> $env:GITHUB_OUTPUT
+
+  headless-smoke:
+    needs: headless-smoke-present
+    if: needs.headless-smoke-present.outputs.present == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - name: Run headless smoke tests
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $Smoke = 'frontend/tests/walkman-smoke.test.mjs'
+          $LogDir = 'packaging/build/headless-smoke'
+          New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+          $Log = Join-Path $LogDir 'output.log'
+          npm --prefix frontend ci *> $Log
+          if ($LASTEXITCODE) {
+            Get-Content -LiteralPath $Log
+            exit $LASTEXITCODE
+          }
+          node --test $Smoke *>> $Log
+          $Code = $LASTEXITCODE
+          Get-Content -LiteralPath $Log
+          exit $Code
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: windows-headless-smoke
+          if-no-files-found: warn
+          retention-days: 14
+          path: packaging/build/headless-smoke/**
