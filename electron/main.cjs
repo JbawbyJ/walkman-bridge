@@ -1,5 +1,5 @@
 'use strict'
-const { app, BrowserWindow, dialog, ipcMain, session, screen } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, session, screen, Notification } = require('electron')
 const { spawn } = require('node:child_process')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
@@ -24,7 +24,11 @@ app.setAppUserModelId(`com.redlotus.nightops.${product}`)
 app.setPath('userData', dataDir)
 const token = crypto.randomBytes(48).toString('base64url')
 let child, window, origin, broker, isolatedSession, cookieWrite
-let closing = false, allowClose = false
+let closing = false, allowClose = false, playbackReady = false
+let deviceWriteFinishing = false, drainNotice = null
+const drainNoticeBody = `${name} is finishing a save to your Walkman and will close by itself.`
+const playbackReadyWaitMs = 3000
+const smokeReadyWaitMs = 20000
 let backendLost = false, expectedBackendExit = false, rendererGone = false
 const backendLifetime = new AbortController()
 fs.mkdirSync(dataDir, { recursive: true })
@@ -133,13 +137,54 @@ async function healthy() {
   }
   throw new Error('Authenticated backend health check timed out')
 }
+function clearDrainNotice() {
+  const notice = drainNotice
+  drainNotice = null
+  if (!notice) return
+  try { notice.close() } catch (error) { log(`Drain notice close: ${error.message}`) }
+}
+function showDrainNotice() {
+  // No tray exists. A toast is the notice while the window is already gone.
+  // Smoke never has an operator waiting on this process.
+  if (smoke || !deviceWriteFinishing) return
+  clearDrainNotice()
+  try {
+    if (typeof Notification !== 'function') return
+    if (typeof Notification.isSupported === 'function' && !Notification.isSupported()) return
+    const notice = new Notification({ title: name, body: drainNoticeBody })
+    drainNotice = notice
+    notice.show()
+  } catch (error) { log(`Drain notice: ${error.message}`) }
+}
+function endDrainNotice() {
+  deviceWriteFinishing = false
+  clearDrainNotice()
+}
 function terminateIdleBackend() {
   expectedBackendExit = true
   backendLifetime.abort(new Error('Backend has shut down'))
   if (child && child.exitCode === null) child.kill()
 }
+function waitForPlaybackReady(timeoutMs = playbackReadyWaitMs) {
+  if (playbackReady || rendererGone || !window || window.isDestroyed()) return Promise.resolve()
+  return new Promise(resolve => {
+    const contents = window.webContents
+    const cleanup = () => { clearTimeout(timer); ipcMain.removeListener('playback:ready', done); contents.removeListener('render-process-gone', finish); contents.removeListener('destroyed', finish) }
+    const finish = () => { cleanup(); resolve() }
+    const done = event => { if (validSender(event, window, origin)) finish() }
+    const timer = setTimeout(finish, timeoutMs)
+    ipcMain.on('playback:ready', done)
+    contents.once('render-process-gone', finish)
+    contents.once('destroyed', finish)
+  })
+}
 async function stopPlayback() {
   if (!window || window.isDestroyed() || rendererGone) return
+  // runSmoke follows loadURL, before usePlayer's effect subscribes. Wait until
+  // that subscription signals, instead of sending a stop the renderer drops.
+  await waitForPlaybackReady()
+  if (!window || window.isDestroyed() || rendererGone) return
+  if (!playbackReady) throw new Error('Renderer did not register playback stop')
   // Execute only a constant script in the known local main frame. No user data is interpolated.
   try { await window.webContents.executeJavaScript("window.dispatchEvent(new Event('walkman:stop-playback')); for (const audio of document.querySelectorAll('audio')) { audio.pause(); audio.removeAttribute('src'); audio.load(); }") }
   catch (error) { if (!rendererGone && !window.isDestroyed()) throw error }
@@ -158,6 +203,42 @@ async function stopPlayback() {
     contents.once('destroyed', gone)
     window.webContents.send('playback:stop', nonce)
   })
+}
+async function exitUnresponsiveRenderer(error) {
+  // Confirmed renderer loss. Destroy the window before the lease is released so
+  // playback is already gone, then drain admitted device work. The backend is
+  // terminated only after that busy-wait, so a Walkman write is not killed.
+  log(`Close forced: ${error.message}. Exiting because the renderer did not acknowledge playback stop.`)
+  try { broker?.stop() } catch (stopError) { log(`Broker stop during forced close: ${stopError.message}`) }
+  if (window && !window.isDestroyed()) window.destroy()
+  rendererGone = true
+  if (backendLost) return
+  try {
+    await drainUntilIdle({ stopPlayback: async () => {
+      await request('POST', '/api/internal/playback/release')
+    }, request, onWaiting: () => {
+      if (deviceWriteFinishing) return
+      deviceWriteFinishing = true
+      showDrainNotice()
+    } })
+  } catch (drainError) {
+    endDrainNotice()
+    if (backendLost) return
+    log(`Close deferred: ${drainError.message}`)
+    closing = false
+    const warning = { type: 'warning', buttons: ['Retry shutdown'],
+      message: 'The app cannot confirm that all work has finished.',
+      detail: 'The player has stopped, but background work may still be active. Retry shutdown to wait for that work before exiting.\n' + drainError.message }
+    const result = await dialog.showMessageBox(warning)
+    if (result.response === 0) void closeSafely()
+    return
+  }
+  endDrainNotice()
+  try { await revokeSession() } catch (revokeError) { log(`Session revoke during forced close: ${revokeError.message}`) }
+  if (backendLost) return
+  allowClose = true
+  terminateIdleBackend()
+  app.quit()
 }
 async function closeSafely() {
   if (closing || allowClose) return
@@ -178,18 +259,30 @@ async function closeSafely() {
     app.quit()
   } catch (error) {
     if (backendLost) return
+    if (smoke) {
+      log(`Close deferred: ${error.message}`)
+      try { broker?.stop() } catch (stopError) { log(`Broker stop during forced close: ${stopError.message}`) }
+      allowClose = true
+      terminateIdleBackend()
+      if (window && !window.isDestroyed()) window.destroy()
+      app.exit(1)
+      return
+    }
+    if (error.message === 'Renderer did not stop playback' || error.message === 'Renderer did not register playback stop') {
+      await exitUnresponsiveRenderer(error)
+      return
+    }
     log(`Close deferred: ${error.message}`)
     closing = false
     const warning = { type: 'warning', buttons: [rendererGone ? 'Retry shutdown' : 'Keep open'],
       message: 'The app cannot confirm that all work has finished.',
       detail: (rendererGone ? 'The player has stopped, but background work may still be active. Retry shutdown to wait for that work before exiting.\n' : 'The window will remain open. Check the operation status before closing again.\n') + error.message }
-    if (!smoke) {
-      const result = await (rendererGone ? dialog.showMessageBox(warning) : dialog.showMessageBox(window, warning))
-      if (rendererGone && result.response === 0) void closeSafely()
-    }
+    const result = await (rendererGone ? dialog.showMessageBox(warning) : dialog.showMessageBox(window, warning))
+    if (rendererGone && result.response === 0) void closeSafely()
   }
 }
 function wireIpc() {
+  ipcMain.on('playback:ready', event => { if (validSender(event, window, origin)) playbackReady = true })
   for (const action of ['minimize', 'maximize', 'close']) {
     ipcMain.handle(`win:${action}`, event => {
       if (!isBackendAlive() || !validSender(event, window, origin)) throw new Error('Untrusted IPC sender')
@@ -220,11 +313,19 @@ async function createWindow() {
     minWidth, minHeight, resizable: true, frame: false, show: false,
     backgroundColor: '#160c0e', autoHideMenuBar: true,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), session: isolated,
+      // Smoke never shows the window. Throttling that hidden page delays the
+      // playback-stop subscription, so the close ack never arrives. Shown
+      // windows keep Chromium's default throttling.
+      backgroundThrottling: !smoke,
       additionalArguments: [`--nightops-product=${product}`], contextIsolation: true, sandbox: true, nodeIntegration: false,
       webSecurity: true, allowRunningInsecureContent: false, webviewTag: false } })
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.webContents.on('will-navigate', (event, url) => { if (!isBackendAlive() || !ownOrigin(url, origin)) event.preventDefault() })
   window.webContents.on('will-attach-webview', event => event.preventDefault())
+  window.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+    // A reload replaces the JS context. In-place and subframe navigations do not.
+    if (isMainFrame && !isInPlace) playbackReady = false
+  })
   window.webContents.on('render-process-gone', (_event, details) => {
     rendererGone = true
     log(`Renderer exited: ${details.reason}`)
@@ -238,6 +339,19 @@ async function createWindow() {
   if (!smoke) window.show()
 }
 async function runSmoke() {
+  await waitForPlaybackReady(smokeReadyWaitMs)
+  if (!playbackReady) {
+    const reason = 'Smoke failed: renderer did not register playback stop'
+    log(reason)
+    console.error(reason)
+    try { broker?.stop() } catch (stopError) { log(`Broker stop during forced close: ${stopError.message}`) }
+    if (backendLost) return
+    allowClose = true
+    terminateIdleBackend()
+    if (window && !window.isDestroyed()) window.destroy()
+    app.exit(1)
+    return
+  }
   const result = await window.webContents.executeJavaScript(`({ product: window.walkmanBridge.product,
     hasClose: typeof window.walkmanBridge.close === 'function', origin: location.origin,
     cookieHidden: !document.cookie.includes('nightops_session'), title: document.title })`)
@@ -252,7 +366,12 @@ async function runSmoke() {
 
 if (!app.requestSingleInstanceLock()) app.quit()
 else {
-  app.on('second-instance', () => { if (window && !window.isDestroyed()) { if (window.isMinimized()) window.restore(); window.focus() } })
+  app.on('second-instance', () => {
+    if (window && !window.isDestroyed()) { if (window.isMinimized()) window.restore(); window.focus(); return }
+    // The window is already gone while a device write finishes. Re-show the
+    // notice. Do not open a window or start another backend.
+    if (deviceWriteFinishing) showDrainNotice()
+  })
   app.on('before-quit', event => { if (!allowClose && window) { event.preventDefault(); void closeSafely() } })
   // Unexpected loss must finish capability revocation and show its recovery dialog.
   app.on('window-all-closed', () => { if (allowClose && !backendLost) app.quit() })

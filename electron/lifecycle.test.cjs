@@ -12,6 +12,14 @@ const ORIGIN = 'http://127.0.0.1:45679'
 const source = fs.readFileSync(path.join(__dirname, 'main.cjs'), 'utf8')
 const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes }); return { promise, resolve } }
 const flush = async () => { for (let i = 0; i < 10; i++) await new Promise(setImmediate) }
+const waitUntil = async (predicate, timeoutMs = 2000) => {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) return false
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  return true
+}
 
 // Execute the production entry point with only OS/Electron boundaries replaced.
 // No backend, socket, helper, device or user-data file is created by these tests.
@@ -19,7 +27,7 @@ function harness(options = {}) {
   const backend = new EventEmitter()
   backend.stdout = new EventEmitter(); backend.stderr = new EventEmitter()
   backend.exitCode = null; backend.killed = false
-  const state = { windows: [], dialogs: [], requests: [], brokerStops: 0, brokerStarts: 0, quits: 0, kills: 0, cookiesRemoved: 0, cookie: null }
+  const state = { windows: [], dialogs: [], notices: [], requests: [], logs: [], brokerStops: 0, brokerStarts: 0, spawns: 0, quits: 0, exits: 0, exitCode: undefined, stopSends: 0, kills: 0, cookiesRemoved: 0, cookie: null }
   backend.kill = () => { state.kills++; backend.killed = true; backend.exitCode = 0; backend.emit('exit', 0) }
   const ipcMain = new EventEmitter()
   ipcMain.handle = () => {}
@@ -32,20 +40,36 @@ function harness(options = {}) {
     setPermissionRequestHandler() {}, setPermissionCheckHandler() {},
     async closeAllConnections() { state.connectionsClosed = true },
   }
+  class Notice {
+    constructor(options) { this.options = options; this.shown = false; this.closed = false; state.notices.push(this) }
+    show() { this.shown = true }
+    close() { this.closed = true }
+    static isSupported() { return true }
+  }
   class Window extends EventEmitter {
     constructor(windowOptions) {
       super(); this.destroyed = false; this.options = windowOptions; state.windows.push(this)
       this.webContents = new EventEmitter()
       Object.assign(this.webContents, {
         mainFrame: { url: ORIGIN }, setWindowOpenHandler() {},
-        async executeJavaScript() {}, stop() { state.playbackStopped = true },
+        async executeJavaScript(code) {
+          if (!options.smoke) return
+          const script = String(code)
+          if (script.includes('hasClose')) return { product: 'bridge', hasClose: true, cookieHidden: true, origin: ORIGIN, title: 'Walkman Bridge' }
+          if (script.includes('scanner/pending')) return 403
+        }, stop() { state.playbackStopped = true },
         send: (channel, nonce) => {
-          if (channel === 'playback:stop' && !options.noStopAck) queueMicrotask(() => ipcMain.emit(options.stopFailed ? 'playback:stop-failed' : 'playback:stopped', { sender: this.webContents, senderFrame: this.webContents.mainFrame }, nonce))
+          if (channel !== 'playback:stop') return
+          state.stopSends++
+          if (!options.noStopAck) queueMicrotask(() => ipcMain.emit(options.stopFailed ? 'playback:stop-failed' : 'playback:stopped', { sender: this.webContents, senderFrame: this.webContents.mainFrame }, nonce))
         },
       })
     }
     isDestroyed() { return this.destroyed }
-    async loadURL() {}
+    async loadURL() {
+      if (options.holdPlaybackReady) return
+      queueMicrotask(() => ipcMain.emit('playback:ready', { sender: this.webContents, senderFrame: this.webContents.mainFrame }))
+    }
     show() { state.shown = true }
     destroy() { if (this.destroyed) return; this.destroyed = true; this.webContents.emit('destroyed'); app.emit('window-all-closed') }
   }
@@ -53,19 +77,26 @@ function harness(options = {}) {
     if (key === 'isPackaged') return false
     if (key === 'requestSingleInstanceLock') return () => true
     if (key === 'whenReady') return () => Promise.resolve()
-    if (key === 'quit' || key === 'exit') return () => { state.quits++ }
+    if (key === 'quit') return () => { state.quits++ }
+    if (key === 'exit') return (code = 0) => { state.exits++; state.exitCode = code }
     return key in target ? target[key] : () => {}
   } })
-  const fakeFs = { mkdirSync() {}, appendFileSync() {}, existsSync: () => true, readdirSync: () => [] }
+  const fakeFs = { mkdirSync() {}, appendFileSync(_file, line) { state.logs.push(String(line)) }, existsSync: () => true, readdirSync: () => [] }
+  const realSetTimeout = setTimeout
   const context = vm.createContext({
-    __dirname, process: { argv: [], env: { LOCALAPPDATA: 'C:\\review-no-files' } },
-    console: { log() {}, error() {} }, Buffer, URL, AbortSignal, AbortController, setTimeout, clearTimeout,
+    __dirname, process: { argv: options.smoke ? ['--smoke'] : [], env: { LOCALAPPDATA: 'C:\\review-no-files' } },
+    console: { log() {}, error() {} }, Buffer, URL, AbortSignal, AbortController,
+    setTimeout: (fn, ms, ...args) => realSetTimeout(fn, (
+      (options.immediateAckTimeout && ms === 10000) ||
+      (options.immediateReadyTimeout && (ms === 3000 || ms === 20000))
+    ) ? 0 : ms, ...args),
+    clearTimeout,
     fetch: async (url, init) => {
       state.requests.push(new URL(url).pathname)
       return options.fetch ? options.fetch(url, init) : ({ ok: true, json: async () => url.endsWith('/api/health') ? { ok: true, product: 'bridge' } : { draining: true, busy: false } })
     },
     require(name) {
-      if (name === 'electron') return { app, BrowserWindow: Window, ipcMain,
+      if (name === 'electron') return { app, BrowserWindow: Window, ipcMain, Notification: Notice,
         screen: { getCursorScreenPoint: () => ({ x: 0, y: 0 }), getDisplayNearestPoint: () => ({ workArea: options.workArea || { x: 0, y: 0, width: 1920, height: 1040 } }) },
         session: { fromPartition: () => isolated }, dialog: {
         showErrorBox(title, message) { state.dialogs.push({ title, message }) },
@@ -73,6 +104,7 @@ function harness(options = {}) {
       } }
       if (name === 'node:fs') return fakeFs
       if (name === 'node:child_process') return { spawn(_exe, _args, opts) {
+        state.spawns++
         queueMicrotask(() => backend.stdout.emit('data', 'NIGHTOPS_READY ' + JSON.stringify({ port: 45679, proof: crypto.createHmac('sha256', opts.env.NIGHTOPS_TOKEN).update('45679').digest('hex') }) + '\n'))
         return backend
       } }
@@ -88,6 +120,11 @@ function harness(options = {}) {
   return { state, backend, invoke: code => vm.runInContext(code, context),
     die() { backend.exitCode = 17; backend.emit('exit', 17) },
     allowed() { let result; state.beforeRequest({ url: ORIGIN + '/api/media/id/stream' }, value => { result = value }); return !result.cancel },
+    emitPlaybackReady() {
+      const win = state.windows[0]
+      ipcMain.emit('playback:ready', { sender: win.webContents, senderFrame: win.webContents.mainFrame })
+    },
+    secondInstance() { app.emit('second-instance') },
   }
 }
 
@@ -193,6 +230,182 @@ test('renderer crash releases playback only after destruction and still drains b
   await flush()
   assert.equal(h.state.kills, 1)
   assert.equal(h.state.dialogs.length, 0)
+})
+
+test('unresponsive renderer exits instead of deferring close forever', async () => {
+  const h = harness({ noStopAck: true, immediateAckTimeout: true })
+  await flush()
+  await h.invoke('closeSafely()')
+  assert.ok(h.state.quits > 0, 'a hung renderer must not leave the main process running')
+  assert.equal(h.state.windows[0].isDestroyed(), true)
+  assert.equal(h.state.kills, 1)
+  assert.equal(h.state.dialogs.length, 0)
+  assert.match(h.state.logs.join('\n'), /Close forced: Renderer did not stop playback/)
+  assert.ok(h.state.requests.includes('/api/internal/playback/release'))
+})
+
+test('playback stop waits until the renderer registers its handler', async () => {
+  const h = harness({ holdPlaybackReady: true })
+  await flush()
+  let settled = false
+  const closing = h.invoke('closeSafely()').then(() => { settled = true })
+  await flush()
+  assert.equal(settled, false)
+  assert.equal(h.state.stopSends, 0)
+  h.emitPlaybackReady()
+  await closing
+  assert.equal(settled, true)
+  assert.equal(h.state.stopSends, 1)
+  assert.ok(h.state.quits > 0)
+})
+
+test('smoke close deferral exits non-zero instead of hanging', async () => {
+  const started = Date.now()
+  const h = harness({ smoke: true, noStopAck: true, immediateAckTimeout: true })
+  assert.equal(await waitUntil(() => h.state.exits >= 1), true)
+  assert.equal(h.state.exitCode, 1)
+  assert.equal(h.state.dialogs.length, 0)
+  assert.equal(h.state.kills, 1)
+  assert.equal(h.state.windows[0].options.webPreferences.backgroundThrottling, false)
+  assert.match(h.state.logs.join('\n'), /SMOKE OK/)
+  assert.match(h.state.logs.join('\n'), /Close deferred: Renderer did not stop playback/)
+  assert.ok(Date.now() - started < 2000)
+})
+
+const DRAIN_NOTICE = 'Walkman Bridge is finishing a save to your Walkman and will close by itself.'
+
+test('forced close while the backend is busy destroys the window before the lease and waits out the write', async () => {
+  let busy = true
+  let busyPolls = 0
+  let destroyedBeforeRelease
+  const h = harness({ noStopAck: true, immediateAckTimeout: true, fetch: async url => {
+    const pathname = new URL(url).pathname
+    if (pathname === '/api/health') return { ok: true, json: async () => ({ ok: true, product: 'bridge' }) }
+    if (pathname === '/api/internal/playback/release') destroyedBeforeRelease = h.state.windows[0].isDestroyed()
+    if (pathname === '/api/engine-busy') { busyPolls++; const stillBusy = busy; return { ok: true, json: async () => ({ draining: true, busy: stillBusy }) } }
+    return { ok: true, json: async () => ({ draining: true, busy: false }) }
+  } })
+  await flush()
+  let settled = false
+  const closing = h.invoke('closeSafely()').then(() => { settled = true })
+  for (const poll of [1, 2, 3]) {
+    assert.equal(await waitUntil(() => busyPolls >= poll, 2500), true, `busy poll ${poll}`)
+    assert.equal(h.state.kills, 0, `backend stays alive after busy poll ${poll}`)
+    assert.equal(settled, false)
+  }
+  assert.equal(h.state.windows[0].isDestroyed(), true)
+  assert.equal(destroyedBeforeRelease, true)
+  assert.match(h.state.logs.join('\n'), /Close forced: Renderer did not stop playback/)
+  const releaseAt = h.state.requests.indexOf('/api/internal/playback/release')
+  const busyAt = h.state.requests.indexOf('/api/engine-busy')
+  assert.ok(releaseAt > 0 && releaseAt < busyAt)
+  busy = false
+  await closing
+  assert.equal(h.state.kills, 1)
+  assert.ok(h.state.quits > 0)
+  assert.equal(h.state.dialogs.length, 0)
+})
+
+test('forced-close drain shows a notice while a Walkman write finishes and clears it when idle', async () => {
+  let busy = true
+  const h = harness({ noStopAck: true, immediateAckTimeout: true, fetch: async url => {
+    const pathname = new URL(url).pathname
+    if (pathname === '/api/health') return { ok: true, json: async () => ({ ok: true, product: 'bridge' }) }
+    if (pathname === '/api/engine-busy') { const stillBusy = busy; return { ok: true, json: async () => ({ draining: true, busy: stillBusy }) } }
+    return { ok: true, json: async () => ({ draining: true, busy: false }) }
+  } })
+  await flush()
+  const closing = h.invoke('closeSafely()')
+  assert.equal(await waitUntil(() => h.state.notices.some(notice => notice.shown && !notice.closed)), true)
+  assert.equal(h.state.notices.length, 1)
+  assert.equal(h.state.notices[0].options.title, 'Walkman Bridge')
+  assert.equal(h.state.notices[0].options.body, DRAIN_NOTICE)
+  assert.equal(h.state.dialogs.length, 0)
+  assert.equal(h.state.windows.length, 1)
+  assert.equal(h.state.windows[0].isDestroyed(), true)
+  assert.equal(h.state.kills, 0)
+  busy = false
+  await closing
+  assert.equal(h.state.notices[0].closed, true)
+  assert.equal(h.state.kills, 1)
+  assert.equal(h.state.dialogs.length, 0)
+  assert.equal(h.state.windows.length, 1)
+})
+
+test('second instance during a forced-close drain re-shows the notice without a new window or backend', async () => {
+  let busy = true
+  const h = harness({ noStopAck: true, immediateAckTimeout: true, fetch: async url => {
+    const pathname = new URL(url).pathname
+    if (pathname === '/api/health') return { ok: true, json: async () => ({ ok: true, product: 'bridge' }) }
+    if (pathname === '/api/engine-busy') { const stillBusy = busy; return { ok: true, json: async () => ({ draining: true, busy: stillBusy }) } }
+    return { ok: true, json: async () => ({ draining: true, busy: false }) }
+  } })
+  await flush()
+  const closing = h.invoke('closeSafely()')
+  assert.equal(await waitUntil(() => h.state.notices.some(notice => notice.shown && !notice.closed)), true)
+  assert.equal(h.state.windows.length, 1)
+  assert.equal(h.state.spawns, 1)
+  assert.equal(h.state.brokerStarts, 1)
+  h.secondInstance()
+  assert.equal(h.state.notices.length, 2)
+  assert.equal(h.state.notices[0].closed, true)
+  assert.equal(h.state.notices[1].shown, true)
+  assert.equal(h.state.notices[1].closed, false)
+  assert.equal(h.state.notices[1].options.body, DRAIN_NOTICE)
+  assert.equal(h.state.windows.length, 1)
+  assert.equal(h.state.spawns, 1)
+  assert.equal(h.state.brokerStarts, 1)
+  assert.equal(h.state.kills, 0)
+  assert.equal(h.state.dialogs.length, 0)
+  busy = false
+  await closing
+  assert.ok(h.state.notices.every(notice => notice.closed))
+  assert.equal(h.state.kills, 1)
+  assert.equal(h.state.windows.length, 1)
+  assert.equal(h.state.spawns, 1)
+  assert.equal(h.state.brokerStarts, 1)
+})
+
+test('reload clears playback ready so stop waits for the new registration', async () => {
+  const h = harness()
+  await flush()
+  h.state.windows[0].webContents.emit('did-start-navigation', {}, ORIGIN, false, true)
+  let settled = false
+  const closing = h.invoke('closeSafely()').then(() => { settled = true })
+  await flush()
+  assert.equal(settled, false)
+  assert.equal(h.state.stopSends, 0)
+  h.emitPlaybackReady()
+  await closing
+  assert.equal(settled, true)
+  assert.equal(h.state.stopSends, 1)
+  assert.ok(h.state.quits > 0)
+})
+
+test('startup screen ready timeout closes without hanging', async () => {
+  const started = Date.now()
+  const h = harness({ holdPlaybackReady: true, immediateReadyTimeout: true })
+  await flush()
+  assert.equal(h.state.windows[0].options.webPreferences.backgroundThrottling, true)
+  await h.invoke('closeSafely()')
+  assert.ok(h.state.quits > 0)
+  assert.equal(h.state.windows[0].isDestroyed(), true)
+  assert.equal(h.state.kills, 1)
+  assert.equal(h.state.dialogs.length, 0)
+  assert.match(h.state.logs.join('\n'), /Close forced: Renderer did not register playback stop/)
+  assert.ok(Date.now() - started < 2000)
+})
+
+test('smoke exits non-zero when the startup screen never registers playback stop', async () => {
+  const started = Date.now()
+  const h = harness({ smoke: true, holdPlaybackReady: true, immediateReadyTimeout: true })
+  assert.equal(await waitUntil(() => h.state.exits >= 1), true)
+  assert.equal(h.state.exitCode, 1)
+  assert.equal(h.state.dialogs.length, 0)
+  assert.equal(h.state.kills, 1)
+  assert.doesNotMatch(h.state.logs.join('\n'), /SMOKE OK/)
+  assert.match(h.state.logs.join('\n'), /Smoke failed: renderer did not register playback stop/)
+  assert.ok(Date.now() - started < 2000)
 })
 
 test('renderer crash while stop acknowledgment is pending releases the lease without waiting for timeout', async () => {
