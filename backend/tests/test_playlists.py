@@ -334,6 +334,45 @@ def test_playlist_edits_obey_authentication_and_drain(context):
     assert native.calls == []
 
 
+@pytest.mark.parametrize('code', [
+    'PLAYLIST_REF_MISSING',
+    'PLAYLIST_JOURNAL_PENDING',
+    'PLAYLIST_SLOTS_EXHAUSTED',
+    None,
+])
+def test_playlist_write_passes_fatal_code_to_frontend_payload(context, monkeypatch, code):
+    native_context(context)
+    event = {'event': 'fatal', 'message': 'blocked PLAYLIST_REF_MISSING'}
+    if code is not None:
+        event['code'] = code
+    scripted(monkeypatch, [event], exit_code=1)
+    context.api.create_playlist = jsymphonic.create_playlist
+    client = context.client
+    etag = client.get('/api/device/playlists').headers['etag']
+    response = client.post('/api/device/playlists', headers={'If-Match': etag},
+        json={'name': 'Blocked', 'track_ids': ['1']})
+    assert response.status_code == 409, response.text
+    detail = response.json()['detail']
+    assert detail['fatal_code'] == code
+    assert detail['code'] == 'verify_device_state'
+    assert detail['message'] == 'Verify device state before another playlist edit'
+    job = client.get('/api/jobs/' + detail['job_id']).json()
+    assert job['files'][0]['fatal_code'] == code
+    assert job['files'][0]['detail'] == 'blocked PLAYLIST_REF_MISSING'
+
+
+def test_playlist_read_passes_journal_code_and_generic_read_stays_a_string(context, monkeypatch):
+    scripted(monkeypatch, [{'event': 'fatal', 'message': 'journal open', 'code': 'PLAYLIST_JOURNAL_PENDING'}], exit_code=1)
+    context.api.list_playlists = jsymphonic.list_playlists
+    coded = context.client.get('/api/device/playlists')
+    assert coded.status_code == 409
+    assert coded.json()['detail'] == {'message': 'journal open', 'fatal_code': 'PLAYLIST_JOURNAL_PENDING'}
+    scripted(monkeypatch, [{'event': 'fatal', 'message': 'device database is corrupt PLAYLIST_SLOTS_EXHAUSTED'}], exit_code=1)
+    generic = context.client.get('/api/device/playlists')
+    assert generic.status_code == 409
+    assert generic.json()['detail'] == 'device database is corrupt PLAYLIST_SLOTS_EXHAUSTED'
+
+
 def test_disconnect_after_playlist_write_remains_unknown(context, monkeypatch):
     import device
     native_context(context)
