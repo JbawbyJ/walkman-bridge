@@ -161,13 +161,18 @@ def test_track_read_and_delete_pass_fatal_code(context, monkeypatch):
     context.api.list_tracks = jsymphonic.list_tracks
     listed = context.client.get('/api/tracks')
     assert listed.status_code == 409
-    assert listed.json()['detail'] == {'message': 'journal open', 'fatal_code': 'PLAYLIST_JOURNAL_PENDING'}
+    assert listed.json()['detail'] == {
+        'message': 'journal open',
+        'fatal_code': 'PLAYLIST_JOURNAL_PENDING',
+        'recovery_action': 'inspect_recover',
+    }
     context.api.list_tracks = lambda mount: list(context.tracks)
     context.api.remove_track = jsymphonic.remove_track
     etag = context.client.get('/api/tracks').headers['etag']
     deleted = context.client.delete('/api/tracks/1', headers={'If-Match': etag})
     assert deleted.status_code == 409, deleted.text
     assert deleted.json()['detail']['fatal_code'] == 'PLAYLIST_JOURNAL_PENDING'
+    assert deleted.json()['detail']['recovery_action'] == 'inspect_recover'
     assert deleted.json()['detail']['code'] == 'verify_device_state'
     job = context.client.get('/api/jobs/' + deleted.json()['detail']['job_id']).json()
     assert job['files'][0]['fatal_code'] == 'PLAYLIST_JOURNAL_PENDING'

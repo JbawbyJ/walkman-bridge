@@ -354,6 +354,11 @@ def test_playlist_write_passes_fatal_code_to_frontend_payload(context, monkeypat
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
     assert detail['fatal_code'] == code
+    assert detail['recovery_action'] == {
+        'PLAYLIST_REF_MISSING': 'repair',
+        'PLAYLIST_JOURNAL_PENDING': 'inspect_recover',
+        'PLAYLIST_SLOTS_EXHAUSTED': 'free_slots',
+    }.get(code)
     assert detail['code'] == 'verify_device_state'
     assert detail['message'] == 'Verify device state before another playlist edit'
     job = client.get('/api/jobs/' + detail['job_id']).json()
@@ -366,7 +371,11 @@ def test_playlist_read_passes_journal_code_and_generic_read_stays_a_string(conte
     context.api.list_playlists = jsymphonic.list_playlists
     coded = context.client.get('/api/device/playlists')
     assert coded.status_code == 409
-    assert coded.json()['detail'] == {'message': 'journal open', 'fatal_code': 'PLAYLIST_JOURNAL_PENDING'}
+    assert coded.json()['detail'] == {
+        'message': 'journal open',
+        'fatal_code': 'PLAYLIST_JOURNAL_PENDING',
+        'recovery_action': 'inspect_recover',
+    }
     scripted(monkeypatch, [{'event': 'fatal', 'message': 'device database is corrupt PLAYLIST_SLOTS_EXHAUSTED'}], exit_code=1)
     generic = context.client.get('/api/device/playlists')
     assert generic.status_code == 409
