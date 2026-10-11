@@ -6,10 +6,11 @@ const CODES = [
   'PLAYLIST_REF_MISSING',
   'PLAYLIST_JOURNAL_PENDING',
   'PLAYLIST_SLOTS_EXHAUSTED',
+  'PLAYLIST_LIBRARY_NOT_LOADED',
   'GENERIC',
 ]
 
-test('playlist recovery help defines the three codes and GENERIC', () => {
+test('playlist recovery help defines the fatal codes and GENERIC', () => {
   assert.deepEqual(Object.keys(PLAYLIST_RECOVERY_HELP), CODES)
   for (const code of CODES) {
     const entry = PLAYLIST_RECOVERY_HELP[code]
@@ -23,6 +24,7 @@ test('playlist recovery help defines the three codes and GENERIC', () => {
   assert.equal(PLAYLIST_RECOVERY_HELP.PLAYLIST_REF_MISSING.actionId, 'repair')
   assert.equal(PLAYLIST_RECOVERY_HELP.PLAYLIST_JOURNAL_PENDING.actionId, 'inspect_recover')
   assert.equal(PLAYLIST_RECOVERY_HELP.PLAYLIST_SLOTS_EXHAUSTED.actionId, 'free_slots')
+  assert.equal(PLAYLIST_RECOVERY_HELP.PLAYLIST_LIBRARY_NOT_LOADED.actionId, 'reconnect_retry')
   assert.equal(PLAYLIST_RECOVERY_HELP.GENERIC.actionId, null)
 })
 

@@ -21,6 +21,12 @@ export const PLAYLIST_RECOVERY_HELP = {
     action: 'Delete playlists you no longer need, or combine them, until a slot is free.',
     actionId: 'free_slots',
   },
+  PLAYLIST_LIBRARY_NOT_LOADED: {
+    title: 'The Walkman music list did not load',
+    explanation: 'The Walkman\'s music list didn\'t load, so repair stopped without changing anything.',
+    action: 'Reconnect the Walkman, wait for the library to load, then try repair again.',
+    actionId: 'reconnect_retry',
+  },
   GENERIC: {
     title: 'Playlist change failed',
     explanation: 'The playlist change failed without a known recovery code.',

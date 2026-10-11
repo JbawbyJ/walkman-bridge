@@ -15,7 +15,7 @@ work.
 ## How to read a failure
 
 A failed playlist change can include a short code. Choose the fix from that
-code. If there is no code, or the code is not one of the three names below,
+code. If there is no code, or the code is not one of the four names below,
 treat it as a general failure. The longer message is not a code. Do not decide
 the fix by reading it.
 
@@ -24,6 +24,7 @@ the fix by reading it.
 | `PLAYLIST_JOURNAL_PENDING` | A previous playlist save was cut off. An unfinished record is still on the Walkman. | Inspect, read the result, then recover. |
 | `PLAYLIST_REF_MISSING` | A playlist still names songs that are no longer on the Walkman. | Run playlist repair. |
 | `PLAYLIST_SLOTS_EXHAUSTED` | The Walkman's playlist table is full (2048 slots). | Delete or combine playlists. |
+| `PLAYLIST_LIBRARY_NOT_LOADED` | The Walkman's music list did not load, so repair stopped without changing anything. | Reconnect the Walkman, wait for the library to load, then try repair again. |
 | No code, or any other code | The change failed, and there is no specific recovery step. | Back up, wait until the app is idle, and try once more. |
 
 ## The unfinished record
@@ -102,6 +103,8 @@ saves stop so the app does not write a list it cannot trust.
 
 In-app repair is coming soon. It is not in this version.
 
+If the code is `PLAYLIST_LIBRARY_NOT_LOADED`, the Walkman's music list was empty or did not finish loading, so repair stopped. Nothing was written to the device. Repair refuses rather than emptying playlists when the track list did not load. Reconnect the Walkman, wait for the library to load, then try repair again.
+
 ## Free a full playlist table
 
 Use these steps when the code is `PLAYLIST_SLOTS_EXHAUSTED`.
@@ -122,7 +125,7 @@ Inspect, recover, and repair do not add slots.
 
 ## A general failure
 
-Use these steps when there is no code, or the code is not one of the three
+Use these steps when there is no code, or the code is not one of the four
 names in the table.
 
 1. Leave the Walkman connected.
