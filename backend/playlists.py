@@ -237,3 +237,84 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
     @app.delete('/api/device/playlists/{playlist_id}')
     async def delete_native_playlist(playlist_id: str, request: Request):
         return await mutate('delete', request, playlist_id=playlist_id)
+
+    @app.get('/api/device/playlist-recovery/inspect')
+    async def inspect_playlist_journal():
+        volume = await asyncio.to_thread(identity)
+        ticket = admit('device_read', volume)
+        def read():
+            with coordinator.device_session(ticket) as mount:
+                return device_api.inspect_playlist_journal(mount)
+        try:
+            return await asyncio.to_thread(read)
+        except RuntimeError as exc:
+            code = shim_fatal_code(exc)
+            detail = {'message': str(exc), 'fatal_code': code} if code else str(exc)
+            raise HTTPException(409, detail) from exc
+        finally:
+            coordinator.finish(ticket)
+
+    async def recover_or_repair(action):
+        volume = await asyncio.to_thread(identity)
+        job_id = uuid.uuid4().hex
+        ticket = admit('playlist_' + action, volume, job_id)
+        job = None
+        def write():
+            with coordinator.device_session(ticket) as mount:
+                job.set_status(JobStatus.RUNNING, 'Updating Walkman playlists')
+                job.set_files([dict(file_id=job_id, name='Playlist ' + action, volume_id=volume.volume_id,
+                    state='transferring', detail='Writing Walkman playlist recovery')], phase='device_writing')
+                if action == 'recover':
+                    result = device_api.recover_playlist_journal(mount)
+                else:
+                    result = device_api.repair_playlists(mount)
+            job.update_file(job_id, state='transferred', detail='Playlist ' + action + ' finished')
+            job.set_phase('finished')
+            job.progress = 1
+            job.set_status(JobStatus.DONE, 'Playlist ' + action + ' finished')
+            return result
+        try:
+            job = jobs.create(job_id, 1, kind='playlist_' + action)
+            job.set_files([dict(file_id=job_id, name='Playlist ' + action, volume_id=volume.volume_id, state='queued')])
+            result = await asyncio.to_thread(write)
+            body = {'ok': True, 'job_id': job_id}
+            if action == 'recover':
+                body['outcome'] = result['outcome']
+            else:
+                body['pruned_count'] = result['pruned_count']
+                body['pruned_track_ids'] = result['pruned_track_ids']
+                body['playlist_ids'] = result['playlist_ids']
+            return body
+        except HTTPException:
+            if job:
+                job.update_file(job_id, state='failed', detail='Playlist recovery rejected before device write')
+                job.set_phase('finished')
+                job.set_status(JobStatus.FAILED, 'Playlist recovery rejected')
+            raise
+        except Exception as exc:
+            empty_mount = bool(getattr(exc, 'empty_mount', False))
+            uncertain = bool(job and job.phase == 'device_writing') and not empty_mount
+            fatal_code = shim_fatal_code(exc)
+            if job:
+                job.needs_reconcile = uncertain
+                job.update_file(job_id, state='unknown' if uncertain else 'failed', detail=str(exc),
+                    reason_code='device_outcome_unknown' if uncertain else 'playlist_failed',
+                    fatal_code=fatal_code, empty_mount=empty_mount)
+                job.set_status(JobStatus.FAILED, 'Verify device state before another playlist recovery' if uncertain else str(exc))
+            detail = {'code': 'verify_device_state' if uncertain else 'playlist_failed',
+                'message': job.message if job else str(exc), 'job_id': job_id,
+                'fatal_code': fatal_code}
+            if empty_mount:
+                detail['empty_mount'] = True
+            raise HTTPException(409, detail) from exc
+        finally:
+            cache.clear()
+            coordinator.finish(ticket)
+
+    @app.post('/api/device/playlist-recovery/recover')
+    async def recover_playlist_journal():
+        return await recover_or_repair('recover')
+
+    @app.post('/api/device/playlist-recovery/repair')
+    async def repair_playlists():
+        return await recover_or_repair('repair')

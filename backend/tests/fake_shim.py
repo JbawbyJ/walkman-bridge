@@ -130,6 +130,79 @@ def main() -> int:
         emit({"event": "args", "argv": args})
         return 0
 
+    if scenario == "playlist_inspect_committed":
+        emit({"event": "playlistJournal", "state": "committed", "playlistIds": ["4"],
+              "trackIds": ["11", "1"], "message": "uncommitted discarded"})
+        return 0
+
+    if scenario == "playlist_inspect_uncommitted":
+        emit({"event": "playlistJournal", "state": "uncommitted", "message": "committed"})
+        return 0
+
+    if scenario == "playlist_inspect_none":
+        emit({"event": "playlistJournal", "state": "none", "message": "committed journal"})
+        return 0
+
+    if scenario == "playlist_inspect_missing":
+        # d4fbc94 shape: success with no state field. Message text is not a state.
+        emit({"event": "done", "message": "state committed uncommitted none"})
+        return 0
+
+    if scenario == "playlist_inspect_unknown":
+        emit({"event": "step", "state": "finished", "message": "committed"})
+        emit({"event": "playlistJournal", "state": "finished", "message": "committed"})
+        return 0
+
+    if scenario == "playlist_recover_rolled_forward":
+        emit({"event": "playlistRecover", "outcome": "rolled_forward", "message": "discarded"})
+        emit({"event": "done"})
+        return 0
+
+    if scenario == "playlist_recover_discarded":
+        emit({"event": "playlistRecover", "outcome": "discarded", "message": "rolled_forward"})
+        emit({"event": "done"})
+        return 0
+
+    if scenario == "playlist_recover_none":
+        emit({"event": "playlistRecover", "outcome": "none", "message": "rolled_forward"})
+        emit({"event": "done"})
+        return 0
+
+    if scenario == "playlist_recover_missing":
+        emit({"event": "done", "message": "outcome rolled_forward discarded none"})
+        return 0
+
+    if scenario == "playlist_recover_unknown":
+        emit({"event": "playlistRecover", "outcome": "committed", "message": "rolled_forward"})
+        emit({"event": "done"})
+        return 0
+
+    if scenario == "playlist_repair_zero":
+        emit({"event": "playlistRepair", "prunedCount": 0, "prunedTrackIds": [], "playlistIds": [],
+              "message": "refused because of an empty mount"})
+        emit({"event": "done"})
+        return 0
+
+    if scenario == "playlist_repair_some":
+        emit({"event": "playlistRepair", "prunedCount": 2, "prunedTrackIds": ["7", "9"], "playlistIds": ["4"]})
+        emit({"event": "done"})
+        return 0
+
+    if scenario == "playlist_repair_missing":
+        emit({"event": "done", "message": "pruned zero tracks"})
+        return 0
+
+    if scenario == "playlist_repair_empty_mount":
+        emit({"event": "playlistRepair", "emptyMount": True, "prunedCount": 0,
+              "message": "refused because of an empty mount"})
+        emit({"event": "done"})
+        return 0
+
+    if scenario == "playlist_fatal_nested_code":
+        emit({"event": "fatal", "message": "PLAYLIST_REF_MISSING",
+              "details": {"code": "PLAYLIST_JOURNAL_PENDING"}})
+        return 1
+
     print(f"unknown scenario {scenario}", file=sys.stderr)
     return 2
 

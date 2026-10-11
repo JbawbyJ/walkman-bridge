@@ -54,5 +54,28 @@ export const api = {
   createDevicePlaylist: (changes, etag) => req('/device/playlists', { ...json('POST', changes), headers: { 'Content-Type': 'application/json', 'If-Match': etag } }),
   updateDevicePlaylist: (id, changes, etag) => req(`/device/playlists/${idPath(id)}`, { ...json('PATCH', changes), headers: { 'Content-Type': 'application/json', 'If-Match': etag } }),
   deleteDevicePlaylist: (id, etag) => req(`/device/playlists/${idPath(id)}`, { method: 'DELETE', headers: { 'If-Match': etag } }),
+  inspectPlaylistJournal: () => req('/device/playlist-recovery/inspect'),
+  recoverPlaylistJournal: () => req('/device/playlist-recovery/recover', { method: 'POST' }),
+  repairPlaylists: () => req('/device/playlist-recovery/repair', { method: 'POST' }),
   mediaUrl: (id, revision = '') => `${BASE}/media/${idPath(id)}/stream${revision ? `?revision=${encodeURIComponent(revision)}` : ''}`,
+}
+
+// Action ids match frontend/src/help/playlistRecovery.js (Builder C).
+// Paths are relative to `/api`. inspect_recover is inspect, then recover.
+// free_slots deletes a Sony playlist through the existing playlist-delete route.
+// GENERIC has no recovery action.
+// Inspect `state` and recover `outcome` are the shim's top-level fields.
+// A missing or unknown value is null. free_slots has no new endpoint.
+export const RECOVERY_ACTIONS = {
+  inspect_recover: [
+    { id: 'inspect', method: 'GET', path: '/device/playlist-recovery/inspect', call: 'inspectPlaylistJournal' },
+    { id: 'recover', method: 'POST', path: '/device/playlist-recovery/recover', call: 'recoverPlaylistJournal' },
+  ],
+  repair: [
+    { id: 'repair', method: 'POST', path: '/device/playlist-recovery/repair', call: 'repairPlaylists' },
+  ],
+  free_slots: [
+    { id: 'deleteDevicePlaylist', method: 'DELETE', path: '/device/playlists/{id}', call: 'deleteDevicePlaylist' },
+  ],
+  GENERIC: null,
 }

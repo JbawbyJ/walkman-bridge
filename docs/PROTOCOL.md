@@ -95,6 +95,82 @@ derives a code by parsing `message`. An unrecognized string, or a non-string
 Followed by exit code 1. Unknown/missing/malformed args (including non-numeric
 `--generation`/`--idle-timeout` values) → usage on stderr, exit 2.
 
+The fatal `code` is only the top-level field of the `fatal` event. A `code`
+nested under another object, or the same words inside `message`, is not a code.
+
+### Playlist recovery
+
+Argv matches the other commands (`--device` immediately after the command):
+
+- `playlist-recover --inspect --device <mount>` — read-only. HTTP `GET /api/device/playlist-recovery/inspect`.
+- `playlist-recover --device <mount>` — mutating. HTTP `POST /api/device/playlist-recovery/recover`.
+- `playlist-repair --device <mount>` — mutating. HTTP `POST /api/device/playlist-recovery/repair`.
+
+Builder B's fields (jsymphonic #4, after `d4fbc94`). `d4fbc94` itself omits them.
+The backend reads only these top-level JSON fields. It does not parse `message`.
+A missing field, or a value outside the list, is JSON `null` (unknown).
+
+Inspect emits `state`:
+
+- `committed` — the journal has a commit marker
+- `uncommitted` — a journal is present and has no commit marker
+- `none` — no journal
+
+```json
+{"event":"playlistJournal","state":"uncommitted","playlistIds":["4"],"trackIds":["11"]}
+```
+
+`playlistIds` and `trackIds` are optional coverage. When both are absent, `covers` is null.
+
+Recover emits `outcome`:
+
+- `rolled_forward` — the journal had a commit marker and that save was finished
+- `discarded` — no commit marker; the journal is removed, the interrupted change is lost, and the device keeps its pre-change playlist state
+- `none` — no journal
+
+```json
+{"event":"playlistRecover","outcome":"discarded"}
+{"event":"done"}
+```
+
+Repair emits `prunedCount` (an integer, **including 0**), plus optional `prunedTrackIds` and `playlistIds`. Zero pruned tracks is a real result, not an empty success. `emptyMount: true` is a refusal: the HTTP result is not success. Message text that says "empty mount" or "pruned zero" does not set those fields.
+
+```json
+{"event":"playlistRepair","prunedCount":0,"prunedTrackIds":[],"playlistIds":[]}
+{"event":"done"}
+```
+
+```json
+{"event":"playlistRepair","emptyMount":true,"prunedCount":0}
+```
+
+Timeouts: inspect 120 s, recover and repair 600 s. Recover and repair take the shim lock and `needs_reconcile` on an unknown failure. Inspect does not. An `emptyMount` refusal is a definite non-write (`needs_reconcile` false). A successful recover or repair clears the device track cache.
+
+HTTP:
+
+| Action id | Fatal code | Call |
+| --- | --- | --- |
+| `inspect_recover` | `PLAYLIST_JOURNAL_PENDING` | `GET` inspect, then `POST` recover |
+| `repair` | `PLAYLIST_REF_MISSING` | `POST /api/device/playlist-recovery/repair` |
+| `free_slots` | `PLAYLIST_SLOTS_EXHAUSTED` | existing `DELETE /api/device/playlists/{id}` (`playlist-delete`). No new endpoint. |
+| `GENERIC` | null | no recovery action |
+
+`frontend/src/api.js` exports the same map as `RECOVERY_ACTIONS` and the helpers `inspectPlaylistJournal`, `recoverPlaylistJournal`, and `repairPlaylists`. `free_slots` uses the existing `deleteDevicePlaylist`.
+
+Inspect success:
+
+```json
+{"exists":true,"state":"uncommitted","covers":{"playlist_ids":["4"],"track_ids":["11"]}}
+```
+
+`exists` is false when `state` is `none`, and null when `state` is null. Inspect errors match other playlist reads: `{message, fatal_code}` when the fatal `code` is known, otherwise a string.
+
+Recover success: `{"ok":true,"outcome":"discarded","job_id":"..."}`. `outcome` null means the shim did not emit a known value.
+
+Repair success: `{"ok":true,"job_id":"...","pruned_count":0,"pruned_track_ids":[],"playlist_ids":[]}`. `pruned_count` null means the count field was missing or not a non-negative integer.
+
+Recover and repair failures use the write error shape: `detail.code` (`verify_device_state` or `playlist_failed`) and `detail.fatal_code`. An empty-mount refusal adds `detail.empty_mount: true` and uses `playlist_failed`.
+
 ## Backend contract (`backend/jsymphonic.py`)
 
 - **Single-flight:** every shim invocation is serialized behind one module-level lock —
@@ -105,7 +181,8 @@ Followed by exit code 1. Unknown/missing/malformed args (including non-numeric
 - `on_event` receives each parsed JSON object; the FastAPI job maps `progress`/`file`
   events into the job store so the dashboard's live log stays truthful.
 - Unparseable stdout lines are logged and skipped (forward compatibility).
-- Timeouts: `info`/`list` 120 s, `del` 600 s (a delete rebuilds the whole DB,
+- Timeouts: `info`/`list`/`playlist-recover --inspect` 120 s, `del` and playlist
+  recover/repair 600 s (a delete rebuilds the whole DB,
   like add), `add` 3600 s. On timeout: kill process, raise. A timer that fires
   as a successful run exits is not a timeout — the exit code decides.
 - Nonzero exit → `JSymphonicError(message from last fatal event, else stderr tail)`.

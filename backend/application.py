@@ -114,7 +114,8 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
         import jsymphonic
         device_api = SimpleNamespace(**{n: getattr(device, n) for n in ('find_walkman', 'device_info', 'backup_device', 'capture_device_identity')},
             **{n: getattr(jsymphonic, n) for n in ('list_tracks', 'add_tracks', 'remove_track', 'JSymphonicError',
-                'list_playlists', 'create_playlist', 'update_playlist', 'delete_playlist')})
+                'list_playlists', 'create_playlist', 'update_playlist', 'delete_playlist',
+                'inspect_playlist_journal', 'recover_playlist_journal', 'repair_playlists')})
     service = MediaService(store, jobs, coordinator, scanner, elevation, device_api)
     cache = {}
     playback_lock = threading.RLock()

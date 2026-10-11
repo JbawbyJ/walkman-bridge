@@ -95,13 +95,15 @@ def fatal_code_of(exc) -> str | None:
 
 
 class JSymphonicError(RuntimeError):
-    def __init__(self, message, *, events=(), needs_reconcile=False, code=None):
+    def __init__(self, message, *, events=(), needs_reconcile=False, code=None, empty_mount=False):
         super().__init__(message)
         self.events = list(events)
         self.needs_reconcile = needs_reconcile
         self.result: AddResult | None = None
         # None means generic: no code, or a code outside FatalCode.
+        # `code` is the fatal event's top-level JSON field, never message text.
         self.code = normalize_fatal_code(code)
+        self.empty_mount = bool(empty_mount)
 
 
 def _ensure_java() -> str:
@@ -134,6 +136,22 @@ def _build_cmd(args: list[str]) -> list[str]:
     return [_ensure_java(), "-cp", str(_ensure_jar()), SHIM_MAIN, *args]
 
 
+def _command_mutates(args: list[str]) -> bool:
+    """True when this argv can rewrite OMGAUDIO.
+
+    `playlist-recover --inspect` is the read-only half of that command.
+    `playlist-recover` without `--inspect`, and `playlist-repair`, write.
+    """
+    if not args:
+        return False
+    command = args[0]
+    if command in {"add", "del", "playlist-create", "playlist-update", "playlist-delete", "playlist-repair"}:
+        return True
+    if command == "playlist-recover":
+        return "--inspect" not in args
+    return False
+
+
 def _run(
     args: list[str],
     timeout: float,
@@ -142,7 +160,7 @@ def _run(
     """Run one shim command, streaming parsed stdout events. Returns them all."""
     cmd = _build_cmd(args)
     events: list[dict] = []
-    mutating = bool(args and args[0] in {"add", "del", "playlist-create", "playlist-update", "playlist-delete"})
+    mutating = _command_mutates(args)
     with _shim_lock:
         try:
             proc = subprocess.Popen(
@@ -220,10 +238,12 @@ def _run(
         if proc.returncode != 0:
             for event in reversed(events):
                 if event.get("event") == "fatal":
+                    empty_mount = event.get("emptyMount") is True
                     raise JSymphonicError(
                         str(event.get("message") or "shim reported a fatal error"),
-                        events=events, needs_reconcile=mutating,
+                        events=events, needs_reconcile=mutating and not empty_mount,
                         code=event.get("code"),
+                        empty_mount=empty_mount,
                     )
             tail = "\n".join(list(stderr_lines)[-5:]).strip()
             raise JSymphonicError(
@@ -395,3 +415,121 @@ def update_playlist(mount: Path, playlist_id: str, name: str | None = None, trac
 def delete_playlist(mount: Path, playlist_id: str) -> None:
     events = _run(['playlist-delete', '--device', str(mount), '--id', _device_playlist_id(playlist_id)], DEL_TIMEOUT)
     _require_terminal(events, 'done', mutating=True)
+
+
+def _reject_fatal_events(events: list[dict], *, mutating: bool) -> None:
+    """Fail when a recovery command embeds a fatal on an otherwise zero exit.
+
+    The fatal `code` is that event's top-level field. Message text is not a code.
+    """
+    for event in events:
+        if event.get("event") == "fatal" or event.get("error"):
+            empty_mount = event.get("emptyMount") is True
+            raise JSymphonicError(
+                str(event.get("message") or event.get("error") or "Shim reported a fatal error"),
+                events=events, needs_reconcile=mutating and not empty_mount,
+                code=event.get("code") if event.get("event") == "fatal" else None,
+                empty_mount=empty_mount,
+            )
+
+
+_JOURNAL_STATES = frozenset({"committed", "uncommitted", "none"})
+_RECOVER_OUTCOMES = frozenset({"rolled_forward", "discarded", "none"})
+_RECOVERY_SKIP_EVENTS = frozenset({"step"})
+
+
+def _explicit_value(events: list[dict], key: str, allowed: frozenset[str]):
+    """Last top-level `key` whose value is in `allowed`, else None.
+
+    Step events are skipped: their `state` means started/finished, not the
+    journal. A present but unknown value is null, not a guess from `message`.
+    """
+    found = None
+    for event in events:
+        if event.get("event") in _RECOVERY_SKIP_EVENTS or key not in event:
+            continue
+        value = event[key]
+        found = value if isinstance(value, str) and value in allowed else None
+    return found
+
+
+def _explicit_ids(events: list[dict], key: str):
+    found = None
+    seen = False
+    for event in events:
+        if event.get("event") in _RECOVERY_SKIP_EVENTS or key not in event:
+            continue
+        seen = True
+        value = event[key]
+        if (isinstance(value, list) and all(isinstance(item, str) and re.fullmatch(r"[1-9][0-9]{0,9}", item) for item in value)):
+            found = list(value)
+        else:
+            found = None
+    return found if seen else None
+
+
+def _explicit_count(events: list[dict], key: str):
+    found = None
+    seen = False
+    for event in events:
+        if event.get("event") in _RECOVERY_SKIP_EVENTS or key not in event:
+            continue
+        seen = True
+        value = event[key]
+        found = value if type(value) is int and value >= 0 else None
+    return found if seen else None
+
+
+def _journal_covers(events: list[dict]):
+    relevant = [event for event in events if event.get("event") not in _RECOVERY_SKIP_EVENTS]
+    if not any("playlistIds" in event or "trackIds" in event for event in relevant):
+        return None
+    return {
+        "playlist_ids": _explicit_ids(events, "playlistIds"),
+        "track_ids": _explicit_ids(events, "trackIds"),
+    }
+
+
+def inspect_playlist_journal(mount: Path) -> dict:
+    """Read-only `playlist-recover --inspect`.
+
+    `state` is the shim's top-level field: committed, uncommitted, or none.
+    d4fbc94 omits it; a missing or unknown value stays null. `exists` follows
+    `state` only (false for none, true when a journal state is known).
+    """
+    events = _run(["playlist-recover", "--device", str(mount), "--inspect"], INFO_TIMEOUT)
+    _reject_fatal_events(events, mutating=False)
+    state = _explicit_value(events, "state", _JOURNAL_STATES)
+    exists = None if state is None else state != "none"
+    return {"exists": exists, "state": state, "covers": _journal_covers(events)}
+
+
+def recover_playlist_journal(mount: Path) -> dict:
+    """Mutating `playlist-recover`.
+
+    `outcome` is the shim's top-level field: rolled_forward, discarded, or none.
+    A missing or unknown value stays null. Message text is never read.
+    """
+    events = _run(["playlist-recover", "--device", str(mount)], DEL_TIMEOUT)
+    _reject_fatal_events(events, mutating=True)
+    return {"outcome": _explicit_value(events, "outcome", _RECOVER_OUTCOMES)}
+
+
+def repair_playlists(mount: Path) -> dict:
+    """Mutating `playlist-repair`.
+
+    `prunedCount` of 0 is a real result. `emptyMount: true` is a refusal and
+    is not reported as success. Both are top-level fields, not message text.
+    """
+    events = _run(["playlist-repair", "--device", str(mount)], DEL_TIMEOUT)
+    _reject_fatal_events(events, mutating=True)
+    if any(event.get("emptyMount") is True for event in events):
+        raise JSymphonicError(
+            "playlist-repair refused because the mount is empty",
+            events=events, needs_reconcile=False, empty_mount=True,
+        )
+    return {
+        "pruned_count": _explicit_count(events, "prunedCount"),
+        "pruned_track_ids": _explicit_ids(events, "prunedTrackIds"),
+        "playlist_ids": _explicit_ids(events, "playlistIds"),
+    }
