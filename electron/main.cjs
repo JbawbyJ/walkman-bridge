@@ -24,7 +24,8 @@ app.setAppUserModelId(`com.redlotus.nightops.${product}`)
 app.setPath('userData', dataDir)
 const token = crypto.randomBytes(48).toString('base64url')
 let child, window, origin, broker, isolatedSession, cookieWrite
-let closing = false, allowClose = false
+let closing = false, allowClose = false, playbackReady = false
+const playbackReadyWaitMs = 3000
 let backendLost = false, expectedBackendExit = false, rendererGone = false
 const backendLifetime = new AbortController()
 fs.mkdirSync(dataDir, { recursive: true })
@@ -138,8 +139,26 @@ function terminateIdleBackend() {
   backendLifetime.abort(new Error('Backend has shut down'))
   if (child && child.exitCode === null) child.kill()
 }
+function waitForPlaybackReady() {
+  if (playbackReady || rendererGone || !window || window.isDestroyed()) return Promise.resolve()
+  return new Promise(resolve => {
+    const contents = window.webContents
+    const cleanup = () => { clearTimeout(timer); ipcMain.removeListener('playback:ready', done); contents.removeListener('render-process-gone', finish); contents.removeListener('destroyed', finish) }
+    const finish = () => { cleanup(); resolve() }
+    const done = event => { if (validSender(event, window, origin)) finish() }
+    const timer = setTimeout(finish, playbackReadyWaitMs)
+    ipcMain.on('playback:ready', done)
+    contents.once('render-process-gone', finish)
+    contents.once('destroyed', finish)
+  })
+}
 async function stopPlayback() {
   if (!window || window.isDestroyed() || rendererGone) return
+  // runSmoke follows loadURL, before usePlayer's effect subscribes. Wait until
+  // that subscription signals, instead of sending a stop the renderer drops.
+  await waitForPlaybackReady()
+  if (!window || window.isDestroyed() || rendererGone) return
+  if (!playbackReady) throw new Error('Renderer did not register playback stop')
   // Execute only a constant script in the known local main frame. No user data is interpolated.
   try { await window.webContents.executeJavaScript("window.dispatchEvent(new Event('walkman:stop-playback')); for (const audio of document.querySelectorAll('audio')) { audio.pause(); audio.removeAttribute('src'); audio.load(); }") }
   catch (error) { if (!rendererGone && !window.isDestroyed()) throw error }
@@ -158,6 +177,20 @@ async function stopPlayback() {
     contents.once('destroyed', gone)
     window.webContents.send('playback:stop', nonce)
   })
+}
+async function exitUnresponsiveRenderer(error) {
+  // Interactive close: the renderer never acknowledged stop. Exit instead of
+  // leaving the window open after the ack wait.
+  log(`Close forced: ${error.message}. Exiting because the renderer did not acknowledge playback stop.`)
+  try { broker?.stop() } catch (stopError) { log(`Broker stop during forced close: ${stopError.message}`) }
+  try { await request('POST', '/api/internal/playback/release') }
+  catch (releaseError) { log(`Playback release during forced close: ${releaseError.message}`) }
+  try { await revokeSession() } catch (revokeError) { log(`Session revoke during forced close: ${revokeError.message}`) }
+  if (backendLost) return
+  allowClose = true
+  terminateIdleBackend()
+  if (window && !window.isDestroyed()) window.destroy()
+  app.quit()
 }
 async function closeSafely() {
   if (closing || allowClose) return
@@ -178,18 +211,30 @@ async function closeSafely() {
     app.quit()
   } catch (error) {
     if (backendLost) return
+    if (smoke) {
+      log(`Close deferred: ${error.message}`)
+      try { broker?.stop() } catch (stopError) { log(`Broker stop during forced close: ${stopError.message}`) }
+      allowClose = true
+      terminateIdleBackend()
+      if (window && !window.isDestroyed()) window.destroy()
+      app.exit(1)
+      return
+    }
+    if (error.message === 'Renderer did not stop playback' || error.message === 'Renderer did not register playback stop') {
+      await exitUnresponsiveRenderer(error)
+      return
+    }
     log(`Close deferred: ${error.message}`)
     closing = false
     const warning = { type: 'warning', buttons: [rendererGone ? 'Retry shutdown' : 'Keep open'],
       message: 'The app cannot confirm that all work has finished.',
       detail: (rendererGone ? 'The player has stopped, but background work may still be active. Retry shutdown to wait for that work before exiting.\n' : 'The window will remain open. Check the operation status before closing again.\n') + error.message }
-    if (!smoke) {
-      const result = await (rendererGone ? dialog.showMessageBox(warning) : dialog.showMessageBox(window, warning))
-      if (rendererGone && result.response === 0) void closeSafely()
-    }
+    const result = await (rendererGone ? dialog.showMessageBox(warning) : dialog.showMessageBox(window, warning))
+    if (rendererGone && result.response === 0) void closeSafely()
   }
 }
 function wireIpc() {
+  ipcMain.on('playback:ready', event => { if (validSender(event, window, origin)) playbackReady = true })
   for (const action of ['minimize', 'maximize', 'close']) {
     ipcMain.handle(`win:${action}`, event => {
       if (!isBackendAlive() || !validSender(event, window, origin)) throw new Error('Untrusted IPC sender')
@@ -220,6 +265,9 @@ async function createWindow() {
     minWidth, minHeight, resizable: true, frame: false, show: false,
     backgroundColor: '#160c0e', autoHideMenuBar: true,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), session: isolated,
+      // Smoke never shows the window. Throttling that hidden page delays the
+      // playback-stop subscription, so the close ack never arrives.
+      backgroundThrottling: false,
       additionalArguments: [`--nightops-product=${product}`], contextIsolation: true, sandbox: true, nodeIntegration: false,
       webSecurity: true, allowRunningInsecureContent: false, webviewTag: false } })
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
