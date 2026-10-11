@@ -15,7 +15,7 @@ work.
 ## How to read a failure
 
 A failed playlist change can include a short code. Choose the fix from that
-code. If there is no code, or the code is not one of the six names below,
+code. If there is no code, or the code is not one of the seven names below,
 treat it as a general failure. The longer message is not a code. Do not decide
 the fix by reading it.
 
@@ -24,9 +24,10 @@ the fix by reading it.
 | `PLAYLIST_JOURNAL_PENDING` | A previous playlist save was cut off. An unfinished record is still on the Walkman. | Inspect, read the result, then recover. |
 | `PLAYLIST_REF_MISSING` | A playlist still names songs that are no longer on the Walkman. | Run playlist repair. |
 | `PLAYLIST_SLOTS_EXHAUSTED` | The Walkman's playlist table is full (2048 slots). | Delete or combine playlists. |
-| `PLAYLIST_LIBRARY_NOT_LOADED` | The Walkman's music list did not load, or a song file on the device could not be read, so repair stopped without changing anything. | Reconnect the Walkman, wait for the library to load, then try repair again. |
-| `DEVICE_FILE_LOCKED` | Another program has a song file on the Walkman open. Nothing was changed. | Close that program and try again. |
+| `PLAYLIST_LIBRARY_NOT_LOADED` | The Walkman's music list did not load, or a song file on the device could not be read, so repair stopped without changing anything. | Reconnect the Walkman, wait for the library to load, then try repair again. If it keeps happening, keep your backup and ask for help. |
+| `DEVICE_FILE_LOCKED` | Another program has a file on the Walkman open. Walkman Bridge stopped and nothing was changed. | Close that program and try the change again. If this happened while recovering an interrupted save, the save was already committed and only needs finishing, so close the program and run Recover again. |
 | `DEVICE_ROLLBACK_FAILED` | The save failed and could not be fully undone. The unfinished record is still on the Walkman. | Stop making changes, keep the Walkman connected, and run Inspect first. |
+| `DEVICE_FILE_READ_ONLY` | A song file on the Walkman is marked read-only, so Walkman Bridge stopped before changing anything. | Clear the read-only setting on that file, then try again. If this happened while recovering, the save was already committed and only needs finishing, so clear read-only and run Recover again. |
 | No code, or any other code | The change failed, and there is no specific recovery step. | Back up, wait until the app is idle, and try once more. |
 
 ## The unfinished record
@@ -41,6 +42,14 @@ If the save is interrupted — the cable comes out, the PC sleeps, or the app
 closes in the middle — the note is left on the Walkman. Later playlist saves
 stop until that note is resolved. That stop is `PLAYLIST_JOURNAL_PENDING`. The
 note does not delete your songs.
+
+## Album art on the Walkman
+
+Walkman Bridge can now set or clear album art on the Walkman. Only JPEG images
+are accepted, and very large images are refused. These changes go through the
+same journal, so an interrupted change is handled by inspect and recover like
+any other. Whether the Walkman actually displays the art hasn't been confirmed
+on hardware yet.
 
 ## What not to do
 
@@ -105,16 +114,23 @@ saves stop so the app does not write a list it cannot trust.
 
 In-app repair is coming soon. It is not in this version.
 
-If the code is `PLAYLIST_LIBRARY_NOT_LOADED`, the Walkman's music list was empty or did not finish loading, or a song file on the device could not be read, so repair stopped. Nothing was written to the device. Repair refuses rather than emptying playlists when the track list did not load or a song file could not be read. Reconnect the Walkman, wait for the library to load, then try repair again.
+If the code is `PLAYLIST_LIBRARY_NOT_LOADED`, the Walkman's music list was empty or did not finish loading, or a song file on the device could not be read, so repair stopped. Nothing was written to the device. Repair refuses rather than emptying playlists when the track list did not load or a song file could not be read. Reconnect the Walkman, wait for the library to load, then try repair again. If it keeps happening, keep your backup and ask for help.
 
-## A song file is open in another program
+## A file is open in another program
 
-Use these steps when the code is `DEVICE_FILE_LOCKED`.
+Use these steps when the code is `DEVICE_FILE_LOCKED`. This can happen while removing songs, while a song is added or replaced, or while Recover is finishing a save.
 
-Another program, such as File Explorer, a media player, or antivirus, has a song file on the Walkman open. The save wrote nothing and left no unfinished record. The Walkman keeps the playlists it already had.
+Another program, such as File Explorer, a media player, or antivirus, has a file on the Walkman open. Walkman Bridge stopped and nothing was changed. Close that program and try the change again. If Walkman Bridge shows a file location on the Walkman, that is the open file.
 
-1. Close the program that has the song open. If the message names a file, that name is the open file.
-2. Try the playlist change again.
+If this happened while recovering an interrupted save, the save was already committed and only needs finishing, so close the program and run Recover again.
+
+## A song file is read-only
+
+Use these steps when the code is `DEVICE_FILE_READ_ONLY`.
+
+A song file on the Walkman is marked read-only, so Walkman Bridge stopped before changing anything. Clear the read-only setting on that file. In Windows, right-click it, choose Properties, and untick Read-only, then try the change again. If Walkman Bridge shows a file location on the Walkman, that is the read-only file.
+
+If this happened while recovering an interrupted save, the save was already committed and only needs finishing, so clear the read-only setting and run Recover again.
 
 ## A save could not be fully undone
 
@@ -146,7 +162,7 @@ Inspect, recover, and repair do not add slots.
 
 ## A general failure
 
-Use these steps when there is no code, or the code is not one of the six
+Use these steps when there is no code, or the code is not one of the seven
 names in the table.
 
 1. Leave the Walkman connected.
