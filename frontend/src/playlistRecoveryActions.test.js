@@ -22,6 +22,9 @@ test('recovery action ids map onto inspect, recover, repair, and delete', async 
   assert.equal(RECOVERY_ACTIONS.close_and_retry.fatal_code, 'DEVICE_FILE_LOCKED')
   assert.deepEqual(RECOVERY_ACTIONS.close_and_retry.steps.map(step => step.id), ['close', 'retry'])
   assert.equal(RECOVERY_ACTIONS.close_and_retry.steps.every(step => step.path === undefined && step.call === undefined), true)
+  assert.equal(RECOVERY_ACTIONS.clear_read_only_retry.fatal_code, 'DEVICE_FILE_READ_ONLY')
+  assert.deepEqual(RECOVERY_ACTIONS.clear_read_only_retry.steps.map(step => step.id), ['clear_read_only', 'retry'])
+  assert.equal(RECOVERY_ACTIONS.clear_read_only_retry.steps.every(step => step.path === undefined && step.call === undefined && step.method === undefined), true)
   assert.equal(RECOVERY_ACTIONS.GENERIC, null)
 
   const previous = globalThis.fetch

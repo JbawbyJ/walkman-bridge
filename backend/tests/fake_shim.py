@@ -24,6 +24,8 @@ def emit_line(line: str) -> None:
 
 # jsymphonic #4 @ 857b91e. Compact JSON, key order included. Do not reformat.
 LOCKED_FATAL_LINE = '{"event":"fatal","message":"Device file is locked","code":"DEVICE_FILE_LOCKED","path":"OMGAUDIO/10F00/10000001.OMA"}'
+# Message text is a placeholder until Builder B confirms the head. Code and path are the contract.
+READ_ONLY_FATAL_LINE = '{"event":"fatal","message":"Device file is read-only","code":"DEVICE_FILE_READ_ONLY","path":"OMGAUDIO/10F00/10000001.OMA"}'
 ROLLBACK_FATAL_LINE = '{"event":"fatal","message":"Database update failed; incomplete recovery requires a verified backup","code":"DEVICE_ROLLBACK_FAILED"}'
 
 
@@ -228,6 +230,10 @@ def main() -> int:
 
     if scenario == "playlist_file_locked":
         emit_line(LOCKED_FATAL_LINE)
+        return 1
+
+    if scenario == "playlist_file_read_only":
+        emit_line(READ_ONLY_FATAL_LINE)
         return 1
 
     if scenario == "playlist_rollback_failed":

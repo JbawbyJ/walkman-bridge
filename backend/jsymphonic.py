@@ -72,6 +72,9 @@ class FatalCode(enum.StrEnum):
     previous snapshot and no journal is left. The fatal event carries a
     top-level `path`, an opaque string relative to the mount. It is copied
     unchanged and is never joined or reformatted.
+    DEVICE_FILE_READ_ONLY: the pre-write rename probe found a read-only
+    device file. Nothing was written. It carries the same opaque mount-relative
+    `path` as DEVICE_FILE_LOCKED.
     DEVICE_ROLLBACK_FAILED: rollback did not restore a known snapshot, so
     the device state is uncertain.
 
@@ -85,6 +88,7 @@ class FatalCode(enum.StrEnum):
     PLAYLIST_SLOTS_EXHAUSTED = "PLAYLIST_SLOTS_EXHAUSTED"
     PLAYLIST_LIBRARY_NOT_LOADED = "PLAYLIST_LIBRARY_NOT_LOADED"
     DEVICE_FILE_LOCKED = "DEVICE_FILE_LOCKED"
+    DEVICE_FILE_READ_ONLY = "DEVICE_FILE_READ_ONLY"
     DEVICE_ROLLBACK_FAILED = "DEVICE_ROLLBACK_FAILED"
 
 
@@ -123,7 +127,7 @@ def _fatal_needs_reconcile(mutating: bool, code) -> bool:
     normalized = normalize_fatal_code(code)
     if normalized == FatalCode.DEVICE_ROLLBACK_FAILED:
         return True
-    if normalized in {FatalCode.PLAYLIST_LIBRARY_NOT_LOADED, FatalCode.DEVICE_FILE_LOCKED}:
+    if normalized in {FatalCode.PLAYLIST_LIBRARY_NOT_LOADED, FatalCode.DEVICE_FILE_LOCKED, FatalCode.DEVICE_FILE_READ_ONLY}:
         return False
     return bool(mutating)
 
@@ -131,14 +135,15 @@ def _fatal_needs_reconcile(mutating: bool, code) -> bool:
 def job_needs_reconcile(exc, writing: bool) -> bool:
     """Job flag for a failed device operation.
 
-    PLAYLIST_LIBRARY_NOT_LOADED and DEVICE_FILE_LOCKED leave the previous
-    snapshot in place. DEVICE_ROLLBACK_FAILED leaves the device uncertain.
+    PLAYLIST_LIBRARY_NOT_LOADED, DEVICE_FILE_LOCKED, and DEVICE_FILE_READ_ONLY
+    leave the previous snapshot in place. DEVICE_ROLLBACK_FAILED leaves the
+    device uncertain.
     Any other failure is reconciled only after a write has started.
     """
     code = fatal_code_of(exc)
     if code == FatalCode.DEVICE_ROLLBACK_FAILED.value:
         return True
-    if code in {FatalCode.PLAYLIST_LIBRARY_NOT_LOADED.value, FatalCode.DEVICE_FILE_LOCKED.value}:
+    if code in {FatalCode.PLAYLIST_LIBRARY_NOT_LOADED.value, FatalCode.DEVICE_FILE_LOCKED.value, FatalCode.DEVICE_FILE_READ_ONLY.value}:
         return False
     if not writing:
         return False

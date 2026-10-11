@@ -67,6 +67,7 @@ export const api = {
 // free_slots deletes a Sony playlist through the existing playlist-delete route.
 // reconnect_retry has no endpoint: reconnect the Walkman, then call repairPlaylists again.
 // close_and_retry has no endpoint: show fatal_path, then the owner retries the original action.
+// clear_read_only_retry has no endpoint: show fatal_path, the owner clears the read-only flag, then retries.
 // GENERIC has no recovery action.
 const inspectRecover = [
   { id: 'inspect', method: 'GET', path: '/device/playlist-recovery/inspect', call: 'inspectPlaylistJournal' },
@@ -93,6 +94,13 @@ export const RECOVERY_ACTIONS = {
     fatal_code: 'DEVICE_FILE_LOCKED',
     steps: [
       { id: 'close' },
+      { id: 'retry' },
+    ],
+  },
+  clear_read_only_retry: {
+    fatal_code: 'DEVICE_FILE_READ_ONLY',
+    steps: [
+      { id: 'clear_read_only' },
       { id: 'retry' },
     ],
   },

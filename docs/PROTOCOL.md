@@ -88,11 +88,12 @@ The same partial-failure rule as `add` applies: a failed deletion surfaces as
 - `PLAYLIST_SLOTS_EXHAUSTED` — all 2048 lifetime playlist slots are used
 - `PLAYLIST_LIBRARY_NOT_LOADED` — playlist repair refused because the library is not loaded. Nothing was written
 - `DEVICE_FILE_LOCKED` — a device file is locked. Nothing was written, and no journal is left
+- `DEVICE_FILE_READ_ONLY` — the pre-write rename probe found a read-only device file. Nothing was written
 - `DEVICE_ROLLBACK_FAILED` — rollback failed and the journal is kept. The device state is uncertain
 
 Any other fatal omits `code`. A missing code is generic. The backend never
 derives a code by parsing `message`. An unrecognized string, or a non-string
-`code`, is dropped to generic and does not raise. Those six names are
+`code`, is dropped to generic and does not raise. Those seven names are
 `FatalCode` in `backend/jsymphonic.py`.
 
 `DEVICE_FILE_LOCKED` and `DEVICE_ROLLBACK_FAILED` are the lines from jsymphonic #4 @ `857b91e`:
@@ -105,7 +106,13 @@ derives a code by parsing `message`. An unrecognized string, or a non-string
 {"event":"fatal","message":"Database update failed; incomplete recovery requires a verified backup","code":"DEVICE_ROLLBACK_FAILED"}
 ```
 
-`path` is present only on `DEVICE_FILE_LOCKED`. It is relative to the mount root and uses forward slashes. Other fatals omit the key. When `path` is a string, HTTP errors copy it to `detail.fatal_path` and device job files copy it to `files[].fatal_path`. A missing or non-string `path` omits that field. Nested objects and message text are not a path.
+`DEVICE_FILE_READ_ONLY` uses the same `path` field. It is raised by the pre-write rename probe, so nothing has been written and `needs_reconcile` stays false. The line below is the shape under test. Its `message` is a placeholder; the exact message is pending Builder B's head. Tests assert `code` and `path` only.
+
+```json
+{"event":"fatal","message":"Device file is read-only","code":"DEVICE_FILE_READ_ONLY","path":"OMGAUDIO/10F00/10000001.OMA"}
+```
+
+`path` is present on `DEVICE_FILE_LOCKED` and `DEVICE_FILE_READ_ONLY`. It is relative to the mount root and uses forward slashes. Other fatals omit the key. When `path` is a string, HTTP errors copy it to `detail.fatal_path` and device job files copy it to `files[].fatal_path`. A missing or non-string `path` omits that field. Nested objects and message text are not a path.
 
 `fatal_path` is opaque. The backend copies the string unchanged and must never join it onto the mount or reformat separators. Callers render it as plain text only, never as `innerHTML` or markdown.
 
@@ -187,7 +194,7 @@ may precede it) and the HTTP result uses the same `detail.code` and
 {"event":"fatal","message":"Playlist repair refused: the library is not loaded","code":"PLAYLIST_LIBRARY_NOT_LOADED"}
 ```
 
-`DEVICE_FILE_LOCKED` writes nothing and leaves no journal, so `needs_reconcile` stays false on every device write, the same as a pre-write refusal. `DEVICE_ROLLBACK_FAILED` keeps the journal, so `needs_reconcile` stays true.
+`DEVICE_FILE_LOCKED` writes nothing and leaves no journal, so `needs_reconcile` stays false on every device write, the same as a pre-write refusal. `DEVICE_FILE_READ_ONLY` is also a pre-write refusal, so `needs_reconcile` stays false. `DEVICE_ROLLBACK_FAILED` keeps the journal, so `needs_reconcile` stays true.
 
 Timeouts: inspect 120 s, recover and repair 600 s. On timeout the shim is
 killed. A recover or repair timeout sets `needs_reconcile`. An inspect timeout
@@ -203,9 +210,10 @@ HTTP:
 | `free_slots` | `PLAYLIST_SLOTS_EXHAUSTED` | existing `DELETE /api/device/playlists/{id}` (`playlist-delete`). No new endpoint. |
 | `reconnect_retry` | `PLAYLIST_LIBRARY_NOT_LOADED` | no endpoint. The owner reconnects the Walkman, then `repairPlaylists` runs again. |
 | `close_and_retry` | `DEVICE_FILE_LOCKED` | no endpoint. The UI shows `fatal_path` as plain text and the owner retries the original action. |
+| `clear_read_only_retry` | `DEVICE_FILE_READ_ONLY` | no endpoint. The UI shows `fatal_path` as plain text, the owner clears the read-only flag on that file, then retries the original action. |
 | `GENERIC` | null | no recovery action |
 
-`frontend/src/api.js` exports the same map as `RECOVERY_ACTIONS` and the helpers `inspectPlaylistJournal`, `recoverPlaylistJournal`, and `repairPlaylists`. `free_slots` uses the existing `deleteDevicePlaylist`. `reconnect_retry` and `close_and_retry` add no route.
+`frontend/src/api.js` exports the same map as `RECOVERY_ACTIONS` and the helpers `inspectPlaylistJournal`, `recoverPlaylistJournal`, and `repairPlaylists`. `free_slots` uses the existing `deleteDevicePlaylist`. `reconnect_retry`, `close_and_retry`, and `clear_read_only_retry` add no route.
 
 Inspect success:
 
@@ -219,7 +227,7 @@ Recover success: `{"ok":true,"outcome":"discarded","job_id":"..."}`. `outcome` n
 
 Repair success: `{"ok":true,"job_id":"...","pruned_count":2,"pruned_track_ids":["3"],"playlist_ids":["1"]}`. `pruned_count` null means the count field was missing or not a non-negative integer. A missing or invalid summary id list is null.
 
-Recover and repair failures use the write error shape: `detail.code` (`verify_device_state`, `playlist_failed`, or `library_not_loaded`) and `detail.fatal_code`. `library_not_loaded` is only the empty-library refusal. `DEVICE_FILE_LOCKED` uses `playlist_failed` because nothing was written, and includes `detail.fatal_path` when `path` is a string. `DEVICE_ROLLBACK_FAILED` uses `verify_device_state`.
+Recover and repair failures use the write error shape: `detail.code` (`verify_device_state`, `playlist_failed`, or `library_not_loaded`) and `detail.fatal_code`. `library_not_loaded` is only the empty-library refusal. `DEVICE_FILE_LOCKED` and `DEVICE_FILE_READ_ONLY` use `playlist_failed` because nothing was written, and include `detail.fatal_path` when `path` is a string. `DEVICE_ROLLBACK_FAILED` uses `verify_device_state`.
 
 ## Backend contract (`backend/jsymphonic.py`)
 

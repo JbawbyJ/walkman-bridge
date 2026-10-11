@@ -300,6 +300,7 @@ def test_commands_use_device_flag_and_inspect_is_the_read_switch(monkeypatch, tm
 
 LOCKED_FATAL_LINE = '{"event":"fatal","message":"Device file is locked","code":"DEVICE_FILE_LOCKED","path":"OMGAUDIO/10F00/10000001.OMA"}'
 ROLLBACK_FATAL_LINE = '{"event":"fatal","message":"Database update failed; incomplete recovery requires a verified backup","code":"DEVICE_ROLLBACK_FAILED"}'
+READ_ONLY_FATAL_LINE = '{"event":"fatal","message":"Device file is read-only","code":"DEVICE_FILE_READ_ONLY","path":"OMGAUDIO/10F00/10000001.OMA"}'
 
 
 def test_confirmed_fatal_lines_are_emitted_whole():
@@ -311,6 +312,16 @@ def test_confirmed_fatal_lines_are_emitted_whole():
         assert result.returncode == 1
         assert result.stdout == line + '\n'
         assert result.stderr == ''
+
+
+def test_read_only_fatal_line_exposes_code_and_path():
+    """The message in this line is a placeholder, so it is not asserted."""
+    result = subprocess.run([sys.executable, str(FAKE_SHIM), 'playlist_file_read_only'], capture_output=True, text=True, check=False)
+    assert result.returncode == 1
+    event = json.loads(result.stdout)
+    assert event['code'] == 'DEVICE_FILE_READ_ONLY'
+    assert event['path'] == 'OMGAUDIO/10F00/10000001.OMA'
+    assert event['event'] == 'fatal'
 
 
 def test_locked_file_passes_path_and_does_not_reconcile(context, monkeypatch):
@@ -328,6 +339,34 @@ def test_locked_file_passes_path_and_does_not_reconcile(context, monkeypatch):
     assert job['files'][0]['state'] == 'failed'
     assert job['files'][0]['fatal_code'] == event['code']
     assert job['files'][0]['fatal_path'] == event['path']
+
+
+def test_read_only_file_passes_path_and_does_not_reconcile(context, monkeypatch):
+    use_fake(monkeypatch, context, 'playlist_file_read_only')
+    response = context.client.post(RECOVER)
+    assert response.status_code == 409, response.text
+    detail = response.json()['detail']
+    event = json.loads(READ_ONLY_FATAL_LINE)
+    assert detail['fatal_code'] == event['code']
+    assert detail['fatal_path'] == event['path']
+    assert detail['code'] == 'playlist_failed'
+    assert detail['fatal_code'] == 'DEVICE_FILE_READ_ONLY'
+    assert detail['fatal_path'] == 'OMGAUDIO/10F00/10000001.OMA'
+    job = context.client.get('/api/jobs/' + detail['job_id']).json()
+    assert job['needs_reconcile'] is False
+    assert job['files'][0]['state'] == 'failed'
+    assert job['files'][0]['fatal_code'] == 'DEVICE_FILE_READ_ONLY'
+    assert job['files'][0]['fatal_path'] == 'OMGAUDIO/10F00/10000001.OMA'
+
+
+def test_inspect_read_only_file_passes_the_path(context, monkeypatch):
+    use_fake(monkeypatch, context, 'playlist_file_read_only')
+    response = context.client.get(INSPECT)
+    assert response.status_code == 409, response.text
+    detail = response.json()['detail']
+    assert detail['fatal_code'] == 'DEVICE_FILE_READ_ONLY'
+    assert detail['fatal_path'] == 'OMGAUDIO/10F00/10000001.OMA'
+    assert context.app.state.jobs.latest() is None
 
 
 def test_locked_file_without_a_string_path_omits_fatal_path(context, monkeypatch):
