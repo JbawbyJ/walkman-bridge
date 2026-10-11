@@ -29,4 +29,4 @@ The player leases managed media before loading it and releases it on Stop/remova
 
 ## Follow-up
 
-Concepts B and D, AI restoration, automatic upsampling, streaming-service playback, folder watching and a full indexed music library remain outside this version. Public single-track link import is supported as documented in README.md. Current management/layout evidence is in MANAGEMENT-0.4.0.md; earlier verification is recorded in IMPLEMENTATION-PROGRESS.md and MEDIA-UPGRADE-0.3.0.md.
+Concepts B and D, AI restoration, automatic upsampling, streaming-service playback, folder watching and a full indexed music library remain outside this version. Public single-track link import is supported as documented in README.md. Current 0.4.1 acceptance is in BRANDING-SANDBOX-0.4.1.md. Management and layout evidence for 0.4.0 is in MANAGEMENT-0.4.0.md. Metadata, artwork, and link-import evidence is in MEDIA-UPGRADE-0.3.0.md. The 0.2.0 verification log is archived at archive/IMPLEMENTATION-PROGRESS.md.
