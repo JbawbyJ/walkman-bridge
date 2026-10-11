@@ -1,11 +1,9 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('bridge', 'player')][string]$Product,
-    [Parameter(Mandatory)][string]$Installer
+    [Parameter()][ValidateSet('bridge', 'player')][string]$Product,
+    [Parameter()][string]$Installer
 )
-$ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$Installer = (Resolve-Path -LiteralPath $Installer).Path
 $Name = if ($Product -eq 'bridge') { 'Walkman Bridge' } else { 'Red Lotus Player' }
 $Executable = if ($Product -eq 'bridge') { 'Walkman Bridge.exe' } else { 'Red Lotus Player.exe' }
 $DataName = if ($Product -eq 'bridge') { 'Walkman Bridge' } else { 'Red Lotus Player' }
@@ -78,20 +76,39 @@ function Get-SmokeProcesses {
         $current = $pending.Dequeue()
         if ($seen.ContainsKey($current)) { continue }
         $seen[$current] = $true
-        if ($byId.ContainsKey($current)) { [void]$found.Add((Copy-OwnedProcess $byId[$current])) }
-        if ($childrenOf.ContainsKey($current)) {
+        $keep = $false
+        if ($byId.ContainsKey($current)) {
+            $copied = Copy-OwnedProcess $byId[$current]
+            $keep = $true
+            if ([int]$copied.ProcessId -ne $RootProcessId) {
+                $parentKey = [string][int]$copied.ParentProcessId
+                $parentStart = $null
+                if ($byId.ContainsKey($parentKey)) { $parentStart = ConvertTo-SmokeInstant $byId[$parentKey].CreationDate }
+                # A reused PID is older than its supposed parent. Real children start with or after the parent.
+                if (-not $parentStart -or -not $copied.CreationDate -or ($copied.CreationDate -lt $parentStart)) { $keep = $false }
+            }
+            if ($keep) { [void]$found.Add($copied) }
+        }
+        if ($keep -and $childrenOf.ContainsKey($current)) {
             foreach ($child in $childrenOf[$current]) { $pending.Enqueue([string][int]$child.ProcessId) }
         }
     }
+    $smokeStart = $null
+    if ($RootProcessId -gt 0 -and $byId.ContainsKey([string]$RootProcessId)) {
+        $smokeStart = ConvertTo-SmokeInstant $byId[[string]$RootProcessId].CreationDate
+    }
     $owned = if ($OwnedPath) { $OwnedPath.TrimEnd('\') } else { '' }
-    if ($owned) {
+    if ($owned -and $smokeStart) {
         foreach ($item in $snapshot) {
             $idKey = [string][int]$item.ProcessId
             if ($seen.ContainsKey($idKey)) { continue }
             $command = [string]$item.CommandLine
             $executablePath = [string]$item.ExecutablePath
             $ownedHit = ($command -and $command.IndexOf($owned, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or ($executablePath -and $executablePath.IndexOf($owned, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
-            if ($ownedHit) { [void]$found.Add((Copy-OwnedProcess $item)); $seen[$idKey] = $true }
+            $itemStart = ConvertTo-SmokeInstant $item.CreationDate
+            if ($ownedHit -and $itemStart -and ($itemStart -ge $smokeStart)) {
+                [void]$found.Add((Copy-OwnedProcess $item)); $seen[$idKey] = $true
+            }
         }
     }
     return @($found | Where-Object { [int]$_.ProcessId -gt 0 -and [int]$_.ProcessId -ne $PID })
@@ -140,7 +157,7 @@ function Write-SmokeDiagnostics {
     }
 }
 function Get-SmokeStopSkip {
-    param($Item, $SmokeStart, [int]$SmokeProcessId)
+    param($Item, $SmokeStart)
     $processId = [int]$Item.ProcessId
     try { $live = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId={0}" -f $processId) -ErrorAction Stop) }
     catch { throw "Win32_Process query failed: $($_.Exception.Message)" }
@@ -152,8 +169,8 @@ function Get-SmokeStopSkip {
     if ($recorded -and $liveStart -and ($recorded.Ticks -ne $liveStart.Ticks)) {
         return "Skip pid=$processId name=$name; PID reused (recorded start $($recorded.ToString('o')), current start $currentText)"
     }
-    if ($SmokeStart -and $liveStart -and $processId -ne $SmokeProcessId -and ($liveStart -gt $SmokeStart)) {
-        return "Skip pid=$processId name=$name; started after the smoke process (start $currentText, smoke $($SmokeStart.ToString('o')))"
+    if ($SmokeStart -and $liveStart -and ($liveStart -lt $SmokeStart)) {
+        return "Skip pid=$processId name=$name; started before the smoke process (start $currentText, smoke $($SmokeStart.ToString('o')))"
     }
     return $null
 }
@@ -191,7 +208,7 @@ function Stop-SmokeLeftovers {
         }
         if ($leaves.Count -eq 0) { foreach ($item in @($pending)) { [void]$leaves.Add($item) } }
         foreach ($item in @($leaves)) {
-            $skip = Get-SmokeStopSkip -Item $item -SmokeStart $smokeStart -SmokeProcessId $smokeProcessId
+            $skip = Get-SmokeStopSkip -Item $item -SmokeStart $smokeStart
             if ($skip) { Write-Host $skip }
             else {
                 try { Stop-Process -Id ([int]$item.ProcessId) -Force -ErrorAction Stop }
@@ -223,6 +240,10 @@ function Publish-SmokeHang {
     $tracked = if ($Process) { $Process.Id } else { 'unknown' }
     throw "Product remains running after ${ShutdownGraceSeconds}s shutdown grace; process $tracked diagnostics logged and leftovers terminated."
 }
+if ($MyInvocation.InvocationName -eq '.') { return }
+$ErrorActionPreference = 'Stop'
+if (-not $Product -or -not $Installer) { throw 'Product and Installer are required.' }
+$Installer = (Resolve-Path -LiteralPath $Installer).Path
 $Existing = @(Registrations)
 if ($Existing) { throw "An existing $Name installation is registered; installer smoke will not replace it." }
 if (Get-Process -Name $Name,'Walkman Bridge Night Ops' -ErrorAction SilentlyContinue) { throw 'A user product is running.' }
