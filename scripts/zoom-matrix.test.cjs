@@ -14,7 +14,7 @@ const profile = path.join(root, 'frontend', 'test-output', 'zoom-matrix', 'profi
 // Harness limit, this wrapper, and the zoom-matrix job timeout are one budget.
 // frontend/tests/zoom-matrix-budget.cjs throws if they are out of order.
 function zoomMatrixJobTimeoutMinutes() {
-  const workflow = fs.readFileSync(path.join(root, '.github/workflows/windows-products.yml'), 'utf8')
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/windows-products.yml'), 'utf8').replace(/\r\n/g, '\n')
   const header = '\n  zoom-matrix:\n'
   const start = workflow.indexOf(header)
   assert.notEqual(start, -1, 'zoom-matrix job missing from windows-products.yml')
