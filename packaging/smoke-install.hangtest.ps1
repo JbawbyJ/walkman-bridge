@@ -3,6 +3,44 @@
 # the cleanup result must fail, and an older unrelated sleeper must survive.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'smoke-install.ps1')
+if ($ShutdownGraceSeconds -ne 45) { throw "Installed smoke grace is $ShutdownGraceSeconds, expected 45" }
+
+function Assert-SmokeRedaction {
+    param([string]$InputText, [string]$Expected)
+    $actual = Hide-SmokePath $InputText
+    if ($actual -ne $Expected) { throw "Redaction mismatch.`n input: $InputText`n actual: $actual`n expected: $Expected" }
+}
+$savedRepo = $Repo
+$savedProfile = $env:USERPROFILE
+try {
+    $env:USERPROFILE = 'C:\Users\runner'
+    $Repo = 'C:\Users\runner\walkman-bridge'
+    Assert-SmokeRedaction 'C:\Users\runner next' '<USERPROFILE> next'
+    Assert-SmokeRedaction 'C:\Users\runner"next' '<USERPROFILE>"next'
+    Assert-SmokeRedaction "C:\Users\runner'next" "<USERPROFILE>'next"
+    Assert-SmokeRedaction 'C:\Users\runner\next' '<USERPROFILE>\next'
+    Assert-SmokeRedaction 'C:/Users/runner/next' '<USERPROFILE>/next'
+    Assert-SmokeRedaction 'C:\Users\runner' '<USERPROFILE>'
+    Assert-SmokeRedaction 'C:\Users\runner\walkman-bridge next' '<REPO> next'
+    Assert-SmokeRedaction 'C:\Users\runner\walkman-bridge"next' '<REPO>"next'
+    Assert-SmokeRedaction "C:\Users\runner\walkman-bridge'next" "<REPO>'next"
+    Assert-SmokeRedaction 'C:\Users\runner\walkman-bridge\next' '<REPO>\next'
+    Assert-SmokeRedaction 'C:/Users/runner/walkman-bridge/next' '<REPO>/next'
+    Assert-SmokeRedaction 'C:\Users\runner\walkman-bridge' '<REPO>'
+    Assert-SmokeRedaction 'C:\Users\runneradmin\keep' 'C:\Users\runneradmin\keep'
+    Assert-SmokeRedaction 'C:\Users\runner\walkman-bridge\packaging C:\Users\runner\AppData' '<REPO>\packaging <USERPROFILE>\AppData'
+    $env:USERPROFILE = 'C:\Users\runneradmin'
+    $Repo = 'C:\Users\runneradmin\walkman-bridge'
+    Assert-SmokeRedaction 'c:\users\runneradmin\x' '<USERPROFILE>\x'
+    Assert-SmokeRedaction 'C:/Users/runneradmin/docs' '<USERPROFILE>/docs'
+    Assert-SmokeRedaction 'C:/Users/runneradmin/walkman-bridge/src' '<REPO>/src'
+    Assert-SmokeRedaction 'C:\Users/runneradmin\x' '<USERPROFILE>\x'
+    Assert-SmokeRedaction 'C:\Users/runneradmin\walkman-bridge/src' '<REPO>/src'
+} finally {
+    $Repo = $savedRepo
+    if ($null -eq $savedProfile) { Remove-Item Env:USERPROFILE -ErrorAction SilentlyContinue } else { $env:USERPROFILE = $savedProfile }
+}
+Write-Host 'Redaction cases passed: boundaries, case, slash forms, prefix, and longer path.'
 
 $pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
 if (-not $pwsh) { $pwsh = (Get-Command powershell.exe -ErrorAction Stop).Source }
@@ -81,7 +119,8 @@ while (`$true) { Start-Sleep -Seconds 30 }
     }
     if ($text.Contains($Repo) -or ($env:USERPROFILE -and $text.Contains($env:USERPROFILE))) { throw 'Diagnostics printed a raw profile or repo path' }
     if ($text -notlike '*HANG_RESULT fail:*' -or $text -like '*HANG_RESULT pass*') { throw "Hang cleanup was treated as a pass:`n$text" }
-    if ($text -notlike '*remains running*') { throw "Hang cleanup did not fail closed:`n$text" }
+    if ($text -notlike '*after 2s shutdown grace*') { throw "Hang message did not report the 2s grace:`n$text" }
+    if ($ShutdownGraceSeconds -ne 45) { throw "Installed smoke grace changed from 45 to $ShutdownGraceSeconds" }
     Write-Host "Hang cleanup test passed: killed parent $($parent.Id) and child $childId; left unrelated $($unrelated.Id) running."
 } finally {
     foreach ($proc in @($parent, $unrelated)) {

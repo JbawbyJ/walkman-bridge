@@ -40,18 +40,18 @@ function Copy-OwnedProcess($Item) {
 function Hide-SmokePath([string]$Text) {
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
     $pairs = @(
-        @{ Path = $Repo; Token = '<REPO>' },
-        @{ Path = $env:USERPROFILE; Token = '<USERPROFILE>' }
-    )
+        @{ Path = [string]$Repo; Token = '<REPO>' },
+        @{ Path = [string]$env:USERPROFILE; Token = '<USERPROFILE>' }
+    ) | Sort-Object { $_.Path.Length } -Descending
     foreach ($pair in $pairs) {
         $path = [string]$pair.Path
         if (-not $path) { continue }
         $path = $path.TrimEnd('\', '/')
-        foreach ($form in @($path, ($path.Replace('\', '/')))) {
-            if (-not $form) { continue }
-            $boundary = [regex]::Escape($form) + '(?=$|[\\/]|[\s"''])'
-            $Text = [regex]::Replace($Text, $boundary, $pair.Token, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-        }
+        $segments = @($path -split '[\\/]+' | Where-Object { $_ })
+        if (-not $segments) { continue }
+        $body = (($segments | ForEach-Object { [regex]::Escape($_) }) -join '[\\/]')
+        $pattern = $body + '(?=$|[\\/]|[\s"''])'
+        $Text = [regex]::Replace($Text, $pattern, $pair.Token, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     }
     return $Text
 }
@@ -123,6 +123,7 @@ function Test-SmokeTreeClear {
 }
 function Wait-SmokeShutdown {
     param($Process, [string]$OwnedPath, [int]$GraceSeconds)
+    $script:SmokeGraceSeconds = $GraceSeconds
     $deadline = [datetime]::UtcNow.AddSeconds($GraceSeconds)
     while ($true) {
         if (Test-SmokeTreeClear -Process $Process -OwnedPath $OwnedPath) { return $true }
@@ -238,7 +239,8 @@ function Publish-SmokeHang {
     } while ($true)
     $script:HangRecorded = $true
     $tracked = if ($Process) { $Process.Id } else { 'unknown' }
-    throw "Product remains running after ${ShutdownGraceSeconds}s shutdown grace; process $tracked diagnostics logged and leftovers terminated."
+    $grace = if ($null -ne $script:SmokeGraceSeconds) { $script:SmokeGraceSeconds } else { $ShutdownGraceSeconds }
+    throw "Product remains running after ${grace}s shutdown grace; process $tracked diagnostics logged and leftovers terminated."
 }
 if ($MyInvocation.InvocationName -eq '.') { return }
 $ErrorActionPreference = 'Stop'
@@ -302,7 +304,8 @@ try {
         }
         if (-not (Test-SmokeTreeClear -Process $Process -OwnedPath $Run)) {
             if (-not $script:HangRecorded) { Publish-SmokeHang -Process $Process }
-            throw "Product remains running after ${ShutdownGraceSeconds}s shutdown grace; diagnostics logged and leftovers terminated."
+            $grace = if ($null -ne $script:SmokeGraceSeconds) { $script:SmokeGraceSeconds } else { $ShutdownGraceSeconds }
+            throw "Product remains running after ${grace}s shutdown grace; diagnostics logged and leftovers terminated."
         }
         $Uninstaller = @(Get-ChildItem -LiteralPath $InstallDirectory -Filter 'Uninstall*.exe' -File)
         if ($Uninstaller.Count -ne 1) { throw 'Exactly one test-owned uninstaller is required.' }
