@@ -49,7 +49,7 @@ function Hide-SmokePath([string]$Text) {
         $path = $path.TrimEnd('\', '/')
         foreach ($form in @($path, ($path.Replace('\', '/')))) {
             if (-not $form) { continue }
-            $boundary = [regex]::Escape($form) + '(?=$|[\\/])'
+            $boundary = [regex]::Escape($form) + '(?=$|[\\/]|[\s"''])'
             $Text = [regex]::Replace($Text, $boundary, $pair.Token, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
         }
     }
