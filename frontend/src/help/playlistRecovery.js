@@ -2,13 +2,16 @@
 // Not imported by the UI yet. Match the code only; never parse the message.
 // In-app repair / inspect / recover controls are not wired in this version.
 //
-// path comes from the device (detail.fatal_path). Append it as plain text only,
-// never through innerHTML or markdown, and omit it when absent.
+// path comes from the device (detail.fatal_path). probe_path is the renamed
+// .jsymphonic-probe copy, also an opaque string from the device. Append both
+// as plain text only, never through innerHTML or markdown, and omit whichever
+// is absent.
 // Callers of formatPlaylistRecovery should pass recoveryAction from
 // error.recovery_action (detail.recovery_action). A non-empty recoveryAction
 // overrides the action id chosen from the code.
 
 const PATH_CODES = new Set(['DEVICE_FILE_LOCKED', 'DEVICE_FILE_READ_ONLY'])
+const PROBE_CODES = new Set(['DEVICE_PROBE_RESTORE_FAILED', 'DEVICE_PROBE_CONFLICT', 'DEVICE_PROBE_PENDING'])
 
 export const PLAYLIST_RECOVERY_HELP = {
   PLAYLIST_REF_MISSING: {
@@ -53,6 +56,24 @@ export const PLAYLIST_RECOVERY_HELP = {
     action: 'Clear the read-only setting on that file (in Windows: right-click it, choose Properties, untick Read-only), then try again.',
     actionId: 'clear_read_only_retry',
   },
+  DEVICE_PROBE_RESTORE_FAILED: {
+    title: 'A safety check could not restore a song file',
+    explanation: 'A song file was renamed during a safety check and couldn\'t be renamed back.',
+    action: 'Don\'t rename or delete files by hand. Keep the Walkman connected, close any program that might be using it, then run Inspect and Recover, which put it back.',
+    actionId: 'inspect_recover',
+  },
+  DEVICE_PROBE_CONFLICT: {
+    title: 'Two copies of a song file differ',
+    explanation: 'There are two different copies of the same song file, so Walkman Bridge won\'t change anything.',
+    action: 'Don\'t delete either file. Keep your backup and ask for help. Neither Recover nor the next save can resolve this.',
+    actionId: 'manual_help',
+  },
+  DEVICE_PROBE_PENDING: {
+    title: 'A safety check left a renamed copy',
+    explanation: 'Nothing is broken. An earlier safety check left a renamed copy of a song file. What happens next depends on the files.',
+    action: 'On the next save or Recover, Walkman Bridge tidies it up automatically. If the original song file is missing, the copy is renamed back. If the original is there and identical, the extra copy is removed. Only if the two copies differ will that save stop with a conflict.',
+    actionId: 'inspect_recover',
+  },
   GENERIC: {
     title: 'Playlist change failed',
     explanation: 'The playlist change failed without a known recovery code.',
@@ -82,12 +103,22 @@ function nonEmptyString(value) {
   return typeof value === 'string' && value.length > 0
 }
 
-export function formatPlaylistRecovery(code, { path, context, recoveryAction } = {}) {
+function probeLocation(path, probePath) {
+  const file = nonEmptyString(path)
+  const copy = nonEmptyString(probePath)
+  if (file && copy) return ` (file: ${path}; renamed copy: ${probePath})`
+  if (file) return ` (file: ${path})`
+  if (copy) return ` (renamed copy: ${probePath})`
+  return ''
+}
+
+export function formatPlaylistRecovery(code, { path, probePath, context, recoveryAction } = {}) {
   const entry = playlistRecoveryHelp(code)
   const recover = context === 'recover' ? RECOVER_COPY[code] : null
   const chosen = recover || entry
   let explanation = chosen.explanation
-  if (PATH_CODES.has(code) && nonEmptyString(path)) explanation += ` (${path})`
+  if (PROBE_CODES.has(code)) explanation += probeLocation(path, probePath)
+  else if (PATH_CODES.has(code) && nonEmptyString(path)) explanation += ` (${path})`
   return {
     title: entry.title,
     explanation,

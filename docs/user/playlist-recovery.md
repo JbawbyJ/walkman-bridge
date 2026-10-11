@@ -15,7 +15,7 @@ work.
 ## How to read a failure
 
 A failed playlist change can include a short code. Choose the fix from that
-code. If there is no code, or the code is not one of the seven names below,
+code. If there is no code, or the code is not one of the nine failure names or the warning below,
 treat it as a general failure. The longer message is not a code. Do not decide
 the fix by reading it.
 
@@ -28,6 +28,9 @@ the fix by reading it.
 | `DEVICE_FILE_LOCKED` | Another program has a file on the Walkman open. Walkman Bridge stopped and nothing was changed. | Close that program and try the change again. If this happened while recovering an interrupted save, the save was already committed and only needs finishing, so close the program and run Recover again. |
 | `DEVICE_ROLLBACK_FAILED` | The save failed and could not be fully undone. The unfinished record is still on the Walkman. | Stop making changes, keep the Walkman connected, and run Inspect first. |
 | `DEVICE_FILE_READ_ONLY` | A song file on the Walkman is marked read-only, so Walkman Bridge stopped before changing anything. | Clear the read-only setting on that file, then try again. If this happened while recovering, the save was already committed and only needs finishing, so clear read-only and run Recover again. |
+| `DEVICE_PROBE_RESTORE_FAILED` | A song file was renamed during a safety check and could not be renamed back. | Do not rename or delete files by hand. Keep the Walkman connected, close other programs, then run Inspect and Recover. |
+| `DEVICE_PROBE_CONFLICT` | Two different copies of the same song file are on the Walkman. Walkman Bridge will not change anything. | Do not delete either file. Keep your backup and ask for help. Neither Recover nor the next save can resolve this. |
+| `DEVICE_PROBE_PENDING` (warning) | Nothing is broken. A safety check left a renamed copy. What happens next depends on the files. | The next save or Recover tidies it up when it can. If the copies differ, that save stops with `DEVICE_PROBE_CONFLICT`. |
 | No code, or any other code | The change failed, and there is no specific recovery step. | Back up, wait until the app is idle, and try once more. |
 
 ## The unfinished record
@@ -124,6 +127,43 @@ A song file on the Walkman is marked read-only, so Walkman Bridge stopped before
 
 If this happened while recovering an interrupted save, the save was already committed and only needs finishing, so clear the read-only setting and run Recover again.
 
+## The rename safety check
+
+Before it changes a song, Walkman Bridge briefly renames that file to a name ending in `.jsymphonic-probe`, then renames it back. That checks the file is not in use. Do not rename or delete the song file or the `.jsymphonic-probe` copy yourself. If Walkman Bridge shows a file location, that is the song. If it shows a renamed-copy location, that is the temporary name.
+
+## A safety check could not restore a song
+
+Use these steps when the code is `DEVICE_PROBE_RESTORE_FAILED`.
+
+A song file was renamed during that safety check and could not be renamed back.
+
+1. Leave the Walkman connected.
+2. Close any program that might be using the file, such as File Explorer, a media player, or antivirus.
+3. Do not rename or delete files by hand.
+4. Run Inspect, then Recover. Recover puts the renamed file back.
+
+## Two copies of a song file differ
+
+Use these steps when the code is `DEVICE_PROBE_CONFLICT`.
+
+The song file and the renamed copy are both present, and they are not the same. Walkman Bridge will not change anything. Neither Recover nor the next save can resolve this. It clears only after the extra copy is removed with help.
+
+1. Do not delete either file yourself.
+2. Keep your backup.
+3. Ask for help, and share both file locations if Walkman Bridge shows them.
+
+There is no in-app button for this. `manual_help` is not a control in this version.
+
+## A renamed copy is waiting
+
+`DEVICE_PROBE_PENDING` is a warning, not a failure. Nothing is broken. An earlier safety check left a renamed copy of a song file. What happens next depends on the files.
+
+On the next save or Recover, Walkman Bridge tidies it up automatically:
+
+- If the original song file is missing, the copy is renamed back.
+- If the original is there and identical, the extra copy is removed.
+- Only if the two copies differ will that save stop with `DEVICE_PROBE_CONFLICT`. See **Two copies of a song file differ**.
+
 ## A save could not be fully undone
 
 Use these steps when the code is `DEVICE_ROLLBACK_FAILED`.
@@ -154,8 +194,8 @@ Inspect, recover, and repair do not add slots.
 
 ## A general failure
 
-Use these steps when there is no code, or the code is not one of the seven
-names in the table.
+Use these steps when there is no code, or the code is not one of the nine
+failure names or the warning in the table.
 
 1. Leave the Walkman connected.
 2. Make a full backup and confirm it completed.
