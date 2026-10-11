@@ -1,0 +1,128 @@
+// Copy for Sony playlist failures, keyed by the device fatal_code.
+// Not imported by the UI yet. Match the code only; never parse the message.
+// In-app repair / inspect / recover controls are not wired in this version.
+//
+// path comes from the device (detail.fatal_path). probe_path is the renamed
+// .jsymphonic-probe copy, also an opaque string from the device. Append both
+// as plain text only, never through innerHTML or markdown, and omit whichever
+// is absent.
+// Callers of formatPlaylistRecovery should pass recoveryAction from
+// error.recovery_action (detail.recovery_action). A non-empty recoveryAction
+// overrides the action id chosen from the code.
+
+const PATH_CODES = new Set(['DEVICE_FILE_LOCKED', 'DEVICE_FILE_READ_ONLY'])
+const PROBE_CODES = new Set(['DEVICE_PROBE_RESTORE_FAILED', 'DEVICE_PROBE_CONFLICT', 'DEVICE_PROBE_PENDING'])
+
+export const PLAYLIST_RECOVERY_HELP = {
+  PLAYLIST_REF_MISSING: {
+    title: 'Playlist lists songs that are gone',
+    explanation: 'A playlist on the Walkman still names songs that are no longer on the device.',
+    action: 'Repair the playlist to drop those missing songs. In-app repair is coming soon.',
+    actionId: 'repair',
+  },
+  PLAYLIST_JOURNAL_PENDING: {
+    title: 'A playlist save was interrupted',
+    explanation: 'A previous playlist write stopped halfway, and its unfinished record is still on the Walkman.',
+    action: 'Inspect first and read the result, then recover. Recover finishes applying the save only when it was committed; otherwise redo that edit. In-app inspect and recover are coming soon.',
+    actionId: 'inspect_recover',
+  },
+  PLAYLIST_SLOTS_EXHAUSTED: {
+    title: 'The Walkman playlist table is full',
+    explanation: 'The device playlist table has used all 2048 slots, so another playlist cannot be saved.',
+    action: 'Delete playlists you no longer need, or combine them, until a slot is free.',
+    actionId: 'free_slots',
+  },
+  PLAYLIST_LIBRARY_NOT_LOADED: {
+    title: 'The Walkman music list did not load',
+    explanation: 'The Walkman\'s music list didn\'t load, or a song file on the device couldn\'t be read, so repair stopped without changing anything.',
+    action: 'Reconnect the Walkman, wait for the library to load, then try repair again. If it keeps happening, keep your backup and ask for help.',
+    actionId: 'reconnect_retry',
+  },
+  DEVICE_FILE_LOCKED: {
+    title: 'A file on the Walkman is open',
+    explanation: 'Another program (for example Explorer, a media player, or antivirus) has a file on the Walkman open. Walkman Bridge stopped and nothing was changed.',
+    action: 'Close that program and try the change again.',
+    actionId: 'close_and_retry',
+  },
+  DEVICE_ROLLBACK_FAILED: {
+    title: 'The playlist save could not be undone',
+    explanation: 'The save failed and could not be fully undone.',
+    action: 'Stop making changes, keep the Walkman connected, and run Inspect first.',
+    actionId: 'inspect_recover',
+  },
+  DEVICE_FILE_READ_ONLY: {
+    title: 'The Walkman file or storage is read-only',
+    explanation: 'The file, or the Walkman\'s storage, is read-only or write-protected, so Walkman Bridge stopped before changing anything.',
+    action: 'Clear the file\'s Read-only setting (right-click it, choose Properties, untick Read-only), or turn off write protection on the device or card, then try again.',
+    actionId: 'clear_read_only_retry',
+  },
+  DEVICE_PROBE_RESTORE_FAILED: {
+    title: 'A safety check could not restore a file',
+    explanation: 'A file on the Walkman was renamed during a safety check and couldn\'t be renamed back.',
+    action: 'Don\'t rename or delete files by hand. Keep the Walkman connected, close any program that might be using it, then run Inspect and Recover, which put it back.',
+    actionId: 'inspect_recover',
+  },
+  DEVICE_PROBE_CONFLICT: {
+    title: 'Two copies of a file differ',
+    explanation: 'The renamed copy holds the original file. The file at the normal location appeared afterward from something else, so Walkman Bridge won\'t change anything. Until this is resolved, saving changes and Recover won\'t run, but browsing still works.',
+    action: 'Don\'t delete either file. Compare both with your backup and keep the one that matches. If your backup doesn\'t have this file, or neither copy matches, keep both and ask for help.',
+    actionId: 'manual_help',
+  },
+  DEVICE_PROBE_PENDING: {
+    title: 'A safety check left a renamed copy',
+    explanation: 'Nothing is broken. An earlier safety check left a renamed copy of a file on the Walkman. What happens next depends on the files.',
+    action: 'On the next save or Recover, Walkman Bridge tidies it up automatically. If the original file is missing, the copy is renamed back. If the original is there and identical, the extra copy is removed. Only if the two copies differ will that save stop with a conflict.',
+    actionId: 'inspect_recover',
+  },
+  GENERIC: {
+    title: 'Playlist change failed',
+    explanation: 'The playlist change failed without a known recovery code.',
+    action: 'Back up the Walkman and try again after the app is idle. Do not choose a fix from the message text.',
+    actionId: null,
+  },
+}
+
+const RECOVER_COPY = {
+  DEVICE_FILE_LOCKED: {
+    explanation: 'Another program (for example Explorer, a media player, or antivirus) has a file on the Walkman open. The save was already committed and only needs finishing.',
+    action: 'Close the program and run Recover again.',
+    actionId: 'inspect_recover',
+  },
+  DEVICE_FILE_READ_ONLY: {
+    explanation: 'The file, or the Walkman\'s storage, is read-only or write-protected. The save was already committed and only needs finishing.',
+    action: 'Clear the file\'s Read-only setting (right-click it, choose Properties, untick Read-only), or turn off write protection on the device or card, then run Recover again.',
+    actionId: 'inspect_recover',
+  },
+}
+
+export function playlistRecoveryHelp(fatalCode) {
+  return PLAYLIST_RECOVERY_HELP[fatalCode] || PLAYLIST_RECOVERY_HELP.GENERIC
+}
+
+function nonEmptyString(value) {
+  return typeof value === 'string' && value.length > 0
+}
+
+function probeLocation(path, probePath) {
+  const file = nonEmptyString(path)
+  const copy = nonEmptyString(probePath)
+  if (file && copy) return ` (file: ${path}; renamed copy: ${probePath})`
+  if (file) return ` (file: ${path})`
+  if (copy) return ` (renamed copy: ${probePath})`
+  return ''
+}
+
+export function formatPlaylistRecovery(code, { path, probePath, context, recoveryAction } = {}) {
+  const entry = playlistRecoveryHelp(code)
+  const recover = context === 'recover' ? RECOVER_COPY[code] : null
+  const chosen = recover || entry
+  let explanation = chosen.explanation
+  if (PROBE_CODES.has(code)) explanation += probeLocation(path, probePath)
+  else if (PATH_CODES.has(code) && nonEmptyString(path)) explanation += ` (${path})`
+  return {
+    title: entry.title,
+    explanation,
+    action: chosen.action,
+    actionId: nonEmptyString(recoveryAction) ? recoveryAction : chosen.actionId,
+  }
+}
