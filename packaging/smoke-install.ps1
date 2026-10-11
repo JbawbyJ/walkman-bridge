@@ -20,9 +20,47 @@ function Registrations {
     if (-not (Test-Path -LiteralPath $RegistryRoot -ErrorAction Stop)) { return @() }
     @(Get-ChildItem -LiteralPath $RegistryRoot -ErrorAction Stop | Get-ItemProperty -ErrorAction Stop | Where-Object { $_.DisplayName -eq $Name -or ($Product -eq 'bridge' -and $_.DisplayName -eq $LegacyName) })
 }
+function ConvertTo-SmokeInstant($Value) {
+    if ($null -eq $Value -or $Value -eq '') { return $null }
+    $instant = $Value
+    if ($instant -isnot [datetime]) {
+        try { $instant = [datetime]$instant } catch { return $null }
+    }
+    if ($instant.Kind -eq [DateTimeKind]::Utc) { return $instant }
+    return $instant.ToUniversalTime()
+}
+function Copy-OwnedProcess($Item) {
+    [pscustomobject]@{
+        Name = [string]$Item.Name
+        ProcessId = [int]$Item.ProcessId
+        ParentProcessId = [int]$Item.ParentProcessId
+        CommandLine = [string]$Item.CommandLine
+        ExecutablePath = [string]$Item.ExecutablePath
+        CreationDate = ConvertTo-SmokeInstant $Item.CreationDate
+    }
+}
+function Hide-SmokePath([string]$Text) {
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $pairs = @(
+        @{ Path = $Repo; Token = '<REPO>' },
+        @{ Path = $env:USERPROFILE; Token = '<USERPROFILE>' }
+    )
+    foreach ($pair in $pairs) {
+        $path = [string]$pair.Path
+        if (-not $path) { continue }
+        $path = $path.TrimEnd('\', '/')
+        foreach ($form in @($path, ($path.Replace('\', '/')))) {
+            if (-not $form) { continue }
+            $boundary = [regex]::Escape($form) + '(?=$|[\\/])'
+            $Text = [regex]::Replace($Text, $boundary, $pair.Token, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        }
+    }
+    return $Text
+}
 function Get-SmokeProcesses {
     param([int]$RootProcessId, [string]$OwnedPath)
-    $snapshot = @(Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue)
+    try { $snapshot = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop) }
+    catch { throw "Win32_Process query failed: $($_.Exception.Message)" }
     $byId = @{}
     $childrenOf = @{}
     foreach ($item in $snapshot) {
@@ -40,7 +78,7 @@ function Get-SmokeProcesses {
         $current = $pending.Dequeue()
         if ($seen.ContainsKey($current)) { continue }
         $seen[$current] = $true
-        if ($byId.ContainsKey($current)) { [void]$found.Add($byId[$current]) }
+        if ($byId.ContainsKey($current)) { [void]$found.Add((Copy-OwnedProcess $byId[$current])) }
         if ($childrenOf.ContainsKey($current)) {
             foreach ($child in $childrenOf[$current]) { $pending.Enqueue([string][int]$child.ProcessId) }
         }
@@ -53,7 +91,7 @@ function Get-SmokeProcesses {
             $command = [string]$item.CommandLine
             $executablePath = [string]$item.ExecutablePath
             $ownedHit = ($command -and $command.IndexOf($owned, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or ($executablePath -and $executablePath.IndexOf($owned, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
-            if ($ownedHit) { [void]$found.Add($item); $seen[$idKey] = $true }
+            if ($ownedHit) { [void]$found.Add((Copy-OwnedProcess $item)); $seen[$idKey] = $true }
         }
     }
     return @($found | Where-Object { [int]$_.ProcessId -gt 0 -and [int]$_.ProcessId -ne $PID })
@@ -90,15 +128,34 @@ function Write-SmokeDiagnostics {
         if ($started -is [datetime]) { $started = $started.ToUniversalTime().ToString('o') }
         $command = [string]$item.CommandLine
         if (-not $command) { $command = [string]$item.ExecutablePath }
+        $command = Hide-SmokePath $command
         if ($command.Length -gt 2000) { $command = $command.Substring(0, 2000) + '...' }
         Write-Host ("name={0} pid={1} parent={2} started={3} command={4}" -f $item.Name, $item.ProcessId, $item.ParentProcessId, $started, $command)
     }
     if ($LogPath -and (Test-Path -LiteralPath $LogPath)) {
         Write-Host '--- app log tail ---'
-        Get-Content -LiteralPath $LogPath -Tail 40 | ForEach-Object { Write-Host $_ }
+        Get-Content -LiteralPath $LogPath -Tail 40 | ForEach-Object { Write-Host (Hide-SmokePath $_) }
     } else {
-        Write-Host "App log missing: $LogPath"
+        Write-Host ("App log missing: {0}" -f (Hide-SmokePath $LogPath))
     }
+}
+function Get-SmokeStopSkip {
+    param($Item, $SmokeStart, [int]$SmokeProcessId)
+    $processId = [int]$Item.ProcessId
+    try { $live = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId={0}" -f $processId) -ErrorAction Stop) }
+    catch { throw "Win32_Process query failed: $($_.Exception.Message)" }
+    $liveStart = if ($live) { ConvertTo-SmokeInstant $live[0].CreationDate } else { $null }
+    $recorded = ConvertTo-SmokeInstant $Item.CreationDate
+    $name = [string]$Item.Name
+    if (-not $live) { return "Skip pid=$processId name=$name; process is no longer running" }
+    $currentText = if ($liveStart) { $liveStart.ToString('o') } else { 'unknown' }
+    if ($recorded -and $liveStart -and ($recorded.Ticks -ne $liveStart.Ticks)) {
+        return "Skip pid=$processId name=$name; PID reused (recorded start $($recorded.ToString('o')), current start $currentText)"
+    }
+    if ($SmokeStart -and $liveStart -and $processId -ne $SmokeProcessId -and ($liveStart -gt $SmokeStart)) {
+        return "Skip pid=$processId name=$name; started after the smoke process (start $currentText, smoke $($SmokeStart.ToString('o')))"
+    }
+    return $null
 }
 function Stop-SmokeLeftovers {
     param($Processes, $Process)
@@ -106,11 +163,23 @@ function Stop-SmokeLeftovers {
     foreach ($item in @($Processes)) {
         if ([int]$item.ProcessId -gt 0 -and [int]$item.ProcessId -ne $PID) { [void]$pending.Add($item) }
     }
-    if ($Process -and -not $Process.HasExited -and [int]$Process.Id -ne $PID) {
-        if (-not @($pending | Where-Object { [int]$_.ProcessId -eq [int]$Process.Id })) {
-            [void]$pending.Add([pscustomobject]@{ Name = $Executable; ProcessId = [int]$Process.Id; ParentProcessId = 0; CommandLine = '' })
+    $smokeProcessId = if ($Process) { [int]$Process.Id } else { 0 }
+    $smokeStart = $null
+    foreach ($item in @($pending)) {
+        if ($smokeProcessId -and [int]$item.ProcessId -eq $smokeProcessId -and $item.CreationDate) { $smokeStart = ConvertTo-SmokeInstant $item.CreationDate; break }
+    }
+    if ($Process -and -not $Process.HasExited -and $smokeProcessId -ne $PID) {
+        if (-not @($pending | Where-Object { [int]$_.ProcessId -eq $smokeProcessId })) {
+            try { $liveRoot = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId={0}" -f $smokeProcessId) -ErrorAction Stop) }
+            catch { throw "Win32_Process query failed: $($_.Exception.Message)" }
+            if ($liveRoot) {
+                $copied = Copy-OwnedProcess $liveRoot[0]
+                [void]$pending.Add($copied)
+                if (-not $smokeStart) { $smokeStart = $copied.CreationDate }
+            }
         }
     }
+    if (-not $smokeStart -and $Process) { try { $smokeStart = $Process.StartTime.ToUniversalTime() } catch { } }
     while ($pending.Count -gt 0) {
         $leaves = [System.Collections.Generic.List[object]]::new()
         foreach ($item in @($pending)) {
@@ -122,8 +191,12 @@ function Stop-SmokeLeftovers {
         }
         if ($leaves.Count -eq 0) { foreach ($item in @($pending)) { [void]$leaves.Add($item) } }
         foreach ($item in @($leaves)) {
-            try { Stop-Process -Id ([int]$item.ProcessId) -Force -ErrorAction Stop }
-            catch { Write-Host "Could not terminate pid=$($item.ProcessId): $($_.Exception.Message)" }
+            $skip = Get-SmokeStopSkip -Item $item -SmokeStart $smokeStart -SmokeProcessId $smokeProcessId
+            if ($skip) { Write-Host $skip }
+            else {
+                try { Stop-Process -Id ([int]$item.ProcessId) -Force -ErrorAction Stop }
+                catch { Write-Host "Could not terminate pid=$($item.ProcessId): $($_.Exception.Message)" }
+            }
             for ($index = $pending.Count - 1; $index -ge 0; $index--) {
                 if ([int]$pending[$index].ProcessId -eq [int]$item.ProcessId) { $pending.RemoveAt($index) }
             }
