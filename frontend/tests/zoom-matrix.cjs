@@ -20,8 +20,13 @@ app.disableHardwareAcceleration()
 app.on('window-all-closed', () => {})
 
 const output = path.resolve(__dirname, '../test-output/zoom-matrix')
+const profile = path.join(output, 'profile')
 fs.mkdirSync(output, { recursive: true })
-app.setPath('userData', path.join(output, 'profile'))
+app.setPath('userData', profile)
+function removeProfile() {
+  try { fs.rmSync(profile, { recursive: true, force: true }) }
+  catch { /* The wrapper removes the profile again after this process exits. */ }
+}
 
 const results = []
 const failures = []
@@ -29,6 +34,7 @@ const errors = []
 let product = 'player'
 const timeout = setTimeout(() => {
   console.error('zoom-matrix TIMEOUT')
+  removeProfile()
   app.exit(1)
 }, 150000)
 
@@ -273,10 +279,12 @@ async function main() {
 main().then(() => {
   clearTimeout(timeout)
   server.close()
+  removeProfile()
   app.exit(process.exitCode || 0)
 }).catch(error => {
   console.error(error)
   clearTimeout(timeout)
   server.close()
+  removeProfile()
   app.exit(1)
 })
