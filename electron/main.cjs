@@ -1,5 +1,5 @@
 'use strict'
-const { app, BrowserWindow, dialog, ipcMain, session, screen } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, session, screen, Notification } = require('electron')
 const { spawn } = require('node:child_process')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
@@ -25,6 +25,8 @@ app.setPath('userData', dataDir)
 const token = crypto.randomBytes(48).toString('base64url')
 let child, window, origin, broker, isolatedSession, cookieWrite
 let closing = false, allowClose = false, playbackReady = false
+let deviceWriteFinishing = false, drainNotice = null
+const drainNoticeBody = `${name} is finishing a save to your Walkman and will close by itself.`
 const playbackReadyWaitMs = 3000
 const smokeReadyWaitMs = 20000
 let backendLost = false, expectedBackendExit = false, rendererGone = false
@@ -135,6 +137,29 @@ async function healthy() {
   }
   throw new Error('Authenticated backend health check timed out')
 }
+function clearDrainNotice() {
+  const notice = drainNotice
+  drainNotice = null
+  if (!notice) return
+  try { notice.close() } catch (error) { log(`Drain notice close: ${error.message}`) }
+}
+function showDrainNotice() {
+  // No tray exists. A toast is the notice while the window is already gone.
+  // Smoke never has an operator waiting on this process.
+  if (smoke || !deviceWriteFinishing) return
+  clearDrainNotice()
+  try {
+    if (typeof Notification !== 'function') return
+    if (typeof Notification.isSupported === 'function' && !Notification.isSupported()) return
+    const notice = new Notification({ title: name, body: drainNoticeBody })
+    drainNotice = notice
+    notice.show()
+  } catch (error) { log(`Drain notice: ${error.message}`) }
+}
+function endDrainNotice() {
+  deviceWriteFinishing = false
+  clearDrainNotice()
+}
 function terminateIdleBackend() {
   expectedBackendExit = true
   backendLifetime.abort(new Error('Backend has shut down'))
@@ -191,8 +216,13 @@ async function exitUnresponsiveRenderer(error) {
   try {
     await drainUntilIdle({ stopPlayback: async () => {
       await request('POST', '/api/internal/playback/release')
-    }, request, onWaiting: () => {} })
+    }, request, onWaiting: () => {
+      if (deviceWriteFinishing) return
+      deviceWriteFinishing = true
+      showDrainNotice()
+    } })
   } catch (drainError) {
+    endDrainNotice()
     if (backendLost) return
     log(`Close deferred: ${drainError.message}`)
     closing = false
@@ -203,6 +233,7 @@ async function exitUnresponsiveRenderer(error) {
     if (result.response === 0) void closeSafely()
     return
   }
+  endDrainNotice()
   try { await revokeSession() } catch (revokeError) { log(`Session revoke during forced close: ${revokeError.message}`) }
   if (backendLost) return
   allowClose = true
@@ -335,7 +366,12 @@ async function runSmoke() {
 
 if (!app.requestSingleInstanceLock()) app.quit()
 else {
-  app.on('second-instance', () => { if (window && !window.isDestroyed()) { if (window.isMinimized()) window.restore(); window.focus() } })
+  app.on('second-instance', () => {
+    if (window && !window.isDestroyed()) { if (window.isMinimized()) window.restore(); window.focus(); return }
+    // The window is already gone while a device write finishes. Re-show the
+    // notice. Do not open a window or start another backend.
+    if (deviceWriteFinishing) showDrainNotice()
+  })
   app.on('before-quit', event => { if (!allowClose && window) { event.preventDefault(); void closeSafely() } })
   // Unexpected loss must finish capability revocation and show its recovery dialog.
   app.on('window-all-closed', () => { if (allowClose && !backendLost) app.quit() })
