@@ -51,27 +51,27 @@ export const PLAYLIST_RECOVERY_HELP = {
     actionId: 'inspect_recover',
   },
   DEVICE_FILE_READ_ONLY: {
-    title: 'A song file on the Walkman is read-only',
-    explanation: 'A song file on the Walkman is marked read-only, so Walkman Bridge stopped before changing anything.',
-    action: 'Clear the read-only setting on that file (in Windows: right-click it, choose Properties, untick Read-only), then try again.',
+    title: 'The Walkman file or storage is read-only',
+    explanation: 'The file, or the Walkman\'s storage, is read-only or write-protected, so Walkman Bridge stopped before changing anything.',
+    action: 'Clear the file\'s Read-only setting (right-click it, choose Properties, untick Read-only), or turn off write protection on the device or card, then try again.',
     actionId: 'clear_read_only_retry',
   },
   DEVICE_PROBE_RESTORE_FAILED: {
-    title: 'A safety check could not restore a song file',
-    explanation: 'A song file was renamed during a safety check and couldn\'t be renamed back.',
+    title: 'A safety check could not restore a file',
+    explanation: 'A file on the Walkman was renamed during a safety check and couldn\'t be renamed back.',
     action: 'Don\'t rename or delete files by hand. Keep the Walkman connected, close any program that might be using it, then run Inspect and Recover, which put it back.',
     actionId: 'inspect_recover',
   },
   DEVICE_PROBE_CONFLICT: {
-    title: 'Two copies of a song file differ',
-    explanation: 'There are two different copies of the same song file, so Walkman Bridge won\'t change anything.',
-    action: 'Don\'t delete either file. Keep your backup and ask for help. Neither Recover nor the next save can resolve this.',
+    title: 'Two copies of a file differ',
+    explanation: 'The renamed copy holds the original file. The file at the normal location appeared afterward from something else, so Walkman Bridge won\'t change anything. Until this is resolved, saving changes and Recover won\'t run, but browsing still works.',
+    action: 'Don\'t delete either file. Compare both with your backup and keep the one that matches. If your backup doesn\'t have this file, or neither copy matches, keep both and ask for help.',
     actionId: 'manual_help',
   },
   DEVICE_PROBE_PENDING: {
     title: 'A safety check left a renamed copy',
-    explanation: 'Nothing is broken. An earlier safety check left a renamed copy of a song file. What happens next depends on the files.',
-    action: 'On the next save or Recover, Walkman Bridge tidies it up automatically. If the original song file is missing, the copy is renamed back. If the original is there and identical, the extra copy is removed. Only if the two copies differ will that save stop with a conflict.',
+    explanation: 'Nothing is broken. An earlier safety check left a renamed copy of a file on the Walkman. What happens next depends on the files.',
+    action: 'On the next save or Recover, Walkman Bridge tidies it up automatically. If the original file is missing, the copy is renamed back. If the original is there and identical, the extra copy is removed. Only if the two copies differ will that save stop with a conflict.',
     actionId: 'inspect_recover',
   },
   GENERIC: {
@@ -89,8 +89,8 @@ const RECOVER_COPY = {
     actionId: 'inspect_recover',
   },
   DEVICE_FILE_READ_ONLY: {
-    explanation: 'A song file on the Walkman is marked read-only. The save was already committed and only needs finishing.',
-    action: 'Clear the read-only setting on that file (in Windows: right-click it, choose Properties, untick Read-only), then run Recover again.',
+    explanation: 'The file, or the Walkman\'s storage, is read-only or write-protected. The save was already committed and only needs finishing.',
+    action: 'Clear the file\'s Read-only setting (right-click it, choose Properties, untick Read-only), or turn off write protection on the device or card, then run Recover again.',
     actionId: 'inspect_recover',
   },
 }

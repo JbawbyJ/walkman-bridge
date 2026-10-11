@@ -157,16 +157,16 @@ When passthrough and UI land, show the HeadlessCli `code` and message in the Man
 - [ ] `DEVICE_ROLLBACK_FAILED` is visible with the message. The UI says the save failed and could not be fully undone, and to stop making changes, keep the Walkman connected, and run Inspect first. The unfinished record remains, so inspect and recover still apply.
   - **Result:** pass / fail
   - **Notes:**
-- [ ] `DEVICE_FILE_READ_ONLY` is visible with the message. For a normal change the UI says a song file on the Walkman is marked read-only, Walkman Bridge stopped before changing anything, and to clear Read-only in the file's Properties, then try again. If this happened while recovering, the UI says the save was already committed and only needs finishing, and to clear Read-only and run Recover again. A file location from the device is plain text when present and is omitted when absent.
+- [ ] `DEVICE_FILE_READ_ONLY` is visible with the message. For a normal change the UI says the file, or the Walkman's storage, is read-only or write-protected, Walkman Bridge stopped before changing anything, and to clear Read-only or turn off write protection, then try again. If this happened while recovering, the UI says the save was already committed and only needs finishing, and to clear that and run Recover again. A file location from the device is plain text when present and is omitted when absent.
   - **Result:** pass / fail
   - **Notes:**
-- [ ] `DEVICE_PROBE_RESTORE_FAILED` is visible with the message. The UI says a song file was renamed during a safety check and could not be renamed back, and not to rename or delete files by hand. It says to keep the Walkman connected, close other programs, then run Inspect and Recover. File and renamed-copy locations are plain text when present and omitted when absent.
+- [ ] `DEVICE_PROBE_RESTORE_FAILED` is visible with the message. The UI says a file on the Walkman was renamed during a safety check and could not be renamed back, and not to rename or delete files by hand. It says to keep the Walkman connected, close other programs, then run Inspect and Recover. File and renamed-copy locations are plain text when present and omitted when absent.
   - **Result:** pass / fail
   - **Notes:**
-- [ ] `DEVICE_PROBE_CONFLICT` is visible with the message. The UI says there are two different copies of the same song file, Walkman Bridge will not change anything, and not to delete either file. It says neither Recover nor the next save can resolve it, and to keep the backup and ask for help. There is no button for this.
+- [ ] `DEVICE_PROBE_CONFLICT` is visible with the message. The UI says the renamed copy holds the original file and the normal path appeared afterward. It says not to delete either file, to compare both with the backup, and if the backup does not have this file or neither copy matches, to keep both and ask for help. Saving and Recover stay blocked; browsing still works. There is no button for this.
   - **Result:** pass / fail
   - **Notes:**
-- [ ] `DEVICE_PROBE_PENDING` is visible as a warning, not an error. The UI says nothing is broken. It says the next save or Recover tidies the renamed copy automatically: the copy is renamed back if the original is missing, the extra copy is removed if the original is identical, and the save stops with `DEVICE_PROBE_CONFLICT` only if the copies differ.
+- [ ] `DEVICE_PROBE_PENDING` is visible as a warning, not an error. The UI says nothing is broken and that a safety check left a renamed copy of a file on the Walkman. It says the next save or Recover tidies it automatically: the copy is renamed back if the original file is missing, the extra copy is removed if the original is identical, and the save stops with `DEVICE_PROBE_CONFLICT` only if the copies differ.
   - **Result:** pass / fail
   - **Notes:**
 - [ ] A fatal with no `code` is a generic failure: message only, with none of the recovery instructions for the codes above attached.

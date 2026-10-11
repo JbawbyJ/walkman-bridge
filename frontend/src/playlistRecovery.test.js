@@ -38,6 +38,9 @@ test('playlist recovery help defines the fatal codes and GENERIC', () => {
   assert.equal(PLAYLIST_RECOVERY_HELP.DEVICE_FILE_READ_ONLY.explanation.includes('{path}'), false)
   assert.equal(PLAYLIST_RECOVERY_HELP.DEVICE_PROBE_RESTORE_FAILED.actionId, 'inspect_recover')
   assert.equal(PLAYLIST_RECOVERY_HELP.DEVICE_PROBE_CONFLICT.actionId, 'manual_help')
+  assert.match(PLAYLIST_RECOVERY_HELP.DEVICE_PROBE_CONFLICT.action, /If your backup doesn't have this file, or neither copy matches, keep both and ask for help/)
+  assert.equal(PLAYLIST_RECOVERY_HELP.DEVICE_PROBE_CONFLICT.action.includes('track'), false)
+  assert.match(PLAYLIST_RECOVERY_HELP.DEVICE_FILE_READ_ONLY.explanation, /write-protected/)
   assert.equal(PLAYLIST_RECOVERY_HELP.DEVICE_PROBE_PENDING.actionId, 'inspect_recover')
   assert.match(PLAYLIST_RECOVERY_HELP.DEVICE_PROBE_PENDING.explanation, /Nothing is broken/)
   assert.equal(PLAYLIST_RECOVERY_HELP.DEVICE_PROBE_PENDING.action.includes('puts it back'), false)
@@ -115,7 +118,7 @@ test('formatPlaylistRecovery shows probe locations as plain text and still honor
 
   const pathOnly = formatPlaylistRecovery('DEVICE_PROBE_CONFLICT', { path: file })
   assert.equal(pathOnly.explanation.endsWith(` (file: ${file})`), true)
-  assert.equal(pathOnly.explanation.includes('renamed copy'), false)
+  assert.equal(pathOnly.explanation.includes('renamed copy:'), false)
 
   const probeOnly = formatPlaylistRecovery('DEVICE_PROBE_PENDING', { probePath: '<b>x</b>' })
   assert.equal(probeOnly.explanation, `${PLAYLIST_RECOVERY_HELP.DEVICE_PROBE_PENDING.explanation} (renamed copy: <b>x</b>)`)
