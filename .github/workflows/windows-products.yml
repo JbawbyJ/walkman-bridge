@@ -278,6 +278,8 @@ jobs:
   # Same Electron matrix as `npm run test:zoom-matrix` on Linux. The hosted
   # Windows desktop is 1024x768, which clamps the 1140/1380/1920 cells, so the
   # job raises it to a supported 1920x1080 mode before Electron starts.
+  # timeout-minutes stays above the wrapper in frontend/tests/zoom-matrix-budget.cjs
+  # (harness limit + 60s). Order: harness < wrapper < this job.
   zoom-matrix:
     runs-on: windows-2022
     timeout-minutes: 20
@@ -317,4 +319,6 @@ jobs:
           name: windows-zoom-matrix
           if-no-files-found: warn
           retention-days: 14
-          path: frontend/test-output/zoom-matrix
+          path: |
+            frontend/test-output/zoom-matrix/report.json
+            !frontend/test-output/zoom-matrix/profile/**
