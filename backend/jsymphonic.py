@@ -69,7 +69,9 @@ class FatalCode(enum.StrEnum):
     PLAYLIST_LIBRARY_NOT_LOADED: playlist repair refused because the mount
     is empty or the library is not loaded. Nothing was written.
     DEVICE_FILE_LOCKED: a device file is locked. The device is still on its
-    previous snapshot. The fatal event may carry a top-level `path`.
+    previous snapshot and no journal is left. The fatal event carries a
+    top-level `path`, an opaque string relative to the mount. It is copied
+    unchanged and is never joined or reformatted.
     DEVICE_ROLLBACK_FAILED: rollback did not restore a known snapshot, so
     the device state is uncertain.
 
@@ -493,9 +495,9 @@ def _enum_field(event, key: str, allowed: frozenset[str]):
 def _journal_covers(event):
     """`covers.files` from playlistJournal.files, or None.
 
-    The field is a list of strings relative to the device. A missing field
-    or any non-list / non-string value is null. playlistIds and trackIds
-    are not coverage.
+    Each string is opaque and relative to the OMGAUDIO folder (jsymphonic #4
+    @ 857b91e). The list is copied as-is. A missing field or any non-list /
+    non-string value is null. playlistIds and trackIds are not coverage.
     """
     if not event or "files" not in event:
         return None

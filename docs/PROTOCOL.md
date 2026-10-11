@@ -87,20 +87,27 @@ The same partial-failure rule as `add` applies: a failed deletion surfaces as
 - `PLAYLIST_JOURNAL_PENDING` — a leftover `.jsymphonic-playlist-transaction` journal blocks reads and writes
 - `PLAYLIST_SLOTS_EXHAUSTED` — all 2048 lifetime playlist slots are used
 - `PLAYLIST_LIBRARY_NOT_LOADED` — playlist repair refused because the library is not loaded. Nothing was written
-- `DEVICE_FILE_LOCKED` — a device file is locked. The previous snapshot is still in place
-- `DEVICE_ROLLBACK_FAILED` — rollback failed. The device state is uncertain
+- `DEVICE_FILE_LOCKED` — a device file is locked. Nothing was written, and no journal is left
+- `DEVICE_ROLLBACK_FAILED` — rollback failed and the journal is kept. The device state is uncertain
 
 Any other fatal omits `code`. A missing code is generic. The backend never
 derives a code by parsing `message`. An unrecognized string, or a non-string
 `code`, is dropped to generic and does not raise. Those six names are
 `FatalCode` in `backend/jsymphonic.py`.
 
-`DEVICE_FILE_LOCKED` may also carry a top-level `path` on the `fatal` event.
-When `path` is a string, HTTP errors copy it to `detail.fatal_path` and device
-job files copy it to `files[].fatal_path`. A missing or non-string `path` omits
-that field. Nested objects and message text are not a path. The exact string
-format (separators, relative versus absolute) is pending confirmation from
-Builder B. The backend copies the string unchanged.
+`DEVICE_FILE_LOCKED` and `DEVICE_ROLLBACK_FAILED` are the lines from jsymphonic #4 @ `857b91e`:
+
+```json
+{"event":"fatal","message":"Device file is locked","code":"DEVICE_FILE_LOCKED","path":"OMGAUDIO/10F00/10000001.OMA"}
+```
+
+```json
+{"event":"fatal","message":"Database update failed; incomplete recovery requires a verified backup","code":"DEVICE_ROLLBACK_FAILED"}
+```
+
+`path` is present only on `DEVICE_FILE_LOCKED`. It is relative to the mount root and uses forward slashes. Other fatals omit the key. When `path` is a string, HTTP errors copy it to `detail.fatal_path` and device job files copy it to `files[].fatal_path`. A missing or non-string `path` omits that field. Nested objects and message text are not a path.
+
+`fatal_path` is opaque. The backend copies the string unchanged and must never join it onto the mount or reformat separators. Callers render it as plain text only, never as `innerHTML` or markdown.
 
 Followed by exit code 1. Unknown/missing/malformed args (including non-numeric
 `--generation`/`--idle-timeout` values) → usage on stderr, exit 2.
@@ -140,15 +147,13 @@ Recover `outcome` on that same `playlistJournal` event:
 - `none` — no journal
 
 ```json
-{"event":"playlistJournal","state":"committed","outcome":"rolled_forward","files":["OMGAUDIO/10F00/1000.mp3"]}
+{"event":"playlistJournal","state":"committed","outcome":"rolled_forward","files":["01TREE22.DAT","10F00/10000001.OMA","tree","info"]}
 {"event":"done"}
 ```
 
-`covers` comes from `playlistJournal.files`. When `files` is a list of strings,
-the HTTP body is `covers.files`, those strings copied unchanged. They are paths
-relative to the device. If `files` is missing, or any value is not a string,
-`covers` is null. `playlistIds` and `trackIds` are not coverage. The exact path
-format is pending confirmation from Builder B.
+`covers` comes from `playlistJournal.files` (jsymphonic #4 @ `857b91e`). When `files` is a list of strings, the HTTP body is `covers.files`, those strings copied unchanged. Entries are relative to the OMGAUDIO folder, not the mount. Table entries are bare names (`01TREE22.DAT`). Audio entries are forward-slash paths (`10F00/10000001.OMA`). Older journals may show `tree` or `info`. If `files` is missing, or any value is not a string, `covers` is null. `playlistIds` and `trackIds` are not coverage.
+
+Each `covers.files` entry is opaque. The backend copies it unchanged and must never join it onto `OMGAUDIO` or reformat separators. Callers render each entry as plain text only, never as `innerHTML` or markdown.
 
 Repair success emits the summary first, then one playlist row per playlist, then `done`:
 
@@ -182,9 +187,7 @@ may precede it) and the HTTP result uses the same `detail.code` and
 {"event":"fatal","message":"Playlist repair refused: the library is not loaded","code":"PLAYLIST_LIBRARY_NOT_LOADED"}
 ```
 
-`DEVICE_FILE_LOCKED` also leaves the previous snapshot in place, so
-`needs_reconcile` stays false on every device write, the same as a pre-write
-refusal. `DEVICE_ROLLBACK_FAILED` keeps `needs_reconcile` true.
+`DEVICE_FILE_LOCKED` writes nothing and leaves no journal, so `needs_reconcile` stays false on every device write, the same as a pre-write refusal. `DEVICE_ROLLBACK_FAILED` keeps the journal, so `needs_reconcile` stays true.
 
 Timeouts: inspect 120 s, recover and repair 600 s. On timeout the shim is
 killed. A recover or repair timeout sets `needs_reconcile`. An inspect timeout
@@ -199,7 +202,7 @@ HTTP:
 | `repair` | `PLAYLIST_REF_MISSING` | `POST /api/device/playlist-recovery/repair` |
 | `free_slots` | `PLAYLIST_SLOTS_EXHAUSTED` | existing `DELETE /api/device/playlists/{id}` (`playlist-delete`). No new endpoint. |
 | `reconnect_retry` | `PLAYLIST_LIBRARY_NOT_LOADED` | no endpoint. The owner reconnects the Walkman, then `repairPlaylists` runs again. |
-| `close_and_retry` | `DEVICE_FILE_LOCKED` | no endpoint. The UI shows `fatal_path` and the owner retries the original action. |
+| `close_and_retry` | `DEVICE_FILE_LOCKED` | no endpoint. The UI shows `fatal_path` as plain text and the owner retries the original action. |
 | `GENERIC` | null | no recovery action |
 
 `frontend/src/api.js` exports the same map as `RECOVERY_ACTIONS` and the helpers `inspectPlaylistJournal`, `recoverPlaylistJournal`, and `repairPlaylists`. `free_slots` uses the existing `deleteDevicePlaylist`. `reconnect_retry` and `close_and_retry` add no route.
@@ -207,7 +210,7 @@ HTTP:
 Inspect success:
 
 ```json
-{"exists":true,"state":"committed","covers":{"files":["OMGAUDIO/10F00/1000.mp3"]}}
+{"exists":true,"state":"committed","covers":{"files":["01TREE22.DAT","10F00/10000001.OMA","tree","info"]}}
 ```
 
 `exists` is false when `state` is `none`, and null when `state` is null. Inspect errors match other playlist reads: `{message, fatal_code}` when the fatal `code` is known, plus `fatal_path` when that value is a string. Otherwise the detail is a string.
@@ -236,7 +239,8 @@ Recover and repair failures use the write error shape: `detail.code` (`verify_de
   A recognized fatal `code` is stored on that exception. Frontend HTTP errors
   keep their application `detail.code` (`playlist_failed`, `verify_device_state`,
   `library_not_loaded`, `delete_failed`) and add `fatal_code` (`null` when generic).
-  A string fatal `path` is copied to `fatal_path`. Playlist and
+  A string fatal `path` is copied to `fatal_path` unchanged. `fatal_path` and
+  `covers.files` are opaque and are never joined or reformatted. Playlist and
   track reads that carry a known code return `{message, fatal_code}` instead of
   a string detail. Failed device job files include `fatal_code` the same way.
   `frontend/src/api.js` copies `detail.fatal_code` and a string `detail.fatal_path`

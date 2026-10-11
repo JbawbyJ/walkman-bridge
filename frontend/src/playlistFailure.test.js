@@ -123,11 +123,11 @@ test('api errors expose fatal_code from detail and leave it null when the payloa
       code: 'playlist_failed',
       message: 'device file is locked',
       fatal_code: 'DEVICE_FILE_LOCKED',
-      fatal_path: 'OMGAUDIO/10F00/1000.mp3',
+      fatal_path: 'OMGAUDIO/10F00/10000001.OMA',
     })
     await assert.rejects(api.device(), error => {
       assert.equal(error.fatal_code, 'DEVICE_FILE_LOCKED')
-      assert.equal(error.fatal_path, 'OMGAUDIO/10F00/1000.mp3')
+      assert.equal(error.fatal_path, 'OMGAUDIO/10F00/10000001.OMA')
       return true
     })
     respond({ code: 'playlist_failed', message: 'locked', fatal_code: 'DEVICE_FILE_LOCKED', fatal_path: 3 })

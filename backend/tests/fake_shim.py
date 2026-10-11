@@ -17,6 +17,16 @@ def emit(obj: dict) -> None:
     print(json.dumps(obj), flush=True)
 
 
+def emit_line(line: str) -> None:
+    """Print one confirmed HeadlessCli line with its bytes unchanged."""
+    print(line, flush=True)
+
+
+# jsymphonic #4 @ 857b91e. Compact JSON, key order included. Do not reformat.
+LOCKED_FATAL_LINE = '{"event":"fatal","message":"Device file is locked","code":"DEVICE_FILE_LOCKED","path":"OMGAUDIO/10F00/10000001.OMA"}'
+ROLLBACK_FATAL_LINE = '{"event":"fatal","message":"Database update failed; incomplete recovery requires a verified backup","code":"DEVICE_ROLLBACK_FAILED"}'
+
+
 def main() -> int:
     scenario = sys.argv[1]
     args = sys.argv[2:]
@@ -133,7 +143,7 @@ def main() -> int:
     if scenario == "playlist_inspect_committed":
         # files on playlistJournal are coverage. Ids and the done line are not.
         emit({"event": "playlistJournal", "state": "committed",
-              "files": ["OMGAUDIO/10F00/1000.mp3", "OMGAUDIO/10F00/1001.mp3"],
+              "files": ["01TREE22.DAT", "10F00/10000001.OMA", "tree", "info"],
               "playlistIds": ["4"], "trackIds": ["11", "1"], "message": "uncommitted discarded"})
         emit({"event": "done", "state": "uncommitted", "outcome": "discarded",
               "files": ["ignored.mp3"]})
@@ -217,14 +227,11 @@ def main() -> int:
         return 1
 
     if scenario == "playlist_file_locked":
-        emit({"event": "fatal", "message": "device file is locked path elsewhere",
-              "code": "DEVICE_FILE_LOCKED", "path": "OMGAUDIO/10F00/1000.mp3",
-              "details": {"path": "nested.mp3"}})
+        emit_line(LOCKED_FATAL_LINE)
         return 1
 
     if scenario == "playlist_rollback_failed":
-        emit({"event": "fatal", "message": "rollback failed", "code": "DEVICE_ROLLBACK_FAILED",
-              "path": {"file": "OMGAUDIO/10F00/1000.mp3"}})
+        emit_line(ROLLBACK_FATAL_LINE)
         return 1
 
     if scenario == "playlist_fatal_nested_code":

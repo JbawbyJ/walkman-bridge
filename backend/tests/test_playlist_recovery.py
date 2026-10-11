@@ -6,6 +6,7 @@ Repair summary ids are JSON numbers and come back as strings. A final `done`
 event is required.
 """
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -67,7 +68,7 @@ def test_inspect_covers_come_from_journal_files(context, monkeypatch):
     use_fake(monkeypatch, context, 'playlist_inspect_committed')
     body = context.client.get(INSPECT).json()
     assert body['state'] == 'committed'
-    assert body['covers'] == {'files': ['OMGAUDIO/10F00/1000.mp3', 'OMGAUDIO/10F00/1001.mp3']}
+    assert body['covers'] == {'files': ['01TREE22.DAT', '10F00/10000001.OMA', 'tree', 'info']}
     assert 'playlist_ids' not in body['covers']
     assert 'track_ids' not in body['covers']
 
@@ -88,12 +89,12 @@ def test_inspect_none_passes_an_empty_file_list(context, monkeypatch):
 def test_step_state_does_not_hide_a_journal_state(monkeypatch):
     scripted(monkeypatch, [
         {'event': 'step', 'state': 'finished', 'message': 'uncommitted'},
-        {'event': 'playlistJournal', 'state': 'committed', 'files': ['OMGAUDIO/10F00/1000.mp3']},
+        {'event': 'playlistJournal', 'state': 'committed', 'files': ['01TREE22.DAT', '10F00/10000001.OMA']},
         {'event': 'done', 'state': 'uncommitted', 'outcome': 'discarded', 'files': ['ignored.mp3']},
     ])
     body = jsymphonic.inspect_playlist_journal('fixture')
     assert body['state'] == 'committed'
-    assert body['covers'] == {'files': ['OMGAUDIO/10F00/1000.mp3']}
+    assert body['covers'] == {'files': ['01TREE22.DAT', '10F00/10000001.OMA']}
 
 
 @pytest.mark.parametrize('scenario, outcome', [
@@ -297,20 +298,36 @@ def test_commands_use_device_flag_and_inspect_is_the_read_switch(monkeypatch, tm
     assert json.loads(record.read_text()) == ['playlist-repair', '--device', str(mount)]
 
 
+LOCKED_FATAL_LINE = '{"event":"fatal","message":"Device file is locked","code":"DEVICE_FILE_LOCKED","path":"OMGAUDIO/10F00/10000001.OMA"}'
+ROLLBACK_FATAL_LINE = '{"event":"fatal","message":"Database update failed; incomplete recovery requires a verified backup","code":"DEVICE_ROLLBACK_FAILED"}'
+
+
+def test_confirmed_fatal_lines_are_emitted_whole():
+    for scenario, line in (
+        ('playlist_file_locked', LOCKED_FATAL_LINE),
+        ('playlist_rollback_failed', ROLLBACK_FATAL_LINE),
+    ):
+        result = subprocess.run([sys.executable, str(FAKE_SHIM), scenario], capture_output=True, text=True, check=False)
+        assert result.returncode == 1
+        assert result.stdout == line + '\n'
+        assert result.stderr == ''
+
+
 def test_locked_file_passes_path_and_does_not_reconcile(context, monkeypatch):
     use_fake(monkeypatch, context, 'playlist_file_locked')
     response = context.client.post(RECOVER)
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
-    assert detail['fatal_code'] == 'DEVICE_FILE_LOCKED'
-    assert detail['fatal_path'] == 'OMGAUDIO/10F00/1000.mp3'
+    event = json.loads(LOCKED_FATAL_LINE)
+    assert detail['fatal_code'] == event['code']
+    assert detail['message'] == event['message']
+    assert detail['fatal_path'] == event['path']
     assert detail['code'] == 'playlist_failed'
-    assert detail['fatal_path'] != 'nested.mp3'
     job = context.client.get('/api/jobs/' + detail['job_id']).json()
     assert job['needs_reconcile'] is False
     assert job['files'][0]['state'] == 'failed'
-    assert job['files'][0]['fatal_code'] == 'DEVICE_FILE_LOCKED'
-    assert job['files'][0]['fatal_path'] == 'OMGAUDIO/10F00/1000.mp3'
+    assert job['files'][0]['fatal_code'] == event['code']
+    assert job['files'][0]['fatal_path'] == event['path']
 
 
 def test_locked_file_without_a_string_path_omits_fatal_path(context, monkeypatch):
@@ -335,10 +352,13 @@ def test_rollback_failure_needs_reconcile(context, monkeypatch):
     response = context.client.post(REPAIR)
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
-    assert detail['fatal_code'] == 'DEVICE_ROLLBACK_FAILED'
+    event = json.loads(ROLLBACK_FATAL_LINE)
+    assert detail['fatal_code'] == event['code']
     assert detail['code'] == 'verify_device_state'
+    assert 'path' not in event
     assert 'fatal_path' not in detail
     job = context.client.get('/api/jobs/' + detail['job_id']).json()
+    assert job['files'][0]['detail'] == event['message']
     assert job['needs_reconcile'] is True
     assert job['files'][0]['state'] == 'unknown'
     assert job['files'][0]['fatal_code'] == 'DEVICE_ROLLBACK_FAILED'
@@ -349,10 +369,11 @@ def test_inspect_locked_file_passes_the_path(context, monkeypatch):
     use_fake(monkeypatch, context, 'playlist_file_locked')
     response = context.client.get(INSPECT)
     assert response.status_code == 409, response.text
+    event = json.loads(LOCKED_FATAL_LINE)
     assert response.json()['detail'] == {
-        'message': 'device file is locked path elsewhere',
-        'fatal_code': 'DEVICE_FILE_LOCKED',
-        'fatal_path': 'OMGAUDIO/10F00/1000.mp3',
+        'message': event['message'],
+        'fatal_code': event['code'],
+        'fatal_path': event['path'],
     }
     assert context.app.state.jobs.latest() is None
 
