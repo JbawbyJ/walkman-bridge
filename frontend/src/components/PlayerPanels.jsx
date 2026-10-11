@@ -3,7 +3,8 @@ import lotus from '../assets/lotus.png'
 import { BAND_FREQUENCIES, PRESETS } from '../dsp.js'
 import { playable, timeLabel } from '../playback.js'
 import { fmtBytes } from '../format.js'
-import { artworkUrl, supplementalMetadata } from '../mediaImport.js'
+import { supplementalMetadata } from '../mediaImport.js'
+import { CoverArt } from './CoverArt.jsx'
 
 export function spokenTime(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return 'unknown time'
@@ -129,12 +130,7 @@ export function Volume({ player, rotary = false }) {
 }
 
 export function Artwork({ item }) {
-  const source = artworkUrl(item)
-  const [failed, setFailed] = useState(null)
-  const showCover = source && source !== failed
-  return <div className={`record-art ${showCover ? 'has-cover' : ''}`}>
-    {showCover ? <img key={source} src={source} alt={`Cover for ${item.album || item.title || item.name}`} onError={() => setFailed(source)} /> : <><img src={lotus} alt="" /><span>RED LOTUS</span></>}
-  </div>
+  return <CoverArt item={item} variant="deck" />
 }
 
 export function NowPlaying({ player, available, retro = false, mode, onMode }) {
@@ -173,7 +169,7 @@ export function Queue({ items, player, onImport, onImportLink, onRemove, onMove,
   return <section className="panel queue-panel" aria-label="Playback queue" aria-busy={loading || undefined}>
     <SectionHeading aside={<span className="micro">{items.length} TRACKS</span>}>Playback queue</SectionHeading>
     <div className="queue-tools"><input type="search" autoComplete="off" aria-label="Search playback queue" placeholder="Find a track…" value={search} onChange={e => setSearch(e.target.value)} /><div className="import-actions"><button type="button" className="button" onClick={onImport} disabled={busy}><Icon name="plus" size={15} /> Add files</button><button type="button" className="button" onClick={onImportLink} disabled={busy}>Import link</button></div></div>
-    <div className="queue-list">{loading ? <div className="empty-state" role="status"><Icon name="disc" size={38} /><strong>Loading your queue</strong><p>Your listening queue will appear here.</p></div> : visible.length ? <ul>{visible.map(item => <li className={`queue-row ${player.id === item.id ? 'selected' : ''}`} key={item.id}><span className="track-number">{String(items.indexOf(item) + 1).padStart(2, '0')}</span><button type="button" className="track-select" aria-current={player.id === item.id ? 'true' : undefined} aria-label={`Play ${titleOf(item)}`} disabled={!playable(item)} onClick={() => player.play(item.id)}><strong>{item.title || item.name}</strong><small>{item.artist || 'Unknown artist'}</small></button><div className="queue-meta">{playable(item) ? <span>{timeLabel(item.duration_seconds)}</span> : <Status state={item.status} />}</div><details className="queue-row-menu"><summary aria-label={`Actions for ${titleOf(item)}`}>⋯</summary><div className="row-actions"><IconButton label={`Move ${titleOf(item)} up`} icon="up" disabled={busy || items.indexOf(item) === 0} onClick={() => onMove(item.id, -1)} /><IconButton label={`Move ${titleOf(item)} down`} icon="down" disabled={busy || items.indexOf(item) === items.length - 1} onClick={() => onMove(item.id, 1)} />{!playable(item) && <button type="button" className="text-button" disabled={busy} onClick={() => onRescan(item.id)}>Rescan</button>}<IconButton label={`Remove ${titleOf(item)} from queue`} icon="close" disabled={busy} onClick={() => onRemove(item.id)} /></div></details></li>)}</ul> : <div className="empty-state" role="status"><Icon name="disc" size={38} /><strong>{search ? 'No matching tracks' : 'Make room for your music.'}</strong><p>{search ? 'Try a different title or artist.' : 'Add audio files or drop them anywhere in this window. Your queue stays here between sessions.'}</p>{!search && <button type="button" className="button" disabled={busy} onClick={onImport}>Choose audio files</button>}</div>}</div>
+    <div className="queue-list">{loading ? <div className="empty-state" role="status"><Icon name="disc" size={38} /><strong>Loading your queue</strong><p>Your listening queue will appear here.</p></div> : visible.length ? <ul>{visible.map(item => <li className={`queue-row ${player.id === item.id ? 'selected' : ''}`} key={item.id}><span className="track-number">{String(items.indexOf(item) + 1).padStart(2, '0')}</span><CoverArt item={item} variant="thumb" /><button type="button" className="track-select" aria-current={player.id === item.id ? 'true' : undefined} aria-label={`Play ${titleOf(item)}`} disabled={!playable(item)} onClick={() => player.play(item.id)}><strong>{item.title || item.name}</strong><small>{item.artist || 'Unknown artist'}</small></button><div className="queue-meta">{playable(item) ? <span>{timeLabel(item.duration_seconds)}</span> : <Status state={item.status} />}</div><details className="queue-row-menu"><summary aria-label={`Actions for ${titleOf(item)}`}>⋯</summary><div className="row-actions"><IconButton label={`Move ${titleOf(item)} up`} icon="up" disabled={busy || items.indexOf(item) === 0} onClick={() => onMove(item.id, -1)} /><IconButton label={`Move ${titleOf(item)} down`} icon="down" disabled={busy || items.indexOf(item) === items.length - 1} onClick={() => onMove(item.id, 1)} />{!playable(item) && <button type="button" className="text-button" disabled={busy} onClick={() => onRescan(item.id)}>Rescan</button>}<IconButton label={`Remove ${titleOf(item)} from queue`} icon="close" disabled={busy} onClick={() => onRemove(item.id)} /></div></details></li>)}</ul> : <div className="empty-state" role="status"><Icon name="disc" size={38} /><strong>{search ? 'No matching tracks' : 'Make room for your music.'}</strong><p>{search ? 'Try a different title or artist.' : 'Add audio files or drop them anywhere in this window. Your queue stays here between sessions.'}</p>{!search && <button type="button" className="button" disabled={busy} onClick={onImport}>Choose audio files</button>}</div>}</div>
     <div className="panel-note"><span>{items.filter(playable).length} cleared for playback</span><span>{fmtBytes(quota?.used_bytes)} / {fmtBytes(quota?.limit_bytes)}</span></div>
   </section>
 }
