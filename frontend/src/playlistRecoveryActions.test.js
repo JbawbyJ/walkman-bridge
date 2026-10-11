@@ -13,6 +13,15 @@ test('recovery action ids map onto inspect, recover, repair, and delete', async 
   assert.deepEqual(RECOVERY_ACTIONS.free_slots, [
     { id: 'deleteDevicePlaylist', method: 'DELETE', path: '/device/playlists/{id}', call: 'deleteDevicePlaylist' },
   ])
+  assert.deepEqual(RECOVERY_ACTIONS.inspect_recover.fatal_codes, [
+    'PLAYLIST_JOURNAL_PENDING',
+    'DEVICE_ROLLBACK_FAILED',
+  ])
+  assert.equal(RECOVERY_ACTIONS.reconnect_retry.fatal_code, 'PLAYLIST_LIBRARY_NOT_LOADED')
+  assert.equal(RECOVERY_ACTIONS.reconnect_retry.steps[1].call, 'repairPlaylists')
+  assert.equal(RECOVERY_ACTIONS.close_and_retry.fatal_code, 'DEVICE_FILE_LOCKED')
+  assert.deepEqual(RECOVERY_ACTIONS.close_and_retry.steps.map(step => step.id), ['close', 'retry'])
+  assert.equal(RECOVERY_ACTIONS.close_and_retry.steps.every(step => step.path === undefined && step.call === undefined), true)
   assert.equal(RECOVERY_ACTIONS.GENERIC, null)
 
   const previous = globalThis.fetch

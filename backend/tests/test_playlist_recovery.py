@@ -1,10 +1,14 @@
 """Playlist recovery endpoints driven by the fake shim (SHIM_CMD_PREFIX).
 
-Present `state` / `outcome` values are passed through. Missing and unknown
-values stay null. Message text is never a substitute.
+Present `state` / `outcome` values are passed through from `playlistJournal`.
+Missing and unknown values stay null. Message text is never a substitute.
+Repair summary ids are JSON numbers and come back as strings. A final `done`
+event is required.
 """
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -24,6 +28,7 @@ CODES = (
     'PLAYLIST_REF_MISSING',
     'PLAYLIST_JOURNAL_PENDING',
     'PLAYLIST_SLOTS_EXHAUSTED',
+    'DEVICE_ROLLBACK_FAILED',
 )
 
 
@@ -58,23 +63,37 @@ def test_inspect_state_comes_only_from_the_state_field(context, monkeypatch, sce
     assert context.app.state.jobs.latest() is None
 
 
-def test_inspect_committed_journal_passes_coverage_ids(context, monkeypatch):
+def test_inspect_covers_come_from_journal_files(context, monkeypatch):
     use_fake(monkeypatch, context, 'playlist_inspect_committed')
     body = context.client.get(INSPECT).json()
-    assert body['covers'] == {'playlist_ids': ['4'], 'track_ids': ['11', '1']}
+    assert body['state'] == 'committed'
+    assert body['covers'] == {'files': ['OMGAUDIO/10F00/1000.mp3', 'OMGAUDIO/10F00/1001.mp3']}
+    assert 'playlist_ids' not in body['covers']
+    assert 'track_ids' not in body['covers']
 
 
-def test_inspect_without_id_fields_has_null_covers(context, monkeypatch):
-    use_fake(monkeypatch, context, 'playlist_inspect_missing')
+@pytest.mark.parametrize('scenario', ['playlist_inspect_missing', 'playlist_inspect_uncommitted', 'playlist_inspect_unknown'])
+def test_inspect_without_a_string_file_list_has_null_covers(context, monkeypatch, scenario):
+    use_fake(monkeypatch, context, scenario)
     assert context.client.get(INSPECT).json()['covers'] is None
+
+
+def test_inspect_none_passes_an_empty_file_list(context, monkeypatch):
+    use_fake(monkeypatch, context, 'playlist_inspect_none')
+    body = context.client.get(INSPECT).json()
+    assert body['state'] == 'none'
+    assert body['covers'] == {'files': []}
 
 
 def test_step_state_does_not_hide_a_journal_state(monkeypatch):
     scripted(monkeypatch, [
         {'event': 'step', 'state': 'finished', 'message': 'uncommitted'},
-        {'event': 'playlistJournal', 'state': 'committed'},
+        {'event': 'playlistJournal', 'state': 'committed', 'files': ['OMGAUDIO/10F00/1000.mp3']},
+        {'event': 'done', 'state': 'uncommitted', 'outcome': 'discarded', 'files': ['ignored.mp3']},
     ])
-    assert jsymphonic.inspect_playlist_journal('fixture')['state'] == 'committed'
+    body = jsymphonic.inspect_playlist_journal('fixture')
+    assert body['state'] == 'committed'
+    assert body['covers'] == {'files': ['OMGAUDIO/10F00/1000.mp3']}
 
 
 @pytest.mark.parametrize('scenario, outcome', [
@@ -104,12 +123,13 @@ def test_repair_zero_pruned_is_visible(context, monkeypatch):
     assert 'empty_mount' not in body
 
 
-def test_repair_pruned_ids_pass_through(context, monkeypatch):
+def test_repair_normalizes_numeric_summary_ids(context, monkeypatch):
     use_fake(monkeypatch, context, 'playlist_repair_some')
     body = context.client.post(REPAIR).json()
     assert body['pruned_count'] == 2
-    assert body['pruned_track_ids'] == ['7', '9']
-    assert body['playlist_ids'] == ['4']
+    assert body['pruned_track_ids'] == ['3']
+    assert body['playlist_ids'] == ['1']
+    assert body['pruned_count'] > len(body['pruned_track_ids'])
 
 
 def test_repair_missing_count_stays_unknown(context, monkeypatch):
@@ -121,19 +141,54 @@ def test_repair_missing_count_stays_unknown(context, monkeypatch):
     assert body['playlist_ids'] is None
 
 
-def test_repair_empty_mount_is_not_silent_success(context, monkeypatch):
+def test_repair_empty_mount_fatal_is_library_not_loaded(context, monkeypatch):
     use_fake(monkeypatch, context, 'playlist_repair_empty_mount')
+    assert context.client.get('/api/tracks').status_code == 200
     response = context.client.post(REPAIR)
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
-    assert detail['empty_mount'] is True
-    assert detail['code'] == 'playlist_failed'
-    assert detail['fatal_code'] is None
-    assert 'empty' in detail['message']
+    assert detail['code'] == 'library_not_loaded'
+    assert detail['fatal_code'] == 'PLAYLIST_LIBRARY_NOT_LOADED'
+    assert 'empty_mount' not in detail
+    assert 'fatal_path' not in detail
+    assert 'Playlist repair refused' in detail['message']
     job = context.client.get('/api/jobs/' + detail['job_id']).json()
     assert job['needs_reconcile'] is False
     assert job['files'][0]['state'] == 'failed'
-    assert job['files'][0]['empty_mount'] is True
+    assert job['files'][0]['fatal_code'] == 'PLAYLIST_LIBRARY_NOT_LOADED'
+    assert 'empty_mount' not in job['files'][0]
+
+
+def test_repair_refuses_an_empty_track_list_before_the_shim(context, monkeypatch):
+    context.tracks.clear()
+    use_fake(monkeypatch, context, 'playlist_repair_some')
+    response = context.client.post(REPAIR)
+    assert response.status_code == 409, response.text
+    detail = response.json()['detail']
+    assert detail['code'] == 'library_not_loaded'
+    assert detail['fatal_code'] == 'PLAYLIST_LIBRARY_NOT_LOADED'
+    assert 'empty_mount' not in detail
+    assert context.calls['list'] == 1
+    job = context.client.get('/api/jobs/' + detail['job_id']).json()
+    assert job['needs_reconcile'] is False
+    assert job['files'][0]['state'] == 'failed'
+    assert job['files'][0]['fatal_code'] == 'PLAYLIST_LIBRARY_NOT_LOADED'
+
+
+def test_repair_reuses_a_cached_empty_track_list(context, monkeypatch):
+    context.tracks.clear()
+    assert context.client.get('/api/tracks').json() == []
+    assert context.calls['list'] == 1
+
+    def explode(mount):
+        raise AssertionError('cached track list should be reused')
+
+    context.api.list_tracks = explode
+    use_fake(monkeypatch, context, 'playlist_repair_some')
+    response = context.client.post(REPAIR)
+    assert response.status_code == 409, response.text
+    assert response.json()['detail']['fatal_code'] == 'PLAYLIST_LIBRARY_NOT_LOADED'
+    assert response.json()['detail']['code'] == 'library_not_loaded'
 
 
 def test_inspect_is_read_only_and_keeps_the_track_cache(context, monkeypatch):
@@ -171,7 +226,7 @@ def test_inspect_fatal_is_not_mutating(monkeypatch):
         jsymphonic.inspect_playlist_journal('fixture')
     assert error.value.needs_reconcile is False
     assert error.value.code == 'PLAYLIST_JOURNAL_PENDING'
-    assert error.value.empty_mount is False
+    assert error.value.path is None
 
 
 @pytest.mark.parametrize('command', ['recover_playlist_journal', 'repair_playlists'])
@@ -242,9 +297,161 @@ def test_commands_use_device_flag_and_inspect_is_the_read_switch(monkeypatch, tm
     assert json.loads(record.read_text()) == ['playlist-repair', '--device', str(mount)]
 
 
+def test_locked_file_passes_path_and_does_not_reconcile(context, monkeypatch):
+    use_fake(monkeypatch, context, 'playlist_file_locked')
+    response = context.client.post(RECOVER)
+    assert response.status_code == 409, response.text
+    detail = response.json()['detail']
+    assert detail['fatal_code'] == 'DEVICE_FILE_LOCKED'
+    assert detail['fatal_path'] == 'OMGAUDIO/10F00/1000.mp3'
+    assert detail['code'] == 'playlist_failed'
+    assert detail['fatal_path'] != 'nested.mp3'
+    job = context.client.get('/api/jobs/' + detail['job_id']).json()
+    assert job['needs_reconcile'] is False
+    assert job['files'][0]['state'] == 'failed'
+    assert job['files'][0]['fatal_code'] == 'DEVICE_FILE_LOCKED'
+    assert job['files'][0]['fatal_path'] == 'OMGAUDIO/10F00/1000.mp3'
+
+
+def test_locked_file_without_a_string_path_omits_fatal_path(context, monkeypatch):
+    bind_script(context, monkeypatch, [{
+        'event': 'fatal',
+        'message': 'locked path OMGAUDIO/10F00/1000.mp3',
+        'code': 'DEVICE_FILE_LOCKED',
+        'path': {'file': 'OMGAUDIO/10F00/1000.mp3'},
+    }], 1)
+    response = context.client.post(REPAIR)
+    assert response.status_code == 409, response.text
+    detail = response.json()['detail']
+    assert detail['fatal_code'] == 'DEVICE_FILE_LOCKED'
+    assert 'fatal_path' not in detail
+    job = context.client.get('/api/jobs/' + detail['job_id']).json()
+    assert job['needs_reconcile'] is False
+    assert 'fatal_path' not in job['files'][0]
+
+
+def test_rollback_failure_needs_reconcile(context, monkeypatch):
+    use_fake(monkeypatch, context, 'playlist_rollback_failed')
+    response = context.client.post(REPAIR)
+    assert response.status_code == 409, response.text
+    detail = response.json()['detail']
+    assert detail['fatal_code'] == 'DEVICE_ROLLBACK_FAILED'
+    assert detail['code'] == 'verify_device_state'
+    assert 'fatal_path' not in detail
+    job = context.client.get('/api/jobs/' + detail['job_id']).json()
+    assert job['needs_reconcile'] is True
+    assert job['files'][0]['state'] == 'unknown'
+    assert job['files'][0]['fatal_code'] == 'DEVICE_ROLLBACK_FAILED'
+    assert 'fatal_path' not in job['files'][0]
+
+
+def test_inspect_locked_file_passes_the_path(context, monkeypatch):
+    use_fake(monkeypatch, context, 'playlist_file_locked')
+    response = context.client.get(INSPECT)
+    assert response.status_code == 409, response.text
+    assert response.json()['detail'] == {
+        'message': 'device file is locked path elsewhere',
+        'fatal_code': 'DEVICE_FILE_LOCKED',
+        'fatal_path': 'OMGAUDIO/10F00/1000.mp3',
+    }
+    assert context.app.state.jobs.latest() is None
+
+
+@pytest.mark.parametrize('call, reconcile', [
+    (jsymphonic.inspect_playlist_journal, False),
+    (jsymphonic.recover_playlist_journal, True),
+    (jsymphonic.repair_playlists, True),
+])
+def test_exit_zero_without_done_is_not_success(monkeypatch, call, reconcile):
+    scripted(monkeypatch, [{'event': 'playlistJournal', 'state': 'committed', 'outcome': 'rolled_forward',
+                            'files': ['OMGAUDIO/10F00/1000.mp3']}])
+    with pytest.raises(JSymphonicError, match='done') as error:
+        call('fixture')
+    assert error.value.needs_reconcile is reconcile
+    assert jsymphonic.wait_for_idle(0)
+
+
+@pytest.mark.parametrize('path', [RECOVER, REPAIR])
+def test_mutation_without_done_needs_reconcile(context, monkeypatch, path):
+    bind_script(context, monkeypatch, [{'event': 'playlistJournal', 'outcome': 'discarded', 'state': 'uncommitted'}])
+    response = context.client.post(path)
+    assert response.status_code == 409, response.text
+    detail = response.json()['detail']
+    assert detail['code'] == 'verify_device_state'
+    job = context.client.get('/api/jobs/' + detail['job_id']).json()
+    assert job['needs_reconcile'] is True
+    assert job['files'][0]['state'] == 'unknown'
+
+
+def test_inspect_without_done_creates_no_job(context, monkeypatch):
+    bind_script(context, monkeypatch, [{'event': 'playlistJournal', 'state': 'committed', 'files': ['a.mp3']}])
+    response = context.client.get(INSPECT)
+    assert response.status_code == 409, response.text
+    assert 'done' in response.json()['detail']
+    assert context.app.state.jobs.latest() is None
+
+
+@pytest.mark.parametrize('call, timeout_name, reconcile', [
+    (jsymphonic.inspect_playlist_journal, 'INFO_TIMEOUT', False),
+    (jsymphonic.recover_playlist_journal, 'DEL_TIMEOUT', True),
+    (jsymphonic.repair_playlists, 'DEL_TIMEOUT', True),
+])
+def test_recovery_timeout_kills_the_shim(monkeypatch, call, timeout_name, reconcile):
+    monkeypatch.setattr(jsymphonic, 'SHIM_CMD_PREFIX', [sys.executable, str(FAKE_SHIM), 'hang'])
+    monkeypatch.setattr(jsymphonic, timeout_name, 0.4)
+    started = time.monotonic()
+    with pytest.raises(JSymphonicError, match='timed out') as error:
+        call('fixture')
+    assert time.monotonic() - started < 8
+    assert error.value.needs_reconcile is reconcile
+    assert jsymphonic.wait_for_idle(0)
+
+
+def test_inspect_holds_the_shim_lock_until_it_finishes(monkeypatch):
+    monkeypatch.setattr(jsymphonic, 'SHIM_CMD_PREFIX', [sys.executable, str(FAKE_SHIM), 'hang'])
+    monkeypatch.setattr(jsymphonic, 'INFO_TIMEOUT', 0.6)
+    held = threading.Event()
+
+    def watch():
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if not jsymphonic.wait_for_idle(0):
+                held.set()
+                return
+            time.sleep(0.02)
+
+    watcher = threading.Thread(target=watch)
+    watcher.start()
+    try:
+        with pytest.raises(JSymphonicError, match='timed out'):
+            jsymphonic.inspect_playlist_journal('fixture')
+    finally:
+        watcher.join(5)
+    assert held.is_set()
+    assert jsymphonic.wait_for_idle(0)
+
+
+def test_recovery_routes_reject_after_drain(context):
+    context.client.post('/api/shutdown/drain')
+    assert context.client.get(INSPECT).status_code == 409
+    assert context.client.post(RECOVER).status_code == 409
+    assert context.client.post(REPAIR).status_code == 409
+    assert context.app.state.jobs.latest() is None
+
+
+def test_rollback_needs_reconcile_even_on_a_read(monkeypatch):
+    scripted(monkeypatch, [{'event': 'fatal', 'message': 'rollback failed', 'code': 'DEVICE_ROLLBACK_FAILED'}], 1)
+    with pytest.raises(JSymphonicError) as error:
+        jsymphonic.inspect_playlist_journal('fixture')
+    assert error.value.needs_reconcile is True
+    assert error.value.code == 'DEVICE_ROLLBACK_FAILED'
+
+
 def test_player_has_no_playlist_recovery_routes(tmp_path):
     app = create_app(product='player', data_dir=tmp_path, token=TOKEN, origin=ORIGIN, scanner=Scanner())
+    assert not any('playlist-recovery' in getattr(route, 'path', '') for route in app.routes)
     with TestClient(app, base_url=ORIGIN, headers={'X-NightOps-Token': TOKEN}) as client:
         assert client.get(INSPECT).status_code == 404
-        assert client.post(RECOVER).status_code == 404
-        assert client.post(REPAIR).status_code == 404
+        # POST is 405 when the packaged frontend mount is present, same as other device writes.
+        assert client.post(RECOVER).status_code in (404, 405)
+        assert client.post(REPAIR).status_code in (404, 405)

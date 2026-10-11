@@ -13,6 +13,7 @@ async function req(path, options = {}, includeHeaders = false) {
     error.status = response.status
     error.code = detail?.code
     error.fatal_code = detail && typeof detail === 'object' ? detail.fatal_code ?? null : null
+    error.fatal_path = detail && typeof detail === 'object' && typeof detail.fatal_path === 'string' ? detail.fatal_path : null
     throw error
   }
   return includeHeaders ? { items: body, etag: response.headers.get('etag') } : body
@@ -62,20 +63,38 @@ export const api = {
 
 // Action ids match frontend/src/help/playlistRecovery.js (Builder C).
 // Paths are relative to `/api`. inspect_recover is inspect, then recover.
+// PLAYLIST_JOURNAL_PENDING and DEVICE_ROLLBACK_FAILED both use that flow.
 // free_slots deletes a Sony playlist through the existing playlist-delete route.
+// reconnect_retry has no endpoint: reconnect the Walkman, then call repairPlaylists again.
+// close_and_retry has no endpoint: show fatal_path, then the owner retries the original action.
 // GENERIC has no recovery action.
-// Inspect `state` and recover `outcome` are the shim's top-level fields.
-// A missing or unknown value is null. free_slots has no new endpoint.
+const inspectRecover = [
+  { id: 'inspect', method: 'GET', path: '/device/playlist-recovery/inspect', call: 'inspectPlaylistJournal' },
+  { id: 'recover', method: 'POST', path: '/device/playlist-recovery/recover', call: 'recoverPlaylistJournal' },
+]
+inspectRecover.fatal_codes = ['PLAYLIST_JOURNAL_PENDING', 'DEVICE_ROLLBACK_FAILED']
+
 export const RECOVERY_ACTIONS = {
-  inspect_recover: [
-    { id: 'inspect', method: 'GET', path: '/device/playlist-recovery/inspect', call: 'inspectPlaylistJournal' },
-    { id: 'recover', method: 'POST', path: '/device/playlist-recovery/recover', call: 'recoverPlaylistJournal' },
-  ],
+  inspect_recover: inspectRecover,
   repair: [
     { id: 'repair', method: 'POST', path: '/device/playlist-recovery/repair', call: 'repairPlaylists' },
   ],
   free_slots: [
     { id: 'deleteDevicePlaylist', method: 'DELETE', path: '/device/playlists/{id}', call: 'deleteDevicePlaylist' },
   ],
+  reconnect_retry: {
+    fatal_code: 'PLAYLIST_LIBRARY_NOT_LOADED',
+    steps: [
+      { id: 'reconnect' },
+      { id: 'repair', method: 'POST', path: '/device/playlist-recovery/repair', call: 'repairPlaylists' },
+    ],
+  },
+  close_and_retry: {
+    fatal_code: 'DEVICE_FILE_LOCKED',
+    steps: [
+      { id: 'close' },
+      { id: 'retry' },
+    ],
+  },
   GENERIC: null,
 }

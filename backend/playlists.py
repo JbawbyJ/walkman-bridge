@@ -57,6 +57,25 @@ def shim_fatal_code(exc):
     return fatal_code_of(exc)
 
 
+def shim_fatal_path(exc):
+    from jsymphonic import fatal_path_of
+    return fatal_path_of(exc)
+
+
+def with_fatal_path(fields, exc):
+    path = shim_fatal_path(exc)
+    if path is None:
+        return fields
+    return {**fields, 'fatal_path': path}
+
+
+def read_fatal_detail(exc):
+    code = shim_fatal_code(exc)
+    if not code:
+        return str(exc)
+    return with_fatal_path({'message': str(exc), 'fatal_code': code}, exc)
+
+
 def expected_etag(request):
     value = request.headers.get('if-match')
     if not value:
@@ -140,9 +159,7 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
             response.headers['ETag'] = device_playlist_etag(volume, tracks, playlists)
             return {'items': playlists}
         except RuntimeError as exc:
-            code = shim_fatal_code(exc)
-            detail = {'message': str(exc), 'fatal_code': code} if code else str(exc)
-            raise HTTPException(409, detail) from exc
+            raise HTTPException(409, read_fatal_detail(exc)) from exc
         finally:
             coordinator.finish(ticket)
 
@@ -211,17 +228,21 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
                 job.set_status(JobStatus.FAILED, 'Playlist edit rejected')
             raise
         except Exception as exc:
-            uncertain = bool(job and job.phase == 'device_writing')
+            from jsymphonic import job_needs_reconcile
+            writing = bool(job and job.phase == 'device_writing')
+            uncertain = job_needs_reconcile(exc, writing)
             fatal_code = shim_fatal_code(exc)
             if job:
                 job.needs_reconcile = uncertain
-                job.update_file(job_id, state='unknown' if uncertain else 'failed', detail=str(exc),
+                job.update_file(job_id, **with_fatal_path(dict(
+                    state='unknown' if uncertain else 'failed', detail=str(exc),
                     reason_code='device_outcome_unknown' if uncertain else 'playlist_failed',
-                    fatal_code=fatal_code)
+                    fatal_code=fatal_code), exc))
                 job.set_status(JobStatus.FAILED, 'Verify device state before another playlist edit' if uncertain else str(exc))
-            raise HTTPException(409, {'code': 'verify_device_state' if uncertain else 'playlist_failed',
+            raise HTTPException(409, with_fatal_path({
+                'code': 'verify_device_state' if uncertain else 'playlist_failed',
                 'message': job.message if job else str(exc), 'job_id': job_id,
-                'fatal_code': fatal_code}) from exc
+                'fatal_code': fatal_code}, exc)) from exc
         finally:
             cache.clear()
             coordinator.finish(ticket)
@@ -248,9 +269,7 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
         try:
             return await asyncio.to_thread(read)
         except RuntimeError as exc:
-            code = shim_fatal_code(exc)
-            detail = {'message': str(exc), 'fatal_code': code} if code else str(exc)
-            raise HTTPException(409, detail) from exc
+            raise HTTPException(409, read_fatal_detail(exc)) from exc
         finally:
             coordinator.finish(ticket)
 
@@ -259,8 +278,26 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
         job_id = uuid.uuid4().hex
         ticket = admit('playlist_' + action, volume, job_id)
         job = None
+
+        def library_not_loaded():
+            return {
+                'code': 'library_not_loaded',
+                'message': 'Playlist repair refused: the Walkman library is not loaded',
+                'job_id': job_id,
+                'fatal_code': 'PLAYLIST_LIBRARY_NOT_LOADED',
+            }
+
         def write():
             with coordinator.device_session(ticket) as mount:
+                if action == 'repair':
+                    rows = cache.get(volume.volume_id)
+                    if rows is None:
+                        rows = device_api.list_tracks(mount)
+                        cache.clear()
+                        cache[volume.volume_id] = rows
+                    # Empty library: refuse before device_writing and before playlist-repair.
+                    if not rows:
+                        raise HTTPException(409, library_not_loaded())
                 job.set_status(JobStatus.RUNNING, 'Updating Walkman playlists')
                 job.set_files([dict(file_id=job_id, name='Playlist ' + action, volume_id=volume.volume_id,
                     state='transferring', detail='Writing Walkman playlist recovery')], phase='device_writing')
@@ -285,28 +322,46 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
                 body['pruned_track_ids'] = result['pruned_track_ids']
                 body['playlist_ids'] = result['playlist_ids']
             return body
-        except HTTPException:
+        except HTTPException as exc:
             if job:
-                job.update_file(job_id, state='failed', detail='Playlist recovery rejected before device write')
+                detail = exc.detail if isinstance(exc.detail, dict) else {}
+                job.needs_reconcile = False
+                job.update_file(job_id, state='failed',
+                    detail=detail.get('message') or 'Playlist recovery rejected before device write',
+                    reason_code=detail.get('code') or 'playlist_failed',
+                    fatal_code=detail.get('fatal_code'))
                 job.set_phase('finished')
-                job.set_status(JobStatus.FAILED, 'Playlist recovery rejected')
+                job.set_status(JobStatus.FAILED, detail.get('message') or 'Playlist recovery rejected')
             raise
         except Exception as exc:
-            empty_mount = bool(getattr(exc, 'empty_mount', False))
-            uncertain = bool(job and job.phase == 'device_writing') and not empty_mount
+            from jsymphonic import job_needs_reconcile
+            writing = bool(job and job.phase == 'device_writing')
+            uncertain = job_needs_reconcile(exc, writing)
             fatal_code = shim_fatal_code(exc)
+            if fatal_code == 'PLAYLIST_LIBRARY_NOT_LOADED':
+                detail_code = 'library_not_loaded'
+                file_state = 'failed'
+                reason = 'library_not_loaded'
+                status = str(exc)
+            elif uncertain:
+                detail_code = 'verify_device_state'
+                file_state = 'unknown'
+                reason = 'device_outcome_unknown'
+                status = 'Verify device state before another playlist recovery'
+            else:
+                detail_code = 'playlist_failed'
+                file_state = 'failed'
+                reason = 'playlist_failed'
+                status = str(exc)
             if job:
                 job.needs_reconcile = uncertain
-                job.update_file(job_id, state='unknown' if uncertain else 'failed', detail=str(exc),
-                    reason_code='device_outcome_unknown' if uncertain else 'playlist_failed',
-                    fatal_code=fatal_code, empty_mount=empty_mount)
-                job.set_status(JobStatus.FAILED, 'Verify device state before another playlist recovery' if uncertain else str(exc))
-            detail = {'code': 'verify_device_state' if uncertain else 'playlist_failed',
+                job.update_file(job_id, **with_fatal_path(dict(
+                    state=file_state, detail=str(exc), reason_code=reason, fatal_code=fatal_code), exc))
+                job.set_status(JobStatus.FAILED, status)
+            raise HTTPException(409, with_fatal_path({
+                'code': detail_code,
                 'message': job.message if job else str(exc), 'job_id': job_id,
-                'fatal_code': fatal_code}
-            if empty_mount:
-                detail['empty_mount'] = True
-            raise HTTPException(409, detail) from exc
+                'fatal_code': fatal_code}, exc)) from exc
         finally:
             cache.clear()
             coordinator.finish(ticket)

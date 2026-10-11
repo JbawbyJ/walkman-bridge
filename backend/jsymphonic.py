@@ -66,6 +66,12 @@ class FatalCode(enum.StrEnum):
     PLAYLIST_JOURNAL_PENDING: a leftover .jsymphonic-playlist-transaction
     journal blocks reads and writes.
     PLAYLIST_SLOTS_EXHAUSTED: all 2048 lifetime playlist slots are used.
+    PLAYLIST_LIBRARY_NOT_LOADED: playlist repair refused because the mount
+    is empty or the library is not loaded. Nothing was written.
+    DEVICE_FILE_LOCKED: a device file is locked. The device is still on its
+    previous snapshot. The fatal event may carry a top-level `path`.
+    DEVICE_ROLLBACK_FAILED: rollback did not restore a known snapshot, so
+    the device state is uncertain.
 
     Any other fatal omits `code`. Missing, non-string, and unrecognized
     values are generic (None). Message text is never parsed for a code.
@@ -75,6 +81,9 @@ class FatalCode(enum.StrEnum):
     PLAYLIST_REF_MISSING = "PLAYLIST_REF_MISSING"
     PLAYLIST_JOURNAL_PENDING = "PLAYLIST_JOURNAL_PENDING"
     PLAYLIST_SLOTS_EXHAUSTED = "PLAYLIST_SLOTS_EXHAUSTED"
+    PLAYLIST_LIBRARY_NOT_LOADED = "PLAYLIST_LIBRARY_NOT_LOADED"
+    DEVICE_FILE_LOCKED = "DEVICE_FILE_LOCKED"
+    DEVICE_ROLLBACK_FAILED = "DEVICE_ROLLBACK_FAILED"
 
 
 def normalize_fatal_code(value) -> str | None:
@@ -94,8 +103,48 @@ def fatal_code_of(exc) -> str | None:
     return normalize_fatal_code(getattr(exc, "code", None))
 
 
+def fatal_path_of(exc) -> str | None:
+    """Top-level fatal `path` when it is a string, else None.
+
+    Message text and nested objects are not a path.
+    """
+    path = getattr(exc, "path", None)
+    return path if isinstance(path, str) else None
+
+
+def _string_path(value):
+    return value if isinstance(value, str) else None
+
+
+def _fatal_needs_reconcile(mutating: bool, code) -> bool:
+    """Definite non-writes stay false. A failed rollback stays uncertain."""
+    normalized = normalize_fatal_code(code)
+    if normalized == FatalCode.DEVICE_ROLLBACK_FAILED:
+        return True
+    if normalized in {FatalCode.PLAYLIST_LIBRARY_NOT_LOADED, FatalCode.DEVICE_FILE_LOCKED}:
+        return False
+    return bool(mutating)
+
+
+def job_needs_reconcile(exc, writing: bool) -> bool:
+    """Job flag for a failed device operation.
+
+    PLAYLIST_LIBRARY_NOT_LOADED and DEVICE_FILE_LOCKED leave the previous
+    snapshot in place. DEVICE_ROLLBACK_FAILED leaves the device uncertain.
+    Any other failure is reconciled only after a write has started.
+    """
+    code = fatal_code_of(exc)
+    if code == FatalCode.DEVICE_ROLLBACK_FAILED.value:
+        return True
+    if code in {FatalCode.PLAYLIST_LIBRARY_NOT_LOADED.value, FatalCode.DEVICE_FILE_LOCKED.value}:
+        return False
+    if not writing:
+        return False
+    return getattr(exc, "needs_reconcile", True) is not False
+
+
 class JSymphonicError(RuntimeError):
-    def __init__(self, message, *, events=(), needs_reconcile=False, code=None, empty_mount=False):
+    def __init__(self, message, *, events=(), needs_reconcile=False, code=None, path=None):
         super().__init__(message)
         self.events = list(events)
         self.needs_reconcile = needs_reconcile
@@ -103,7 +152,8 @@ class JSymphonicError(RuntimeError):
         # None means generic: no code, or a code outside FatalCode.
         # `code` is the fatal event's top-level JSON field, never message text.
         self.code = normalize_fatal_code(code)
-        self.empty_mount = bool(empty_mount)
+        # Top-level fatal `path` only. Non-strings are dropped.
+        self.path = _string_path(path)
 
 
 def _ensure_java() -> str:
@@ -238,12 +288,11 @@ def _run(
         if proc.returncode != 0:
             for event in reversed(events):
                 if event.get("event") == "fatal":
-                    empty_mount = event.get("emptyMount") is True
+                    code = event.get("code")
                     raise JSymphonicError(
                         str(event.get("message") or "shim reported a fatal error"),
-                        events=events, needs_reconcile=mutating and not empty_mount,
-                        code=event.get("code"),
-                        empty_mount=empty_mount,
+                        events=events, needs_reconcile=_fatal_needs_reconcile(mutating, code),
+                        code=code, path=event.get("path"),
                     )
             tail = "\n".join(list(stderr_lines)[-5:]).strip()
             raise JSymphonicError(
@@ -256,10 +305,12 @@ def _run(
 def _require_terminal(events: list[dict], terminal: str, *, mutating=False) -> None:
     for event in events:
         if event.get("event") == "fatal" or event.get("error"):
+            code = event.get("code") if event.get("event") == "fatal" else None
+            path = event.get("path") if event.get("event") == "fatal" else None
             raise JSymphonicError(
                 str(event.get("message") or event.get("error") or "Shim reported a fatal error"),
-                events=events, needs_reconcile=mutating,
-                code=event.get("code") if event.get("event") == "fatal" else None,
+                events=events, needs_reconcile=_fatal_needs_reconcile(mutating, code),
+                code=code, path=path,
             )
     if not events or events[-1].get("event") != terminal:
         raise JSymphonicError(
@@ -417,119 +468,106 @@ def delete_playlist(mount: Path, playlist_id: str) -> None:
     _require_terminal(events, 'done', mutating=True)
 
 
-def _reject_fatal_events(events: list[dict], *, mutating: bool) -> None:
-    """Fail when a recovery command embeds a fatal on an otherwise zero exit.
-
-    The fatal `code` is that event's top-level field. Message text is not a code.
-    """
-    for event in events:
-        if event.get("event") == "fatal" or event.get("error"):
-            empty_mount = event.get("emptyMount") is True
-            raise JSymphonicError(
-                str(event.get("message") or event.get("error") or "Shim reported a fatal error"),
-                events=events, needs_reconcile=mutating and not empty_mount,
-                code=event.get("code") if event.get("event") == "fatal" else None,
-                empty_mount=empty_mount,
-            )
-
-
 _JOURNAL_STATES = frozenset({"committed", "uncommitted", "none"})
 _RECOVER_OUTCOMES = frozenset({"rolled_forward", "discarded", "none"})
-_RECOVERY_SKIP_EVENTS = frozenset({"step"})
 
 
-def _explicit_value(events: list[dict], key: str, allowed: frozenset[str]):
-    """Last top-level `key` whose value is in `allowed`, else None.
-
-    Step events are skipped: their `state` means started/finished, not the
-    journal. A present but unknown value is null, not a guess from `message`.
-    """
+def _last_event(events: list[dict], name: str):
     found = None
     for event in events:
-        if event.get("event") in _RECOVERY_SKIP_EVENTS or key not in event:
-            continue
-        value = event[key]
-        found = value if isinstance(value, str) and value in allowed else None
+        if event.get("event") == name:
+            found = event
     return found
 
 
-def _explicit_ids(events: list[dict], key: str):
-    found = None
-    seen = False
-    for event in events:
-        if event.get("event") in _RECOVERY_SKIP_EVENTS or key not in event:
-            continue
-        seen = True
-        value = event[key]
-        if (isinstance(value, list) and all(isinstance(item, str) and re.fullmatch(r"[1-9][0-9]{0,9}", item) for item in value)):
-            found = list(value)
-        else:
-            found = None
-    return found if seen else None
-
-
-def _explicit_count(events: list[dict], key: str):
-    found = None
-    seen = False
-    for event in events:
-        if event.get("event") in _RECOVERY_SKIP_EVENTS or key not in event:
-            continue
-        seen = True
-        value = event[key]
-        found = value if type(value) is int and value >= 0 else None
-    return found if seen else None
-
-
-def _journal_covers(events: list[dict]):
-    relevant = [event for event in events if event.get("event") not in _RECOVERY_SKIP_EVENTS]
-    if not any("playlistIds" in event or "trackIds" in event for event in relevant):
+def _enum_field(event, key: str, allowed: frozenset[str]):
+    """Known value of one top-level field on one event, else None."""
+    if not event or key not in event:
         return None
-    return {
-        "playlist_ids": _explicit_ids(events, "playlistIds"),
-        "track_ids": _explicit_ids(events, "trackIds"),
-    }
+    value = event[key]
+    if isinstance(value, str) and value in allowed:
+        return value
+    return None
+
+
+def _journal_covers(event):
+    """`covers.files` from playlistJournal.files, or None.
+
+    The field is a list of strings relative to the device. A missing field
+    or any non-list / non-string value is null. playlistIds and trackIds
+    are not coverage.
+    """
+    if not event or "files" not in event:
+        return None
+    files = event["files"]
+    if not isinstance(files, list) or any(not isinstance(item, str) for item in files):
+        return None
+    return {"files": list(files)}
+
+
+def _summary_ids(value):
+    """Normalize playlistRepair summary ids to strings.
+
+    jsymphonic 5763643 emits JSON numbers. Playlist rows use strings.
+    """
+    if not isinstance(value, list):
+        return None
+    out = []
+    for item in value:
+        if type(item) is int and item > 0:
+            text = str(item)
+        elif isinstance(item, str):
+            text = item
+        else:
+            return None
+        if not re.fullmatch(r"[1-9][0-9]{0,9}", text):
+            return None
+        out.append(text)
+    return out
 
 
 def inspect_playlist_journal(mount: Path) -> dict:
-    """Read-only `playlist-recover --inspect`.
+    """Read-only `playlist-recover --device <mount> --inspect`.
 
-    `state` is the shim's top-level field: committed, uncommitted, or none.
-    d4fbc94 omits it; a missing or unknown value stays null. `exists` follows
-    `state` only (false for none, true when a journal state is known).
+    `state` is read only from the `playlistJournal` event (jsymphonic #4
+    @ 5763643). Inspect does not emit `outcome`. A missing or unknown
+    `state` is null. `exists` follows `state`.
     """
     events = _run(["playlist-recover", "--device", str(mount), "--inspect"], INFO_TIMEOUT)
-    _reject_fatal_events(events, mutating=False)
-    state = _explicit_value(events, "state", _JOURNAL_STATES)
+    _require_terminal(events, "done", mutating=False)
+    journal = _last_event(events, "playlistJournal")
+    state = _enum_field(journal, "state", _JOURNAL_STATES)
     exists = None if state is None else state != "none"
-    return {"exists": exists, "state": state, "covers": _journal_covers(events)}
+    return {"exists": exists, "state": state, "covers": _journal_covers(journal)}
 
 
 def recover_playlist_journal(mount: Path) -> dict:
-    """Mutating `playlist-recover`.
+    """Mutating `playlist-recover --device <mount>`.
 
-    `outcome` is the shim's top-level field: rolled_forward, discarded, or none.
-    A missing or unknown value stays null. Message text is never read.
+    `outcome` is the top-level field on the `playlistJournal` event, not on
+    `done` and not message text. Values: rolled_forward, discarded, none.
     """
     events = _run(["playlist-recover", "--device", str(mount)], DEL_TIMEOUT)
-    _reject_fatal_events(events, mutating=True)
-    return {"outcome": _explicit_value(events, "outcome", _RECOVER_OUTCOMES)}
+    _require_terminal(events, "done", mutating=True)
+    outcome = _enum_field(_last_event(events, "playlistJournal"), "outcome", _RECOVER_OUTCOMES)
+    return {"outcome": outcome}
 
 
 def repair_playlists(mount: Path) -> dict:
-    """Mutating `playlist-repair`.
+    """Mutating `playlist-repair --device <mount>`.
 
-    `prunedCount` of 0 is a real result. `emptyMount: true` is a refusal and
-    is not reported as success. Both are top-level fields, not message text.
+    The `playlistRepair` summary comes before playlist rows and `done`.
+    `prunedCount` counts removed member references and is not checked
+    against `len(prunedTrackIds)`. Summary ids are JSON numbers and are
+    returned as strings. An empty mount is the fatal code
+    `PLAYLIST_LIBRARY_NOT_LOADED`, raised by `_run`.
     """
     events = _run(["playlist-repair", "--device", str(mount)], DEL_TIMEOUT)
-    _reject_fatal_events(events, mutating=True)
-    if any(event.get("emptyMount") is True for event in events):
-        raise JSymphonicError(
-            "playlist-repair refused because the mount is empty",
-            events=events, needs_reconcile=False, empty_mount=True,
-        )
+    _require_terminal(events, "done", mutating=True)
+    summary = _last_event(events, "playlistRepair") or {}
+    count = summary.get("prunedCount") if summary else None
     return {
-        "pruned_count": _explicit_count(events, "prunedCount"),
-        "pruned_track_ids": _explicit_ids(events, "prunedTrackIds"),
-        "playlist_ids": _explicit_ids(events, "playlistIds"),
+        "pruned_count": count if type(count) is int and count >= 0 else None,
+        "pruned_track_ids": _summary_ids(summary.get("prunedTrackIds")) if "prunedTrackIds" in summary else None,
+        "playlist_ids": _summary_ids(summary.get("playlistIds")) if "playlistIds" in summary else None,
     }

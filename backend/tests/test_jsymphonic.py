@@ -241,6 +241,9 @@ FATAL_CODES = (
     "PLAYLIST_REF_MISSING",
     "PLAYLIST_JOURNAL_PENDING",
     "PLAYLIST_SLOTS_EXHAUSTED",
+    "PLAYLIST_LIBRARY_NOT_LOADED",
+    "DEVICE_FILE_LOCKED",
+    "DEVICE_ROLLBACK_FAILED",
 )
 
 
@@ -268,11 +271,12 @@ def test_fatal_without_code_stays_generic(monkeypatch):
 def test_message_text_does_not_invent_fatal_code(monkeypatch):
     scripted(monkeypatch, [{
         "event": "fatal",
-        "message": "blocked: PLAYLIST_REF_MISSING PLAYLIST_JOURNAL_PENDING PLAYLIST_SLOTS_EXHAUSTED",
+        "message": "blocked: PLAYLIST_REF_MISSING PLAYLIST_JOURNAL_PENDING PLAYLIST_SLOTS_EXHAUSTED PLAYLIST_LIBRARY_NOT_LOADED DEVICE_FILE_LOCKED DEVICE_ROLLBACK_FAILED path OMGAUDIO/locked.mp3",
     }], exit_code=1)
     with pytest.raises(JSymphonicError) as error:
         jsymphonic.list_playlists(Path("X:/"))
     assert error.value.code is None
+    assert error.value.path is None
 
 
 def test_unknown_fatal_code_is_generic_and_does_not_crash(monkeypatch):

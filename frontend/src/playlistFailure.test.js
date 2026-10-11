@@ -116,6 +116,23 @@ test('api errors expose fatal_code from detail and leave it null when the payloa
       assert.equal(error.message, 'Playlist edit rejected')
       assert.equal(error.code, 'playlist_failed')
       assert.equal(error.fatal_code, 'PLAYLIST_REF_MISSING')
+      assert.equal(error.fatal_path, null)
+      return true
+    })
+    respond({
+      code: 'playlist_failed',
+      message: 'device file is locked',
+      fatal_code: 'DEVICE_FILE_LOCKED',
+      fatal_path: 'OMGAUDIO/10F00/1000.mp3',
+    })
+    await assert.rejects(api.device(), error => {
+      assert.equal(error.fatal_code, 'DEVICE_FILE_LOCKED')
+      assert.equal(error.fatal_path, 'OMGAUDIO/10F00/1000.mp3')
+      return true
+    })
+    respond({ code: 'playlist_failed', message: 'locked', fatal_code: 'DEVICE_FILE_LOCKED', fatal_path: 3 })
+    await assert.rejects(api.device(), error => {
+      assert.equal(error.fatal_path, null)
       return true
     })
     respond({ message: 'journal open', fatal_code: 'PLAYLIST_JOURNAL_PENDING' })
