@@ -78,10 +78,21 @@ The same partial-failure rule as `add` applies: a failed deletion surfaces as
 ### Errors
 
 ```json
-{"event":"fatal","message":"human-readable reason"}
+{"event":"fatal","message":"human-readable reason","code":"PLAYLIST_REF_MISSING"}
 ```
 
-followed by exit code 1. Unknown/missing/malformed args (including non-numeric
+`code` is optional. The only values the backend recognizes are:
+
+- `PLAYLIST_REF_MISSING` — a dangling track ID blocks playlist writes
+- `PLAYLIST_JOURNAL_PENDING` — a leftover `.jsymphonic-playlist-transaction` journal blocks reads and writes
+- `PLAYLIST_SLOTS_EXHAUSTED` — all 2048 lifetime playlist slots are used
+
+Any other fatal omits `code`. A missing code is generic. The backend never
+derives a code by parsing `message`. An unrecognized string, or a non-string
+`code`, is dropped to generic and does not raise. Those three names are
+`FatalCode` in `backend/jsymphonic.py`.
+
+Followed by exit code 1. Unknown/missing/malformed args (including non-numeric
 `--generation`/`--idle-timeout` values) → usage on stderr, exit 2.
 
 ## Backend contract (`backend/jsymphonic.py`)
@@ -98,6 +109,12 @@ followed by exit code 1. Unknown/missing/malformed args (including non-numeric
   like add), `add` 3600 s. On timeout: kill process, raise. A timer that fires
   as a successful run exits is not a timeout — the exit code decides.
 - Nonzero exit → `JSymphonicError(message from last fatal event, else stderr tail)`.
+  A recognized fatal `code` is stored on that exception. Frontend HTTP errors
+  keep their application `detail.code` (`playlist_failed`, `verify_device_state`,
+  `delete_failed`) and add `fatal_code` (`null` when generic). Playlist and
+  track reads that carry a known code return `{message, fatal_code}` instead of
+  a string detail. Failed device job files include `fatal_code` the same way.
+  `frontend/src/api.js` copies `detail.fatal_code` onto the thrown error.
 
 ## Mock device
 

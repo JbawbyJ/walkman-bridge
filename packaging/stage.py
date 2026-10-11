@@ -28,6 +28,43 @@ def sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def jsymphonic_archive_name(runtime_lock: dict) -> str:
+    relative = runtime_lock["jsymphonic"]["source_archive"]
+    if not isinstance(relative, str):
+        raise ValueError("Unsafe JSymphonic source archive path")
+    path = PurePosixPath(relative)
+    if (path.is_absolute() or "\\" in relative or ":" in relative or ".." in path.parts
+            or path.as_posix() != relative or not path.name.endswith(".zip")):
+        raise ValueError(f"Unsafe JSymphonic source archive path: {relative}")
+    return path.name
+
+
+def copy_pinned_jsymphonic(runtime_lock: dict, sources_dir: Path, packaging: Path = PACKAGING) -> Path:
+    """Copy the locked source archive into staged sources/ or fail closed."""
+    expected = runtime_lock["jsymphonic"].get("sha256")
+    if not isinstance(expected, str) or len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        raise ValueError("Pinned JSymphonic source archive hash mismatch")
+    name = jsymphonic_archive_name(runtime_lock)
+    relative = PurePosixPath(runtime_lock["jsymphonic"]["source_archive"])
+    archive = packaging.joinpath(*relative.parts)
+    if not archive.resolve().is_relative_to(packaging.resolve()) or archive.is_symlink() or not archive.is_file():
+        raise FileNotFoundError(f"Pinned JSymphonic source archive missing: {relative.as_posix()}")
+    if sha256(archive) != expected:
+        raise ValueError(f"Pinned JSymphonic source archive hash mismatch: {archive.name}")
+    sources_dir.mkdir(parents=True, exist_ok=True)
+    destination = sources_dir / name
+    temporary = destination.with_name(name + ".partial")
+    shutil.copyfile(archive, temporary)
+    try:
+        if sha256(temporary) != expected:
+            raise ValueError(f"Pinned JSymphonic source archive hash mismatch: {name}")
+        temporary.replace(destination)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return destination
+
+
 def reset_generated(directory: Path) -> None:
     resolved = directory.resolve()
     boundary = BUILD.resolve()
@@ -112,8 +149,8 @@ def stage(args):
         raise FileNotFoundError("Publish the self-contained .NET 10 scanner helper first")
     if not (ROOT / "frontend" / "dist" / "index.html").is_file():
         raise FileNotFoundError("Build the frontend before packaging")
-    if args.product == "bridge" and (not args.jar.is_file() or not (args.jsymphonic_source / "src").is_dir()):
-        raise FileNotFoundError("Bridge requires the headless JAR and its corresponding source checkout")
+    if args.product == "bridge" and not args.jar.is_file():
+        raise FileNotFoundError("Bridge requires the headless JAR")
 
     stage_root = BUILD / args.product
     reset_generated(stage_root)
@@ -182,17 +219,16 @@ def stage(args):
         java_notices = stage_root / "notices" / "java"
         java_notices.mkdir()
         shutil.copy2(jdk / "NOTICE", java_notices / "NOTICE")
+        sources = stage_root / "sources"
+        pinned_source = copy_pinned_jsymphonic(runtime_lock, sources)
         source_notices = stage_root / "notices" / "jsymphonic"
         source_notices.mkdir()
-        shutil.copy2(args.jsymphonic_source / "LICENSE", source_notices / "LICENSE")
-        sources = stage_root / "sources"
-        sources.mkdir()
-        with zipfile.ZipFile(sources / "jsymphonic.zip", "w", zipfile.ZIP_DEFLATED) as archive:
-            for source in sorted(args.jsymphonic_source.rglob("*")):
-                relative = source.relative_to(args.jsymphonic_source)
-                allowed = relative.parts[0] in {"src", "docs"} or relative.as_posix() in {"pom.xml", "LICENSE", "README.md", "INSTALLING-FFMPEG.md", "NATIVE-PLAYLISTS.md"}
-                if source.is_file() and allowed:
-                    archive.write(source, relative.as_posix())
+        with zipfile.ZipFile(pinned_source) as archive:
+            try:
+                license_bytes = archive.read("LICENSE")
+            except KeyError as error:
+                raise ValueError("Pinned JSymphonic source archive is missing LICENSE") from error
+        (source_notices / "LICENSE").write_bytes(license_bytes)
 
     (stage_root / "product.json").write_text(json.dumps({"product": args.product}) + "\n", encoding="utf-8")
     shutil.copy2(PACKAGING / "python-wheels.lock.json", stage_root / "python-wheels.lock.json")
@@ -215,7 +251,9 @@ def validate_layout(root: Path, product: str):
                 "ffmpeg/ffmpeg.exe", "scanner-helper/RedLotus.ScanHelper.exe", "deno/deno.exe",
                 "backend/main.py", "backend/boot.py", "frontend/dist/index.html", "THIRD-PARTY-NOTICES.md"]
     if product == "bridge":
-        required += ["jre/bin/java.exe", "backend/vendor/jsymphonic.jar", "sources/jsymphonic.zip"]
+        lock = json.loads((PACKAGING / "runtime-lock.json").read_text(encoding="utf-8"))
+        required += ["jre/bin/java.exe", "backend/vendor/jsymphonic.jar",
+                     f"sources/{jsymphonic_archive_name(lock)}"]
     for relative in required:
         if not (root / relative).is_file():
             raise FileNotFoundError(f"Product resource missing: {relative}")
@@ -237,7 +275,8 @@ def main():
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--jdk-home", type=Path, default=ROOT.parent / "tools" / "jdk-21.0.12+8")
     parser.add_argument("--jar", type=Path, default=ROOT / "backend" / "vendor" / "jsymphonic.jar")
-    parser.add_argument("--jsymphonic-source", type=Path, default=ROOT.parent / "jsymphonic")
+    parser.add_argument("--jsymphonic-source", type=Path, default=ROOT.parent / "jsymphonic",
+                        help="Accepted for existing build scripts. Staging copies the sha256-pinned archive instead.")
     parser.add_argument("--helper", type=Path, default=ROOT / "scanner-helper" / "artifacts" / "win-x64" / "RedLotus.ScanHelper.exe")
     stage(parser.parse_args())
 
