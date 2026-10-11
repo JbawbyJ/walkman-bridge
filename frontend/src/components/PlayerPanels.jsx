@@ -3,7 +3,8 @@ import lotus from '../assets/lotus.png'
 import { BAND_FREQUENCIES, PRESETS } from '../dsp.js'
 import { playable, timeLabel } from '../playback.js'
 import { fmtBytes } from '../format.js'
-import { artworkUrl, supplementalMetadata } from '../mediaImport.js'
+import { supplementalMetadata } from '../mediaImport.js'
+import { CoverArt } from './CoverArt.jsx'
 
 export function Icon({ name, size = 20 }) {
   const shapes = {
@@ -122,12 +123,7 @@ export function Volume({ player, rotary = false }) {
 }
 
 export function Artwork({ item }) {
-  const source = artworkUrl(item)
-  const [failed, setFailed] = useState(null)
-  const showCover = source && source !== failed
-  return <div className={`record-art ${showCover ? 'has-cover' : ''}`}>
-    {showCover ? <img key={source} src={source} alt={`Cover for ${item.album || item.title || item.name}`} onError={() => setFailed(source)} /> : <><img src={lotus} alt="" /><span>RED LOTUS</span></>}
-  </div>
+  return <CoverArt item={item} variant="deck" />
 }
 
 export function NowPlaying({ player, available, retro = false, mode, onMode }) {
@@ -164,7 +160,7 @@ export function Queue({ items, player, onImport, onImportLink, onRemove, onMove,
   const visible = items.filter(item => [item.title, item.artist, item.name].join(' ').toLowerCase().includes(search.toLowerCase()))
   return <section className="panel queue-panel" aria-label="Playback queue"><SectionHeading aside={<span className="micro">{items.length} TRACKS</span>}>Playback queue</SectionHeading>
     <div className="queue-tools"><input aria-label="Search playback queue" placeholder="Find a track…" value={search} onChange={e => setSearch(e.target.value)} /><div className="import-actions"><button className="button" onClick={onImport} disabled={busy}><Icon name="plus" size={15} /> Add files</button><button className="button" onClick={onImportLink} disabled={busy}>Import link</button></div></div>
-    <div className="queue-list">{visible.length ? visible.map(item => <div className={`queue-row ${player.id === item.id ? 'selected' : ''}`} key={item.id}><span className="track-number">{String(items.indexOf(item) + 1).padStart(2, '0')}</span><button className="track-select" disabled={!playable(item)} onClick={() => player.play(item.id)} title={`Play ${item.title || item.name}`}><strong>{item.title || item.name}</strong><small>{item.artist || 'Unknown artist'}</small></button><div className="queue-meta">{playable(item) ? <span>{timeLabel(item.duration_seconds)}</span> : <Status state={item.status} />}</div><details className="queue-row-menu"><summary aria-label={`Actions for ${item.title || item.name}`} title="Track actions">⋯</summary><div className="row-actions"><IconButton label={`Move ${item.title || item.name} up`} icon="up" disabled={busy || items.indexOf(item) === 0} onClick={() => onMove(item.id, -1)} /><IconButton label={`Move ${item.title || item.name} down`} icon="down" disabled={busy || items.indexOf(item) === items.length - 1} onClick={() => onMove(item.id, 1)} />{!playable(item) && <button className="text-button" disabled={busy} onClick={() => onRescan(item.id)}>Rescan</button>}<IconButton label={`Remove ${item.title || item.name} from queue`} icon="close" disabled={busy} onClick={() => onRemove(item.id)} /></div></details></div>) : <div className="empty-state"><Icon name="disc" size={38} /><strong>{search ? 'No matching tracks' : 'Make room for your music.'}</strong><p>{search ? 'Try a different title or artist.' : 'Add audio files or drop them anywhere in this window. Your queue stays here between sessions.'}</p>{!search && <button className="button" disabled={busy} onClick={onImport}>Choose audio files</button>}</div>}</div>
+    <div className="queue-list">{visible.length ? visible.map(item => <div className={`queue-row ${player.id === item.id ? 'selected' : ''}`} key={item.id}><span className="track-number">{String(items.indexOf(item) + 1).padStart(2, '0')}</span><CoverArt item={item} variant="thumb" /><button className="track-select" disabled={!playable(item)} onClick={() => player.play(item.id)} title={`Play ${item.title || item.name}`}><strong>{item.title || item.name}</strong><small>{item.artist || 'Unknown artist'}</small></button><div className="queue-meta">{playable(item) ? <span>{timeLabel(item.duration_seconds)}</span> : <Status state={item.status} />}</div><details className="queue-row-menu"><summary aria-label={`Actions for ${item.title || item.name}`} title="Track actions">⋯</summary><div className="row-actions"><IconButton label={`Move ${item.title || item.name} up`} icon="up" disabled={busy || items.indexOf(item) === 0} onClick={() => onMove(item.id, -1)} /><IconButton label={`Move ${item.title || item.name} down`} icon="down" disabled={busy || items.indexOf(item) === items.length - 1} onClick={() => onMove(item.id, 1)} />{!playable(item) && <button className="text-button" disabled={busy} onClick={() => onRescan(item.id)}>Rescan</button>}<IconButton label={`Remove ${item.title || item.name} from queue`} icon="close" disabled={busy} onClick={() => onRemove(item.id)} /></div></details></div>) : <div className="empty-state"><Icon name="disc" size={38} /><strong>{search ? 'No matching tracks' : 'Make room for your music.'}</strong><p>{search ? 'Try a different title or artist.' : 'Add audio files or drop them anywhere in this window. Your queue stays here between sessions.'}</p>{!search && <button className="button" disabled={busy} onClick={onImport}>Choose audio files</button>}</div>}</div>
     <div className="panel-note"><span>{items.filter(playable).length} cleared for playback</span><span>{fmtBytes(quota?.used_bytes)} / {fmtBytes(quota?.limit_bytes)}</span></div>
   </section>
 }
