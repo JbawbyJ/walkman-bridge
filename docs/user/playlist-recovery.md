@@ -41,15 +41,15 @@ note does not delete your songs.
 
 ## What not to do
 
-- Leave the Walkman plugged in until a transfer or playlist save has finished.
-  Unplugging in the middle is how the unfinished record gets left behind.
-- Leave `.jsymphonic-playlist-transaction` where it is. Deleting that file
-  yourself in File Explorer can hide a save that had already committed, or
+- Do not unplug the Walkman while a sync or playlist save is running.
+  Unplugging in the middle leaves the unfinished record on the device.
+- Do not delete `.jsymphonic-playlist-transaction` yourself in File Explorer.
+  Removing that file by hand can hide a save that had already committed, or
   leave the playlist tables in a state the app can no longer explain.
-- Wait for inspect and recover when the code is `PLAYLIST_JOURNAL_PENDING`.
-  Saving again will keep stopping until the unfinished record is resolved.
-- Use the code, or the general-failure steps when the code is missing or
-  unfamiliar. Words inside the message are not a substitute for the code.
+- Do not save again while the code is `PLAYLIST_JOURNAL_PENDING`. The next
+  save will keep stopping until the unfinished record is resolved.
+- Do not choose a fix from the words in the message. Use the code, or the
+  general-failure steps when the code is missing or unfamiliar.
 
 ## Back up the Walkman first
 
