@@ -120,7 +120,10 @@ def test_symlink_media_directory_cannot_redirect_the_write(tmp_path):
     outside = tmp_path / 'outside'
     outside.mkdir()
     media_id = 'cd' * 16
-    (store.root / media_id).symlink_to(outside, target_is_directory=True)
+    try:
+        (store.root / media_id).symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip('symlink creation unavailable')
     with pytest.raises(Exception):
         store.import_file('song.mp3', io.BytesIO(b'hello'), media_id=media_id)
     assert list(outside.iterdir()) == []
