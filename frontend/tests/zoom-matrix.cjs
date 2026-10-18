@@ -7,12 +7,11 @@ const { app, BrowserWindow, screen } = require('electron')
 const http = require('node:http')
 const fs = require('node:fs')
 const path = require('node:path')
+const { PRODUCTS, ZOOM_FACTORS, WINDOW_SIZES, HARNESS_MS, isExpectedNotRun } = require('./zoom-matrix-budget.cjs')
 
 // Same percentages and window sizes as frontend/tests/resize-smoke.cjs.
 // 640×560 at 200% is the 320 CSS-pixel width named in docs/DESIGN.md.
-const ZOOM_FACTORS = [1, 1.25, 1.5, 2]
-const WINDOW_SIZES = [[640, 560], [720, 560], [900, 700], [1140, 860], [1380, 860], [1920, 640], [800, 1200]]
-const PRODUCTS = ['player', 'bridge']
+const CSS_TOLERANCE_PX = 24
 
 app.commandLine.appendSwitch('disable-gpu')
 app.commandLine.appendSwitch('disable-dev-shm-usage')
@@ -36,7 +35,7 @@ const timeout = setTimeout(() => {
   console.error('zoom-matrix TIMEOUT')
   removeProfile()
   app.exit(1)
-}, 150000)
+}, HARNESS_MS)
 
 const items = Array.from({ length: 8 }, (_, index) => ({
   id: `zoom-${index}`,
@@ -225,6 +224,23 @@ async function main() {
     await evaluate(win, 'document.fonts.ready')
     for (const [width, height] of WINDOW_SIZES) {
       for (const scale of ZOOM_FACTORS) {
+        const work = screen.getPrimaryDisplay().workAreaSize
+        const label = `${mode} ${width}x${height} @${Math.round(scale * 100)}%`
+        if (width > work.width || height > work.height) {
+          const reason = `window ${width}x${height} exceeds work area ${work.width}x${work.height}`
+          const cell = {
+            product: mode,
+            size: [width, height],
+            zoom: scale,
+            status: 'not_run',
+            workArea: { width: work.width, height: work.height },
+            reason,
+          }
+          cell.expectedNotRun = isExpectedNotRun(cell)
+          results.push(cell)
+          console.log(`NOT_RUN ${label} — ${reason}`)
+          continue
+        }
         win.setContentSize(width, height)
         win.webContents.setZoomFactor(scale)
         await delay(80)
@@ -233,37 +249,57 @@ async function main() {
         const summary = await evaluate(win, geometry)
         const dialog = await dialogCheck(win)
         const cssWidth = summary.viewport[0]
+        const cssHeight = summary.viewport[1]
         const expectedCssWidth = width / scale
+        const expectedCssHeight = height / scale
         const reasons = cellOk(mode, summary, dialog)
         if (Math.abs(applied - scale) > 0.02) reasons.push(`zoom factor ${applied} instead of ${scale}`)
-        if (Math.abs(cssWidth - expectedCssWidth) > 24) reasons.push(`CSS width ${cssWidth} is outside ${expectedCssWidth}`)
+        if (Math.abs(cssWidth - expectedCssWidth) > CSS_TOLERANCE_PX) reasons.push(`CSS width ${cssWidth} is outside ${expectedCssWidth}`)
+        if (Math.abs(cssHeight - expectedCssHeight) > CSS_TOLERANCE_PX) reasons.push(`CSS height ${cssHeight} is outside ${expectedCssHeight}`)
         if (width === 640 && scale === 2 && (cssWidth < 280 || cssWidth > 360)) reasons.push(`320 CSS-pixel case measured ${cssWidth}`)
         const cell = {
           product: mode,
           size: [width, height],
           zoom: scale,
+          status: reasons.length === 0 ? 'passed' : 'failed',
           cssViewport: summary.viewport,
           ok: reasons.length === 0,
         }
         if (reasons.length) cell.reasons = reasons
         results.push(cell)
-        const label = `${mode} ${width}x${height} @${Math.round(scale * 100)}%`
         console.log(`${cell.ok ? 'PASS' : 'FAIL'} ${label}${cell.ok ? '' : ` — ${reasons.join('; ')}`}`)
         if (!cell.ok) failures.push(label)
       }
     }
     win.destroy()
   }
+  const passed = results.filter(cell => cell.status === 'passed')
+  const failed = results.filter(cell => cell.status === 'failed')
+  const notRun = results.filter(cell => cell.status === 'not_run')
+  const unexpected = notRun.filter(cell => !cell.expectedNotRun)
+  const notRunLabel = cell => `${cell.product} ${cell.size[0]}x${cell.size[1]} @${Math.round(cell.zoom * 100)}%`
+  if (unexpected.length) console.error(`zoom-matrix unexpected not run: ${unexpected.map(notRunLabel).join(', ')}`)
+  if (passed.length === 0) console.error('zoom-matrix passed zero cells')
   const report = {
-    ok: failures.length === 0 && errors.length === 0,
+    ok: failed.length === 0 && errors.length === 0 && unexpected.length === 0 && passed.length > 0,
     electron: process.versions.electron,
     chromium: process.versions.chrome,
     displayScaleFactor: display.scaleFactor,
     scaleMethod: 'Electron webContents.setZoomFactor at 100/125/150/200 percent. Host OS and X server DPI are not changed.',
     matrix: { products: PRODUCTS, zoomFactors: ZOOM_FACTORS, windowSizes: WINDOW_SIZES },
+    harnessTimeoutMs: HARNESS_MS,
     cases: results.length,
-    passed: results.filter(cell => cell.ok).length,
-    failed: failures.length,
+    passed: passed.length,
+    failed: failed.length,
+    notRun: notRun.length,
+    notRunCells: notRun.map(cell => ({
+      product: cell.product,
+      size: cell.size,
+      zoom: cell.zoom,
+      workArea: cell.workArea,
+      reason: cell.reason,
+      expectedNotRun: cell.expectedNotRun,
+    })),
     errors,
     notAutomated: [{
       cell: 'OS display DPI / per-monitor scale (100/125/150/175/200 percent and others)',
@@ -272,7 +308,8 @@ async function main() {
     results,
   }
   fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2))
-  console.log(`zoom-matrix ${report.ok ? 'PASS' : 'FAIL'}: ${report.passed} passed, ${report.failed} failed, ${results.length} cases, ${errors.length} renderer/API errors`)
+  console.log(`zoom-matrix ${report.ok ? 'PASS' : 'FAIL'}: ${report.passed} passed, ${report.failed} failed, ${report.notRun} not run, ${report.cases} cases, ${errors.length} renderer/API errors`)
+  if (notRun.length) console.log(`zoom-matrix not run: ${notRun.map(notRunLabel).join(', ')}`)
   process.exitCode = report.ok ? 0 : 1
 }
 
