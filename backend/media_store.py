@@ -212,7 +212,8 @@ class MediaStore:
                 changes = {}
                 if artifact == 'source' or record.get('playback') == artifact:
                     changes.update(self._source_playback(record))
-                if artifact == 'artwork':
+                if artifact in ('source', 'artwork') and record.get('artwork_status') == 'ready':
+                    # Artwork decoded from a purged source is refused in the same atomic update.
                     changes['artwork_status'] = 'failed'
                 record = self.update(media_id, artifacts=record['artifacts'], **changes)
             path = self.root / self._id(media_id) / self._artifact_name(info)
@@ -225,11 +226,20 @@ class MediaStore:
             return record
 
     def retry_purges(self, media_id):
-        """Unlink refused artifact bytes that an earlier purge could not delete."""
+        """Finish an interrupted or held purge: every refused entry, and every derivative of a
+        refused source, is purged again; one file that is still held never blocks the others.
+        Returns the artifacts whose bytes are still held."""
         record = self.get(media_id)
+        source_purged = record['artifacts']['source'].get('purged')
+        held = []
         for artifact, info in list(record['artifacts'].items()):
-            if info.get('purged'):
+            if not (info.get('purged') or source_purged):
+                continue
+            try:
                 self.purge_artifact(media_id, artifact)
+            except OSError:
+                held.append(artifact)
+        return held
 
     @staticmethod
     def _source_playback(record):

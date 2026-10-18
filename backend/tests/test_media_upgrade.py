@@ -407,3 +407,100 @@ def test_stream_rechecks_the_refusal_after_taking_the_file_lock(context, monkeyp
     monkeypatch.setattr(store, 'path', racing_path)
     assert context.client.get(f'/api/media/{media_id}/stream').status_code == 423
     assert raced and (store.root / media_id / 'playback.flac').exists()
+
+
+def _ready_artwork(context, media_id):
+    store = context.app.state.store
+    path = store.root / media_id / 'artwork.jpg'
+    content = b'\xff\xd8\xff\xe0JJ\xff\xd9'
+    path.write_bytes(content)
+    record = store.get(media_id)
+    digest = hashlib.sha256(content).hexdigest()
+    record['artifacts']['artwork'] = dict(name=path.name, size_bytes=len(content), sha256=digest,
+                                          scan=dict(ok=True, state='CLEAN', sha256=digest))
+    store.update(media_id, artifacts=record['artifacts'], artwork_status='ready')
+    return path
+
+
+def test_artwork_route_rechecks_the_refusal_after_taking_the_file_lock(context, monkeypatch):
+    from pathlib import Path
+    store = context.app.state.store
+    media_id = imported(context)['files'][0]['media_id']
+    artwork = _ready_artwork(context, media_id)
+    assert context.client.get(f'/api/media/{media_id}/artwork').status_code == 200
+    real_unlink = Path.unlink
+
+    def held_unlink(self, *args, **kwargs):
+        if self.name == 'artwork.jpg':
+            raise PermissionError(13, 'held by a reader')
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'unlink', held_unlink)
+    original_path = store.path
+    raced = []
+
+    def racing_path(record, artifact='source'):
+        resolved = original_path(record, artifact)
+        if artifact == 'artwork' and not raced:
+            raced.append(True)
+            try:
+                store.purge_artifact(media_id, 'artwork')
+            except PermissionError:
+                pass
+        return resolved
+
+    monkeypatch.setattr(store, 'path', racing_path)
+    assert context.client.get(f'/api/media/{media_id}/artwork').status_code == 404
+    assert raced and artwork.exists()
+
+
+def test_artwork_of_a_purged_source_is_refused_even_before_its_own_purge(context):
+    store = context.app.state.store
+    media_id = imported(context)['files'][0]['media_id']
+    _ready_artwork(context, media_id)
+    assert context.client.get(f'/api/media/{media_id}/artwork').status_code == 200
+    store.purge_artifact(media_id, 'source')  # the artwork purge has not happened yet
+    item = next(entry for entry in context.client.get('/api/queue').json()['items'] if entry['id'] == media_id)
+    assert 'artwork_url' not in item
+    assert context.client.get(f'/api/media/{media_id}/artwork').status_code == 404
+
+
+def test_held_refused_artwork_is_regenerated_by_the_next_rescan(context, monkeypatch):
+    from pathlib import Path
+    store = context.app.state.store
+    monkeypatch.setattr(media_service, 'analyze_cleared_audio', lambda path: {'has_artwork': True})
+    extractions = []
+
+    def extract(src, out, *args):
+        extractions.append(out)
+        out.write_bytes(b'\xff\xd8\xff\xe0JJ\xff\xd9')
+        return out
+
+    monkeypatch.setattr(media_service, 'extract_cleared_artwork', extract)
+    context.scanner.scan_artwork = context.scanner.scan_audio  # the injected scanner clears generated JPEGs too
+    media_id = imported(context)['files'][0]['media_id']
+    record = store.get(media_id)
+    assert record['artwork_status'] == 'ready' and len(extractions) == 1
+    artwork = store.root / media_id / 'artwork.jpg'
+    record['artifacts']['artwork']['scan'] = dict(ok=False, state='BLOCKED', reason_code='defender_threat')
+    store.update(media_id, artifacts=record['artifacts'])
+    real_unlink = Path.unlink
+
+    def held_unlink(self, *args, **kwargs):
+        if self.name == 'artwork.jpg':
+            raise PermissionError(13, 'held by a reader')
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'unlink', held_unlink)
+    with pytest.raises(PermissionError):
+        store.purge_artifact(media_id, 'artwork')
+    assert store.get(media_id)['artwork_status'] == 'failed' and artwork.exists()
+    monkeypatch.setattr(Path, 'unlink', real_unlink)
+    # A rescan always revisits artwork; the released refusal is removed and the image regenerated.
+    rescan = context.client.post(f'/api/media/{media_id}/rescan').json()
+    job = context.client.get('/api/jobs/' + rescan['job_id']).json()
+    assert job['status'] == 'done', job
+    record = store.get(media_id)
+    assert record['artwork_status'] == 'ready' and record['artifacts']['artwork'].get('purged') is None
+    assert len(extractions) == 2 and artwork.exists()
+    assert 'artwork_url' in store.public(record)

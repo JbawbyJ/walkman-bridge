@@ -139,3 +139,47 @@ def test_purging_artwork_drops_it_from_the_public_record(tmp_path):
     assert updated['artwork_status'] == 'failed'
     assert 'artwork' not in updated['artifacts'] and not artwork.exists()
     assert 'artwork_url' not in store.public(updated)
+
+
+def test_purging_the_source_refuses_its_artwork_and_startup_finishes_the_purge(tmp_path):
+    import io
+    store = MediaStore(tmp_path / 'state.db', tmp_path / 'cache')
+    record = store.import_file('song.mp3', io.BytesIO(b'\xff\xfb\x90\x00' + b'\x00' * 64))
+    media_id = record['id']
+    artwork = store.root / media_id / 'artwork.jpg'
+    artwork.write_bytes(b'\xff\xd8\xff\xe0fake\xff\xd9')
+    record['artifacts']['artwork'] = dict(name='artwork.jpg', size_bytes=10, sha256='0' * 64, scan={'ok': True})
+    store.update(media_id, artifacts=record['artifacts'], artwork_status='ready')
+    updated = store.purge_artifact(media_id, 'source')  # the artwork purge never happens (crash or error)
+    assert updated['artwork_status'] == 'failed' and 'artwork_url' not in store.public(updated)
+    assert 'artwork' in updated['artifacts'] and artwork.exists()
+    reopened = MediaStore(tmp_path / 'state.db', tmp_path / 'cache')  # startup finishes the purge
+    assert not artwork.exists() and 'artwork' not in reopened.get(media_id)['artifacts']
+    assert not (store.root / media_id / 'source.mp3').exists()
+
+
+def test_retrying_purges_continues_past_a_held_file(tmp_path, monkeypatch):
+    import io
+    from pathlib import Path
+    store = MediaStore(tmp_path / 'state.db', tmp_path / 'cache')
+    record = store.import_file('song.mp3', io.BytesIO(b'\xff\xfb\x90\x00' + b'\x00' * 64))
+    media_id = record['id']
+    derivative = store.root / media_id / 'transfer.mp3'
+    derivative.write_bytes(b'converted')
+    record['artifacts']['transfer'] = dict(name='transfer.mp3', size_bytes=9, sha256='0' * 64, scan={'ok': True})
+    store.update(media_id, artifacts=record['artifacts'])
+    real_unlink = Path.unlink
+
+    def source_held(self, *args, **kwargs):
+        if self.name == 'source.mp3':
+            raise PermissionError(13, 'held by a reader')
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'unlink', source_held)
+    with pytest.raises(PermissionError):
+        store.purge_artifact(media_id, 'source')
+    assert store.retry_purges(media_id) == ['source']  # the source is still held...
+    assert not derivative.exists() and 'transfer' not in store.get(media_id)['artifacts']  # ...the derivative is gone
+    monkeypatch.setattr(Path, 'unlink', real_unlink)
+    assert store.retry_purges(media_id) == []
+    assert not (store.root / media_id / 'source.mp3').exists()

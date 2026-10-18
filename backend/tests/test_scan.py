@@ -345,17 +345,26 @@ def test_frame_walk_starts_after_an_extended_header(tmp_path: Path):
     assert scan.scan_audio(path).reason_code == "invalid_audio_format"
 
 
-def test_unsynchronised_id3v23_tag_is_accepted(tmp_path: Path):
-    payload = b"\x00\xff\xe0abc"  # a text frame whose bytes need unsynchronisation
-    frame = _minimal_frame(b"TXXX", payload)
-    on_disk = frame.replace(b"\xff\xe0", b"\xff\x00\xe0")
-    n = len(on_disk)
-    size = bytes(((n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F))
+def test_unsynchronised_id3v23_tag_is_accepted_only_when_ffmpeg_reads_the_same_frames(tmp_path: Path):
+    def synchsafe(n):
+        return bytes(((n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F))
     path = tmp_path / "unsync.mp3"
-    path.write_bytes(b"ID3\x03\x00\x80" + size + on_disk + MPEG_FRAME)
+    # Flag set, nothing to decode: both readings agree and the tag is accepted.
+    plain = _minimal_frame(b"TXXX", b"\x00plain text") + _minimal_frame(b"TALB", b"\x00album")
+    path.write_bytes(b"ID3\x03\x00\x80" + synchsafe(len(plain)) + plain + MPEG_FRAME)
     assert scan.scan_audio(path).ok is True
-    # The same bytes without the unsynchronisation flag are a misaligned frame list.
-    path.write_bytes(b"ID3\x03\x00\x00" + size + on_disk + MPEG_FRAME)
+    # A payload that unsynchronisation actually changed: the specification reads one six-byte TXXX
+    # frame, ffmpeg reads six raw bytes and then a misaligned frame. The readings disagree, so the
+    # tag is rejected rather than letting ffmpeg parse frames the gate never validated.
+    payload = b"\x00\xff\xe0abc"
+    on_disk = _minimal_frame(b"TXXX", payload).replace(b"\xff\xe0", b"\xff\x00\xe0")
+    path.write_bytes(b"ID3\x03\x00\x80" + synchsafe(len(on_disk)) + on_disk + MPEG_FRAME)
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+    # ffmpeg's reading would hide an APIC frame the specification reading shows: rejected.
+    apic = _minimal_frame(b"APIC", b"\x00image/jpeg\x00\x03\x00\xff\xd8\xff\xd9")
+    text = _minimal_frame(b"TXXX", b"\x00" + b"\xff" * 10)
+    body = text.replace(b"\xff", b"\xff\x00") + apic
+    path.write_bytes(b"ID3\x03\x00\x80" + synchsafe(len(body)) + body + MPEG_FRAME)
     assert scan.scan_audio(path).reason_code == "invalid_audio_format"
 
 
@@ -412,6 +421,12 @@ def test_footer_flag_is_honoured_only_for_id3v24(tmp_path: Path):
     assert scan.scan_audio(path).ok is True
     path.write_bytes(v24 + hidden + _mpeg_frames(2))
     assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+    # Positive cases pin the rule at both sites: a v2.3 header with bit 0x10 is not shortened by ten
+    # bytes, so audio or a good tag directly after it is read where ffmpeg reads it.
+    path.write_bytes(flagged_v23 + _mpeg_frames(2))
+    assert scan.scan_audio(path).ok is True
+    path.write_bytes(flagged_v23 + good_second + _mpeg_frames(2))
+    assert scan.scan_audio(path).ok is True
 
 
 def _mpeg_frames(count: int) -> bytes:

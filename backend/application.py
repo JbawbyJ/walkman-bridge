@@ -330,16 +330,20 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
     async def artwork(media_id: str):
         ticket = admit('artwork_stream')
         def read_artwork():
+            def refused(current):
+                info = current['artifacts'].get('artwork')
+                return (current.get('artwork_status') != 'ready' or info is None or info.get('purged')
+                        or current['artifacts']['source'].get('purged'))
             with store.lease(media_id) as record:
-                if record.get('artwork_status') != 'ready' or 'artwork' not in record['artifacts']:
+                if refused(record):
                     raise HTTPException(404, 'No cleared artwork for this track')
                 path = store.path(record, 'artwork')
                 with locked_read(path, store.root) as stream:
                     # Re-read under the file lock: a threat purge may have committed after the snapshot.
                     fresh = store.get(media_id)
-                    info = fresh['artifacts'].get('artwork')
-                    if fresh.get('artwork_status') != 'ready' or info is None or info.get('purged'):
+                    if refused(fresh):
                         raise HTTPException(404, 'No cleared artwork for this track')
+                    info = fresh['artifacts']['artwork']
                     if not scanner.clearance_valid(path, info.get('scan') or {}):
                         store.update(media_id, artwork_status='needs_scan')
                         raise HTTPException(423, 'Artwork needs Defender clearance')
@@ -396,7 +400,8 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
             # Re-read under the file lock: a threat purge may have committed after the lease snapshot.
             record = store.get(media_id)
             info = record['artifacts'].get(artifact)
-            if info is None or info.get('purged') or record.get('playback') != artifact:
+            if (info is None or info.get('purged') or record.get('playback') != artifact
+                    or record['artifacts']['source'].get('purged')):
                 raise HTTPException(423, 'Defender clearance is required; rescan this item')
             clearance = info.get('scan')
             if not clearance or not scanner.clearance_valid(path, clearance):

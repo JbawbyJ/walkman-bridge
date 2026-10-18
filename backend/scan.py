@@ -381,33 +381,45 @@ def _validate_id3(tag: bytes) -> bool:
     """
     version = tag[3]
     body = tag[10:-10] if version == 4 and tag[5] & 0x10 else tag[10:]
+    extended = bool(tag[5] & 0x40)
     if version in (2, 3) and tag[5] & 0x80:
-        # ID3v2.2/2.3 unsynchronisation applies to the whole tag body: a zero byte was inserted
-        # after every 0xFF. Frame headers describe the decoded bytes, so decode before walking.
-        body = body.replace(b"\xff\x00", b"\xff")
+        # The ID3v2.2/2.3 specification unsynchronises the whole tag body (a zero byte inserted
+        # after every 0xFF), so frame headers describe the decoded bytes. ffmpeg instead walks
+        # frame headers over the raw bytes and decodes only each frame's contents. Both readings
+        # are validated and the tag is accepted only when they agree frame for frame, so ffmpeg can
+        # never parse a frame sequence this gate did not see.
+        by_specification = _id3_frames(body.replace(b"\xff\x00", b"\xff"), version, extended, decode_payloads=False)
+        by_ffmpeg = _id3_frames(body, version, extended, decode_payloads=True)
+        return by_specification is None or by_ffmpeg is None or by_specification != by_ffmpeg
+    return _id3_frames(body, version, extended, decode_payloads=False) is None
+
+
+def _id3_frames(body: bytes, version: int, extended: bool, *, decode_payloads: bool) -> list[tuple[bytes, bytes]] | None:
+    """Frame identifiers and contents of a tag body, or None when the frame list is malformed."""
     end = len(body)
     cursor = 0
-    if tag[5] & 0x40:
+    if extended:
         if end < 4:
-            return True
+            return None
         try:
             ext_size = _synchsafe(body[:4]) if version == 4 else int.from_bytes(body[:4], "big") + 4
         except ValueError:
-            return True
+            return None
         if ext_size < 4 or ext_size > end:
-            return True
+            return None
         cursor = ext_size
     header_size = 6 if version == 2 else 10
     id_size = 3 if version == 2 else 4
+    frames: list[tuple[bytes, bytes]] = []
     while cursor < end:
         if body[cursor] == 0:
             # Padding may only follow the last frame; any later non-zero byte is malformed.
-            return body.count(0, cursor) != end - cursor
+            return frames if body.count(0, cursor) == end - cursor else None
         if end - cursor < header_size:
-            return True
+            return None
         frame_id = body[cursor:cursor + id_size]
         if not all(48 <= byte <= 57 or 65 <= byte <= 90 for byte in frame_id):
-            return True
+            return None
         try:
             if version == 2:
                 frame_size = int.from_bytes(body[cursor + 3:cursor + 6], "big")
@@ -416,14 +428,18 @@ def _validate_id3(tag: bytes) -> bool:
             else:
                 frame_size = int.from_bytes(body[cursor + 4:cursor + 8], "big")
         except ValueError:
-            return True
+            return None
         payload_start = cursor + header_size
         if frame_size <= 0 or payload_start + frame_size > end:
-            return True
-        if frame_id in {b"APIC", b"PIC"} and not _valid_apic(body[payload_start:payload_start + frame_size], version):
-            return True
+            return None
+        payload = body[payload_start:payload_start + frame_size]
+        if decode_payloads:
+            payload = payload.replace(b"\xff\x00", b"\xff")
+        if frame_id in {b"APIC", b"PIC"} and not _valid_apic(payload, version):
+            return None
+        frames.append((frame_id, payload))
         cursor = payload_start + frame_size
-    return False
+    return frames
 
 
 def _find_terminator(payload: bytes, start: int, encoding: int) -> int:
