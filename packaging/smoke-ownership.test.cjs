@@ -13,3 +13,11 @@ test('installed smoke cleanup preserves unrelated reused PIDs', t => {
   assert.ifError(result.error)
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
 })
+
+test('native smoke handle reads self identity and closes without termination', { skip: process.platform !== 'win32' }, () => {
+  const result = spawnSync('pwsh', ['-NoProfile', '-File', path.join(__dirname, 'smoke-install.handle.test.ps1')], {
+    encoding: 'utf8', windowsHide: true, timeout: 20000,
+  })
+  assert.ifError(result.error)
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+})

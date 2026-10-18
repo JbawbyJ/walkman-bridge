@@ -196,15 +196,19 @@ function Write-SmokeDiagnostics {
         Write-Host ("App log missing: {0}" -f (Hide-SmokePath $LogPath))
     }
 }
+function Open-SmokeProcessHandle {
+    param([int]$ProcessId)
+    if (-not ('WalkmanSmoke.ProcessHandle' -as [type])) {
+        Add-Type -LiteralPath (Join-Path $PSScriptRoot 'SmokeProcessHandle.cs') -ErrorAction Stop
+    }
+    return [WalkmanSmoke.ProcessHandle]::Open($ProcessId)
+}
 function Get-SmokeStopSkip {
-    param($Item, $SmokeStart, [int]$RootProcessId = 0)
+    param($Item, $SmokeStart, $LiveStart, [int]$RootProcessId = 0)
     $processId = [int]$Item.ProcessId
-    try { $live = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId={0}" -f $processId) -ErrorAction Stop) }
-    catch { throw "Win32_Process query failed: $($_.Exception.Message)" }
-    $liveStart = if ($live) { ConvertTo-SmokeInstant $live[0].CreationDate } else { $null }
+    $liveStart = ConvertTo-SmokeInstant $LiveStart
     $recorded = ConvertTo-SmokeInstant $Item.CreationDate
     $name = [string]$Item.Name
-    if (-not $live) { return "Skip pid=$processId name=$name; process is no longer running" }
     if (-not $recorded -or -not $liveStart -or -not (ConvertTo-SmokeInstant $SmokeStart)) {
         return "Skip pid=$processId name=$name; process identity is unknown"
     }
@@ -212,7 +216,8 @@ function Get-SmokeStopSkip {
         return "Skip pid=$processId name=$name; PID no longer belongs to the launched smoke root"
     }
     $currentText = if ($liveStart) { $liveStart.ToString('o') } else { 'unknown' }
-    if ($recorded -and $liveStart -and ($recorded.Ticks -ne $liveStart.Ticks)) {
+    # CIM exposes microseconds; the pinned native FILETIME can retain 100 ns.
+    if ([Math]::Abs(($recorded - $liveStart).Ticks) -ge 10) {
         return "Skip pid=$processId name=$name; PID reused (recorded start $($recorded.ToString('o')), current start $currentText)"
     }
     if (Test-SmokeStartedBefore $liveStart $SmokeStart) {
@@ -251,12 +256,14 @@ function Stop-SmokeLeftovers {
         }
         if ($leaves.Count -eq 0) { foreach ($item in @($pending)) { [void]$leaves.Add($item) } }
         foreach ($item in @($leaves)) {
-            $skip = Get-SmokeStopSkip -Item $item -SmokeStart $smokeStart -RootProcessId $smokeProcessId
-            if ($skip) { Write-Host $skip }
-            else {
-                try { Stop-Process -Id ([int]$item.ProcessId) -Force -ErrorAction Stop }
-                catch { Write-Host "Could not terminate pid=$($item.ProcessId): $($_.Exception.Message)" }
-            }
+            $handle = $null
+            try {
+                $handle = Open-SmokeProcessHandle -ProcessId ([int]$item.ProcessId)
+                $skip = Get-SmokeStopSkip -Item $item -SmokeStart $smokeStart -LiveStart $handle.CreationTimeUtc -RootProcessId $smokeProcessId
+                if ($skip) { Write-Host $skip }
+                else { $handle.Terminate() }
+            } catch { Write-Host "Could not verify or terminate pid=$($item.ProcessId): $($_.Exception.Message)" }
+            finally { if ($null -ne $handle) { $handle.Dispose() } }
             for ($index = $pending.Count - 1; $index -ge 0; $index--) {
                 if ([int]$pending[$index].ProcessId -eq [int]$item.ProcessId) { $pending.RemoveAt($index) }
             }

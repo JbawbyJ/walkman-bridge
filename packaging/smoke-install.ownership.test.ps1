@@ -18,7 +18,16 @@ function Get-CimInstance {
 }
 function Stop-Process {
     param([int]$Id, [switch]$Force, $ErrorAction)
-    [void]$script:Stopped.Add($Id)
+    throw 'Cleanup must never terminate through a fresh PID lookup'
+}
+function Open-SmokeProcessHandle {
+    param([int]$ProcessId)
+    $row = @($script:Snapshot | Where-Object { [int]$_.ProcessId -eq $ProcessId })[0]
+    if (-not $row) { throw 'Fixture process is no longer running' }
+    $handle = [pscustomobject]@{ CreationTimeUtc = $row.CreationDate; ProcessId = $ProcessId }
+    $handle | Add-Member -MemberType ScriptMethod -Name Terminate -Value { [void]$script:Stopped.Add($this.ProcessId) }
+    $handle | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
+    return $handle
 }
 function ProcessRow([int]$Id, [int]$Parent, $Created, [string]$Path = 'C:\unrelated\app.exe') {
     [pscustomobject]@{ Name = 'fixture.exe'; ProcessId = $Id; ParentProcessId = $Parent;
@@ -72,5 +81,77 @@ $rejected = $false
 try { Get-SmokeProcesses -RootProcessId 32100 -OwnedPath $ownedPath -SmokeStart $null | Out-Null }
 catch { $rejected = $true }
 if (-not $rejected) { throw 'Discovery substituted the current PID occupant for missing launch identity' }
+
+# The PID changes occupants between validation and termination. A pinned handle
+# must continue to identify the checked process, never reopen its numeric PID.
+$script:Original = ProcessRow 32101 32100 $started.AddSeconds(1)
+$script:Replacement = ProcessRow 32101 999 $started.AddSeconds(90)
+$script:CurrentOccupant = $script:Original
+$script:Terminated = [System.Collections.Generic.List[object]]::new()
+$script:Disposed = 0
+function Get-CimInstance {
+    param($ClassName, $Filter, $ErrorAction)
+    $checked = $script:CurrentOccupant
+    $script:CurrentOccupant = $script:Replacement
+    return $checked
+}
+function Stop-Process {
+    param([int]$Id, [switch]$Force, $ErrorAction)
+    [void]$script:Terminated.Add($script:CurrentOccupant)
+}
+function Open-SmokeProcessHandle {
+    param([int]$ProcessId)
+    $opened = $script:CurrentOccupant
+    $script:CurrentOccupant = $script:Replacement
+    $handle = [pscustomobject]@{ CreationTimeUtc = $opened.CreationDate; Target = $opened }
+    $handle | Add-Member -MemberType ScriptMethod -Name Terminate -Value { [void]$script:Terminated.Add($this.Target) }
+    $handle | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $script:Disposed++ }
+    return $handle
+}
+Stop-SmokeLeftovers -Processes @($script:Original) -Process $null -SmokeStart $started
+if ($script:Terminated.Count -ne 1 -or -not [object]::ReferenceEquals($script:Terminated[0], $script:Original)) {
+    throw 'Cleanup reopened a numeric PID after checking its identity and terminated the replacement'
+}
+if ($script:Disposed -ne 1) { throw 'Cleanup did not release its pinned process handle' }
+
+# A replacement already present when OpenProcess runs fails identity validation,
+# and even rejected handles must be disposed.
+$script:Terminated.Clear()
+$script:Disposed = 0
+$script:CurrentOccupant = $script:Replacement
+Stop-SmokeLeftovers -Processes @($script:Original) -Process $null -SmokeStart $started
+if ($script:Terminated.Count -ne 0 -or $script:Disposed -ne 1) { throw 'Replacement handle was not rejected and disposed' }
+
+# Win32_Process timestamps have microsecond precision; native FILETIME can have
+# a sub-microsecond remainder. It still identifies the original process.
+$script:CurrentOccupant = ProcessRow 32101 32100 $script:Original.CreationDate.AddTicks(7)
+$script:Terminated.Clear()
+Stop-SmokeLeftovers -Processes @($script:Original) -Process $null -SmokeStart $started
+if ($script:Terminated.Count -ne 1) { throw 'CIM timestamp precision rejected the original native process handle' }
+
+# Opening, reading identity, and terminating may fail independently. None may
+# fall back to PID termination, and every opened handle must be released.
+foreach ($failure in @('open', 'identity', 'terminate')) {
+    $script:FailurePoint = $failure
+    $script:Disposed = 0
+    $script:Terminated.Clear()
+    function Open-SmokeProcessHandle {
+        param([int]$ProcessId)
+        if ($script:FailurePoint -eq 'open') { throw 'Access denied (fixture)' }
+        $handle = [pscustomobject]@{}
+        $handle | Add-Member -MemberType ScriptProperty -Name CreationTimeUtc -Value {
+            if ($script:FailurePoint -eq 'identity') { throw 'Cannot query process (fixture)' }
+            return $script:Original.CreationDate
+        }
+        $handle | Add-Member -MemberType ScriptMethod -Name Terminate -Value { throw 'Cannot terminate process (fixture)' }
+        $handle | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $script:Disposed++ }
+        return $handle
+    }
+    Stop-SmokeLeftovers -Processes @($script:Original) -Process $null -SmokeStart $started
+    $expectedDisposals = if ($failure -eq 'open') { 0 } else { 1 }
+    if ($script:Terminated.Count -ne 0 -or $script:Disposed -ne $expectedDisposals) {
+        throw "Failure at $failure leaked a handle or fell back to a PID lookup"
+    }
+}
 
 Write-Host 'Smoke ownership regressions passed (mock process APIs only).'
