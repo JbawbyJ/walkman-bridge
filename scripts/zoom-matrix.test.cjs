@@ -6,6 +6,7 @@ const { spawn, spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const path = require('node:path')
 const test = require('node:test')
+require('../frontend/tests/zoom-matrix-viewport.test.cjs')
 
 const budget = require('../frontend/tests/zoom-matrix-budget.cjs')
 const root = path.resolve(__dirname, '..')

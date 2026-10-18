@@ -37,6 +37,27 @@ function Test-SmokeStartedBefore($LiveStart, $SmokeStart) {
     # Process.StartTime can sit a fraction of a millisecond after Win32_Process.CreationDate.
     return $live -lt $smoke.AddMilliseconds(-1)
 }
+function Test-SmokeRootIdentity($LiveStart, $SmokeStart) {
+    $live = ConvertTo-SmokeInstant $LiveStart
+    $smoke = ConvertTo-SmokeInstant $SmokeStart
+    if (-not $live -or -not $smoke) { return $false }
+    # The launch Process.StartTime and CIM may round differently. A later PID
+    # occupant must never become the root of an allegedly owned process tree.
+    return [Math]::Abs(($live - $smoke).TotalMilliseconds) -le 1
+}
+function Get-SmokeRootExitTime {
+    param($Process, $SmokeStart)
+    # The launch Process keeps its original handle open through cleanup. Read
+    # that object, never reopen a departed root by its numeric PID.
+    if (-not $Process) { return $null }
+    try {
+        $Process.Refresh()
+        if (-not $Process.HasExited -or -not (Test-SmokeRootIdentity $Process.StartTime $SmokeStart)) { return $null }
+        $exited = ConvertTo-SmokeInstant $Process.ExitTime
+        if ($exited -and $exited -ge (ConvertTo-SmokeInstant $SmokeStart)) { return $exited }
+    } catch { }
+    return $null
+}
 function Copy-OwnedProcess($Item) {
     [pscustomobject]@{
         Name = [string]$Item.Name
@@ -85,7 +106,9 @@ function Hide-SmokePath([string]$Text) {
     return $Text
 }
 function Get-SmokeProcesses {
-    param([int]$RootProcessId, [string]$OwnedPath, $SmokeStart)
+    param([int]$RootProcessId, [string]$OwnedPath, $SmokeStart, $RootProcess)
+    $smokeStart = ConvertTo-SmokeInstant $SmokeStart
+    if ($RootProcessId -gt 0 -and -not $smokeStart) { throw 'Cannot verify smoke root identity: launch time is missing.' }
     try { $snapshot = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop) }
     catch { throw "Win32_Process query failed: $($_.Exception.Message)" }
     $byId = @{}
@@ -96,6 +119,13 @@ function Get-SmokeProcesses {
         $parentKey = [string][int]$item.ParentProcessId
         if (-not $childrenOf.ContainsKey($parentKey)) { $childrenOf[$parentKey] = [System.Collections.Generic.List[object]]::new() }
         [void]$childrenOf[$parentKey].Add($item)
+    }
+    # Read the retained launch object after taking the snapshot: the parent
+    # can exit while CIM is being queried, before discovery sees its children.
+    $rootExit = $null
+    if ($RootProcess) {
+        if ([int]$RootProcess.Id -ne $RootProcessId) { throw 'Smoke root process does not match the requested PID.' }
+        $rootExit = Get-SmokeRootExitTime -Process $RootProcess -SmokeStart $smokeStart
     }
     $found = [System.Collections.Generic.List[object]]::new()
     $seen = @{}
@@ -109,31 +139,42 @@ function Get-SmokeProcesses {
         if ($byId.ContainsKey($current)) {
             $copied = Copy-OwnedProcess $byId[$current]
             $keep = $true
-            if ([int]$copied.ProcessId -ne $RootProcessId) {
+            if ([int]$copied.ProcessId -eq $RootProcessId) {
+                $keep = Test-SmokeRootIdentity $copied.CreationDate $smokeStart
+            } else {
                 $parentKey = [string][int]$copied.ParentProcessId
                 $parentStart = $null
                 if ($byId.ContainsKey($parentKey)) { $parentStart = ConvertTo-SmokeInstant $byId[$parentKey].CreationDate }
+                elseif ([int]$copied.ParentProcessId -eq $RootProcessId -and $rootExit) { $parentStart = $smokeStart }
                 # A reused PID is older than its supposed parent. Real children start with or after the parent.
                 if (-not $parentStart -or -not $copied.CreationDate -or ($copied.CreationDate -lt $parentStart)) { $keep = $false }
+                # A child born after the original root exited belongs to a
+                # later occupant of that PID, even if that occupant also exited.
+                if ([int]$copied.ParentProcessId -eq $RootProcessId -and $rootExit -and $copied.CreationDate -gt $rootExit) { $keep = $false }
             }
             if ($keep) { [void]$found.Add($copied) }
+        } elseif ([int]$current -eq $RootProcessId -and $rootExit) {
+            # CIM no longer lists the original root. Its retained handle's
+            # lifetime still authenticates direct children, then their trees.
+            $keep = $true
         }
         if ($keep -and $childrenOf.ContainsKey($current)) {
             foreach ($child in $childrenOf[$current]) { $pending.Enqueue([string][int]$child.ProcessId) }
         }
     }
-    $smokeStart = ConvertTo-SmokeInstant $SmokeStart
-    if (-not $smokeStart -and $RootProcessId -gt 0 -and $byId.ContainsKey([string]$RootProcessId)) {
-        $smokeStart = ConvertTo-SmokeInstant $byId[[string]$RootProcessId].CreationDate
-    }
-    $owned = if ($OwnedPath) { $OwnedPath.TrimEnd('\') } else { '' }
+    $owned = if ($OwnedPath) { [System.IO.Path]::GetFullPath($OwnedPath).Replace('/', '\').TrimEnd('\') + '\' } else { '' }
     if ($owned -and $smokeStart) {
         foreach ($item in $snapshot) {
             $idKey = [string][int]$item.ProcessId
             if ($seen.ContainsKey($idKey)) { continue }
-            $command = [string]$item.CommandLine
             $executablePath = [string]$item.ExecutablePath
-            $ownedHit = ($command -and $command.IndexOf($owned, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or ($executablePath -and $executablePath.IndexOf($owned, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+            # An argument may merely name a log in this run (e.g. an editor).
+            # Only an executable beneath the exact owned directory is a fallback.
+            $ownedHit = $false
+            if ($executablePath) {
+                try { $ownedHit = [System.IO.Path]::GetFullPath($executablePath).Replace('/', '\').StartsWith($owned, [System.StringComparison]::OrdinalIgnoreCase) }
+                catch { $ownedHit = $false }
+            }
             $itemStart = ConvertTo-SmokeInstant $item.CreationDate
             if ($ownedHit -and $itemStart -and -not (Test-SmokeStartedBefore $itemStart $smokeStart)) {
                 [void]$found.Add((Copy-OwnedProcess $item)); $seen[$idKey] = $true
@@ -148,7 +189,9 @@ function Test-SmokeTreeClear {
     $rootId = if ($Process) { [int]$Process.Id } else { 0 }
     if ($Process -and -not $Process.HasExited) { return $false }
     if (-not $SmokeStart) { $SmokeStart = $script:SmokeStart }
-    $extras = @(Get-SmokeProcesses -RootProcessId $rootId -OwnedPath $OwnedPath -SmokeStart $SmokeStart | Where-Object { [int]$_.ProcessId -ne $rootId })
+    $rootExit = Get-SmokeRootExitTime -Process $Process -SmokeStart $SmokeStart
+    if ($Process -and -not $rootExit) { throw 'Cannot verify the exited smoke root lifetime.' }
+    $extras = @(Get-SmokeProcesses -RootProcessId $rootId -OwnedPath $OwnedPath -SmokeStart $SmokeStart -RootProcess $Process | Where-Object { [int]$_.ProcessId -ne $rootId })
     return ($extras.Count -eq 0)
 }
 function Wait-SmokeShutdown {
@@ -188,17 +231,28 @@ function Write-SmokeDiagnostics {
         Write-Host ("App log missing: {0}" -f (Hide-SmokePath $LogPath))
     }
 }
+function Open-SmokeProcessHandle {
+    param([int]$ProcessId)
+    if (-not ('WalkmanSmoke.ProcessHandle' -as [type])) {
+        Add-Type -LiteralPath (Join-Path $PSScriptRoot 'SmokeProcessHandle.cs') -ErrorAction Stop
+    }
+    return [WalkmanSmoke.ProcessHandle]::Open($ProcessId)
+}
 function Get-SmokeStopSkip {
-    param($Item, $SmokeStart)
+    param($Item, $SmokeStart, $LiveStart, [int]$RootProcessId = 0)
     $processId = [int]$Item.ProcessId
-    try { $live = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId={0}" -f $processId) -ErrorAction Stop) }
-    catch { throw "Win32_Process query failed: $($_.Exception.Message)" }
-    $liveStart = if ($live) { ConvertTo-SmokeInstant $live[0].CreationDate } else { $null }
+    $liveStart = ConvertTo-SmokeInstant $LiveStart
     $recorded = ConvertTo-SmokeInstant $Item.CreationDate
     $name = [string]$Item.Name
-    if (-not $live) { return "Skip pid=$processId name=$name; process is no longer running" }
+    if (-not $recorded -or -not $liveStart -or -not (ConvertTo-SmokeInstant $SmokeStart)) {
+        return "Skip pid=$processId name=$name; process identity is unknown"
+    }
+    if ($processId -eq $RootProcessId -and -not (Test-SmokeRootIdentity $liveStart $SmokeStart)) {
+        return "Skip pid=$processId name=$name; PID no longer belongs to the launched smoke root"
+    }
     $currentText = if ($liveStart) { $liveStart.ToString('o') } else { 'unknown' }
-    if ($recorded -and $liveStart -and ($recorded.Ticks -ne $liveStart.Ticks)) {
+    # CIM exposes microseconds; the pinned native FILETIME can retain 100 ns.
+    if ([Math]::Abs(($recorded - $liveStart).Ticks) -ge 10) {
         return "Skip pid=$processId name=$name; PID reused (recorded start $($recorded.ToString('o')), current start $currentText)"
     }
     if (Test-SmokeStartedBefore $liveStart $SmokeStart) {
@@ -215,23 +269,17 @@ function Stop-SmokeLeftovers {
     $smokeProcessId = if ($Process) { [int]$Process.Id } else { 0 }
     $smokeStart = ConvertTo-SmokeInstant $SmokeStart
     if (-not $smokeStart) { $smokeStart = ConvertTo-SmokeInstant $script:SmokeStart }
-    if (-not $smokeStart) {
-        foreach ($item in @($pending)) {
-            if ($smokeProcessId -and [int]$item.ProcessId -eq $smokeProcessId -and $item.CreationDate) { $smokeStart = ConvertTo-SmokeInstant $item.CreationDate; break }
-        }
-    }
+    if (-not $smokeStart -and $Process) { try { $smokeStart = $Process.StartTime.ToUniversalTime() } catch { } }
     if ($Process -and -not $Process.HasExited -and $smokeProcessId -ne $PID) {
         if (-not @($pending | Where-Object { [int]$_.ProcessId -eq $smokeProcessId })) {
             try { $liveRoot = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId={0}" -f $smokeProcessId) -ErrorAction Stop) }
             catch { throw "Win32_Process query failed: $($_.Exception.Message)" }
             if ($liveRoot) {
                 $copied = Copy-OwnedProcess $liveRoot[0]
-                [void]$pending.Add($copied)
-                if (-not $smokeStart) { $smokeStart = $copied.CreationDate }
+                if (Test-SmokeRootIdentity $copied.CreationDate $smokeStart) { [void]$pending.Add($copied) }
             }
         }
     }
-    if (-not $smokeStart -and $Process) { try { $smokeStart = $Process.StartTime.ToUniversalTime() } catch { } }
     while ($pending.Count -gt 0) {
         $leaves = [System.Collections.Generic.List[object]]::new()
         foreach ($item in @($pending)) {
@@ -243,12 +291,14 @@ function Stop-SmokeLeftovers {
         }
         if ($leaves.Count -eq 0) { foreach ($item in @($pending)) { [void]$leaves.Add($item) } }
         foreach ($item in @($leaves)) {
-            $skip = Get-SmokeStopSkip -Item $item -SmokeStart $smokeStart
-            if ($skip) { Write-Host $skip }
-            else {
-                try { Stop-Process -Id ([int]$item.ProcessId) -Force -ErrorAction Stop }
-                catch { Write-Host "Could not terminate pid=$($item.ProcessId): $($_.Exception.Message)" }
-            }
+            $handle = $null
+            try {
+                $handle = Open-SmokeProcessHandle -ProcessId ([int]$item.ProcessId)
+                $skip = Get-SmokeStopSkip -Item $item -SmokeStart $smokeStart -LiveStart $handle.CreationTimeUtc -RootProcessId $smokeProcessId
+                if ($skip) { Write-Host $skip }
+                else { $handle.Terminate() }
+            } catch { Write-Host "Could not verify or terminate pid=$($item.ProcessId): $($_.Exception.Message)" }
+            finally { if ($null -ne $handle) { $handle.Dispose() } }
             for ($index = $pending.Count - 1; $index -ge 0; $index--) {
                 if ([int]$pending[$index].ProcessId -eq [int]$item.ProcessId) { $pending.RemoveAt($index) }
             }
@@ -260,7 +310,7 @@ function Publish-SmokeHang {
     param($Process, $SmokeStart)
     if (-not $SmokeStart) { $SmokeStart = $script:SmokeStart }
     $rootId = if ($Process) { [int]$Process.Id } else { 0 }
-    $remaining = @(Get-SmokeProcesses -RootProcessId $rootId -OwnedPath $Run -SmokeStart $SmokeStart)
+    $remaining = @(Get-SmokeProcesses -RootProcessId $rootId -OwnedPath $Run -SmokeStart $SmokeStart -RootProcess $Process)
     if (-not $script:DiagnosticsWritten) {
         Write-SmokeDiagnostics -Processes $remaining -LogPath $Log -Process $Process
         $script:DiagnosticsWritten = $true

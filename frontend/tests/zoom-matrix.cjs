@@ -8,6 +8,7 @@ const http = require('node:http')
 const fs = require('node:fs')
 const path = require('node:path')
 const { PRODUCTS, ZOOM_FACTORS, WINDOW_SIZES, HARNESS_MS, isExpectedNotRun } = require('./zoom-matrix-budget.cjs')
+const { waitForViewport } = require('./zoom-matrix-viewport.cjs')
 
 // Same percentages and window sizes as frontend/tests/resize-smoke.cjs.
 // 640×560 at 200% is the 320 CSS-pixel width named in docs/DESIGN.md.
@@ -243,8 +244,7 @@ async function main() {
         }
         win.setContentSize(width, height)
         win.webContents.setZoomFactor(scale)
-        await delay(80)
-        await evaluate(win, 'new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+        const convergence = await waitForViewport(win, width, height, scale)
         const applied = await win.webContents.getZoomFactor()
         const summary = await evaluate(win, geometry)
         const dialog = await dialogCheck(win)
@@ -253,6 +253,7 @@ async function main() {
         const expectedCssWidth = width / scale
         const expectedCssHeight = height / scale
         const reasons = cellOk(mode, summary, dialog)
+        if (!convergence.converged) reasons.push(`viewport did not converge within ${convergence.timeoutMs}ms; last CSS viewport ${JSON.stringify(convergence.viewport)}, zoom ${convergence.appliedZoom}`)
         if (Math.abs(applied - scale) > 0.02) reasons.push(`zoom factor ${applied} instead of ${scale}`)
         if (Math.abs(cssWidth - expectedCssWidth) > CSS_TOLERANCE_PX) reasons.push(`CSS width ${cssWidth} is outside ${expectedCssWidth}`)
         if (Math.abs(cssHeight - expectedCssHeight) > CSS_TOLERANCE_PX) reasons.push(`CSS height ${cssHeight} is outside ${expectedCssHeight}`)
@@ -263,6 +264,7 @@ async function main() {
           zoom: scale,
           status: reasons.length === 0 ? 'passed' : 'failed',
           cssViewport: summary.viewport,
+          viewportConvergence: convergence,
           ok: reasons.length === 0,
         }
         if (reasons.length) cell.reasons = reasons
