@@ -39,6 +39,10 @@ Severity reflects impact on the scanner's security goal; every item below fails 
 | 7 | Very low | `backend/scan.py:409`, `DefenderScanner.cs:27` | Platform-folder fallback picks `MpCmdRun.exe` by lexicographic folder order while `_query_defender_registry_status` orders numerically (`scan.py:502`). When two same-month revisions coexist (probe: `4.18.25080.5-0` vs `4.18.25080.11-0`) the executable chosen is the older revision while the reported platform version is the newer one. The primary `Program Files` candidate normally wins first, so this only affects the fallback. | Reuse `_version_key` (and an equivalent in C#) for the fallback ordering. |
 | 8 | Informational | `backend/application.py:391`, `backend/scan.py:208` | Every stream request, including each HTTP range request issued by the media element while seeking, re-hashes the full file (up to 500 MiB) and re-queries Windows Security Center plus the registry and the service manager. This is the intended re-verification, but it is a measurable per-seek latency on large WAV files. | If needed, cache the digest per open read lock (the share-mode lock already guarantees the bytes cannot change while held) and cache the status query for a few seconds. |
 
+## Remediation applied after this review
+
+Findings 1 and 2 were fixed on the same branch. `backend/scan.py` now treats `MpCmdRun` exit code 2 as `defender_threat` regardless of output text, the text pattern is the single-line phrase `found N threats` in both `scan.py` and `Protocol.cs`, and `_validate_id3` walks frames with an integer cursor. A differential check of the old and new validators on 80,000 generated tags found no divergence; the 2 MiB packed-frame input dropped from 13.4 s to about 0.2 s. Regression tests cover the localized exit-2 case, the clean-output-with-"threat"-in-path case, the snapshot counters, padding and malformation rules, v2.2/v2.4 headers and the timing bound. The `Protocol.cs` change is a regex literal only and was not compiled here; the Windows CI job builds and tests the helper. Findings 3 to 8 remain open.
+
 ## Evidence executed here
 
 | Check | Result | Notes |

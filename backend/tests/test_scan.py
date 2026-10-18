@@ -76,7 +76,10 @@ def test_defender_receives_absolute_path(monkeypatch, tmp_path: Path):
 @pytest.mark.parametrize(
     ("outcome", "state", "code", "defender_status"),
     [
-        (SimpleNamespace(returncode=2, stdout="Threat found", stderr=""), "BLOCKED", "defender_threat", "threat"),
+        (SimpleNamespace(returncode=2, stdout="Scanning C:\\x\\source.mp3 found 1 threats.", stderr=""), "BLOCKED", "defender_threat", "threat"),
+        # Localized Windows: exit code 2 is authoritative even when no English phrase appears.
+        (SimpleNamespace(returncode=2, stdout="Analyse terminée.", stderr=""), "BLOCKED", "defender_threat", "threat"),
+        (SimpleNamespace(returncode=0, stdout="Scanning C:\\x\\source.mp3 found 3 threats.", stderr=""), "BLOCKED", "defender_threat", "threat"),
         (SimpleNamespace(returncode=5, stdout="", stderr="Access is denied"), "AWAITING_PERMISSION", "defender_elevation_required", "elevation_required"),
         (SimpleNamespace(returncode=9, stdout="error", stderr=""), "ERROR", "defender_scan_error", "error"),
     ],
@@ -104,8 +107,9 @@ def test_missing_defender_is_error_not_clear(monkeypatch, tmp_path: Path):
 
 @pytest.mark.parametrize('outcome,expected', [
     (SimpleNamespace(returncode=0, stdout='Scan finished.', stderr=''), 'CLEAN'),
-    (SimpleNamespace(returncode=2, stdout='Threat found', stderr=''), 'BLOCKED'),
-    (SimpleNamespace(returncode=2, stdout='Scanning error', stderr=''), 'ERROR'),
+    (SimpleNamespace(returncode=2, stdout='found 1 threats.', stderr=''), 'BLOCKED'),
+    (SimpleNamespace(returncode=2, stdout='Scanning error', stderr=''), 'BLOCKED'),
+    (SimpleNamespace(returncode=9, stdout='Scanning error', stderr=''), 'ERROR'),
     (None, 'ERROR'),
 ])
 def test_generated_artwork_requires_its_own_explicit_defender_verdict(monkeypatch, tmp_path, outcome, expected):
@@ -225,3 +229,84 @@ def test_snapshot_reports_capability_and_rows(tmp_path: Path):
     assert snapshot["rows"][0]["state"] == "CLEAN"
     assert snapshot["rows"][0]["reason_code"] == "clean"
     assert snapshot["rows"][0]["media_id"] == "0123456789abcdef0123456789abcdef"
+
+
+CLEAN_OUTPUT_WITH_THREAT_IN_PATH = (
+    "Scan starting...\nScan finished.\n"
+    "Scanning C:\\Users\\Threat Lab\\AppData\\Local\\Walkman Bridge\\cache\\"
+    "0123456789abcdef0123456789abcdef\\source.mp3 found no threats.\n"
+)
+
+
+def test_clean_scan_of_a_path_naming_threats_stays_clean(monkeypatch, tmp_path: Path):
+    path = tmp_path / "song.mp3"
+    path.write_bytes(_mp3_stub())
+    monkeypatch.setattr(scan, "_invoke_defender",
+                        lambda _path: SimpleNamespace(returncode=0, stdout=CLEAN_OUTPUT_WITH_THREAT_IN_PATH, stderr=""))
+    result = scan.scan_audio(path)
+    assert result.ok is True
+    assert result.state == "CLEAN"
+    assert scan.snapshot()["threats"] == 0
+
+
+def test_exit_code_two_is_counted_as_a_threat_without_english_output(monkeypatch, tmp_path: Path):
+    path = tmp_path / "song.mp3"
+    path.write_bytes(_mp3_stub())
+    monkeypatch.setattr(scan, "_invoke_defender",
+                        lambda _path: SimpleNamespace(returncode=2, stdout="Überprüfung abgeschlossen.", stderr=""))
+    result = scan.scan_audio(path)
+    assert result.ok is False
+    assert (result.state, result.reason_code, result.defender_status) == ("BLOCKED", "defender_threat", "threat")
+    snapshot = scan.snapshot()
+    assert snapshot["threats"] == 1 and snapshot["blocked"] == 1 and snapshot["cleared"] == 0
+
+
+def _id3v23_tag(frames: bytes, padding: bytes = b"") -> bytes:
+    n = len(frames) + len(padding)
+    size = bytes(((n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F))
+    return b"ID3\x03\x00\x00" + size + frames + padding
+
+
+def _minimal_frame(frame_id: bytes = b"TXXX", payload: bytes = b"\x00") -> bytes:
+    return frame_id + len(payload).to_bytes(4, "big") + b"\x00\x00" + payload
+
+
+def test_frame_walk_is_linear_for_a_tag_packed_with_tiny_frames(tmp_path: Path):
+    import time
+    frame = _minimal_frame()
+    count = (scan.MAX_TAG_BYTES - 1024) // len(frame)
+    path = tmp_path / "packed.mp3"
+    path.write_bytes(_id3v23_tag(frame * count) + MPEG_FRAME)
+    started = time.perf_counter()
+    result = scan.scan_audio(path)
+    elapsed = time.perf_counter() - started
+    assert result.ok is True, result.reason
+    # The former per-frame body re-slicing took over ten seconds for this input.
+    assert elapsed < 5.0, f"ID3 frame walk took {elapsed:.1f}s for {count} frames"
+
+
+@pytest.mark.parametrize("frames, padding, malformed", [
+    (_minimal_frame() * 3, b"\x00" * 64, False),            # padding after the last frame is valid
+    (_minimal_frame() * 3, b"\x00" * 8 + b"\x01", True),    # non-zero byte inside padding
+    (_minimal_frame()[:-1], b"", True),                      # truncated final frame
+    (_minimal_frame(b"tx1x"), b"", True),                    # lowercase frame id
+    (_minimal_frame(b"TXXX", b""), b"", True),               # zero-length frame
+])
+def test_frame_walk_preserves_padding_and_malformation_rules(tmp_path: Path, frames, padding, malformed):
+    path = tmp_path / "frames.mp3"
+    path.write_bytes(_id3v23_tag(frames, padding) + MPEG_FRAME)
+    result = scan.scan_audio(path)
+    assert result.ok is (not malformed)
+    if malformed:
+        assert result.reason_code == "invalid_audio_format"
+
+
+def test_frame_walk_handles_v22_and_v24_headers(tmp_path: Path):
+    v22_frame = b"TT2" + (1).to_bytes(3, "big") + b"\x00"
+    v22 = b"ID3\x02\x00\x00" + bytes((0, 0, 0, len(v22_frame))) + v22_frame + MPEG_FRAME
+    v24_frame = b"TIT2" + bytes((0, 0, 0, 1)) + b"\x00\x00" + b"\x00"
+    v24 = b"ID3\x04\x00\x00" + bytes((0, 0, 0, len(v24_frame))) + v24_frame + MPEG_FRAME
+    for content in (v22, v24):
+        path = tmp_path / "versions.mp3"
+        path.write_bytes(content)
+        assert scan.scan_audio(path).ok is True

@@ -30,7 +30,11 @@ _EXT_FAMILY = {
 }
 _MP4_BRANDS = {b"M4A ", b"M4B ", b"M4P ", b"mp41", b"mp42", b"isom", b"iso2", b"mp71"}
 _DENIED = re.compile(r"access\s+is\s+denied|access\s+denied|requires?\s+elevation|error\s*740|0x80070005", re.I)
-_THREAT = re.compile(r"\bthreat(?:s)?\b.*\b(?:found|detected)\b|\bfound\s+[1-9]\d*\s+threat", re.I | re.S)
+# MpCmdRun exit code 2 is Microsoft's documented "threats found" result and is authoritative.
+# The text form is a secondary signal only; it is deliberately a single-line phrase so that a
+# scanned path containing the word "threat" can never make clean output read as a detection.
+_THREAT = re.compile(r"\bfound\s+[1-9]\d*\s+threats?\b", re.I)
+_THREAT_EXIT_CODE = 2
 
 
 class ScanError(RuntimeError):
@@ -179,7 +183,7 @@ def _scan(path: Path, pid: str, *, artwork=False) -> ScanResult:
         return _result(pid, ok=False, state="ERROR", reason="Microsoft Defender is unavailable", reason_code="defender_unavailable", defender_status="unavailable", fingerprint=fingerprint)
 
     blob = f"{invocation.stdout or ''}\n{invocation.stderr or ''}"
-    if _THREAT.search(blob):
+    if invocation.returncode == _THREAT_EXIT_CODE or _THREAT.search(blob):
         return _result(pid, ok=False, state="BLOCKED", reason="Microsoft Defender reported a threat", reason_code="defender_threat", defender_status="threat", fingerprint=fingerprint)
     if _DENIED.search(blob) or invocation.returncode in {5, 740}:
         return _result(pid, ok=False, state="AWAITING_PERMISSION", reason="Microsoft Defender requires elevation for this file", reason_code="defender_elevation_required", defender_status="elevation_required", fingerprint=fingerprint)
@@ -312,38 +316,51 @@ def _validate_artwork_format(path: Path, size: int) -> str | None:
 
 
 def _validate_id3(tag: bytes) -> bool:
+    """Return True when the tag is malformed.
+
+    This runs on untrusted bytes before Defender, so it walks the frame list with an
+    integer cursor: no per-frame copy of the remaining body, linear in the tag size.
+    """
     version = tag[3]
     body = tag[10:-10] if tag[5] & 0x10 else tag[10:]
+    end = len(body)
+    cursor = 0
     if tag[5] & 0x40:
-        if len(body) < 4:
+        if end < 4:
             return True
         try:
             ext_size = _synchsafe(body[:4]) if version == 4 else int.from_bytes(body[:4], "big") + 4
         except ValueError:
             return True
-        if ext_size < 4 or ext_size > len(body):
+        if ext_size < 4 or ext_size > end:
             return True
-        body = body[ext_size:]
+        cursor = ext_size
     header_size = 6 if version == 2 else 10
     id_size = 3 if version == 2 else 4
-    while body:
-        if all(byte == 0 for byte in body):
-            return False
-        if len(body) < header_size:
+    while cursor < end:
+        if body[cursor] == 0:
+            # Padding may only follow the last frame; any later non-zero byte is malformed.
+            return body.count(0, cursor) != end - cursor
+        if end - cursor < header_size:
             return True
-        frame_id = body[:id_size]
+        frame_id = body[cursor:cursor + id_size]
         if not all(48 <= byte <= 57 or 65 <= byte <= 90 for byte in frame_id):
             return True
         try:
-            frame_size = int.from_bytes(body[3:6], "big") if version == 2 else (_synchsafe(body[4:8]) if version == 4 else int.from_bytes(body[4:8], "big"))
+            if version == 2:
+                frame_size = int.from_bytes(body[cursor + 3:cursor + 6], "big")
+            elif version == 4:
+                frame_size = _synchsafe(body[cursor + 4:cursor + 8])
+            else:
+                frame_size = int.from_bytes(body[cursor + 4:cursor + 8], "big")
         except ValueError:
             return True
-        if frame_size <= 0 or header_size + frame_size > len(body):
+        payload_start = cursor + header_size
+        if frame_size <= 0 or payload_start + frame_size > end:
             return True
-        payload = body[header_size:header_size + frame_size]
-        if frame_id in {b"APIC", b"PIC"} and not _valid_apic(payload, version):
+        if frame_id in {b"APIC", b"PIC"} and not _valid_apic(body[payload_start:payload_start + frame_size], version):
             return True
-        body = body[header_size + frame_size:]
+        cursor = payload_start + frame_size
     return False
 
 

@@ -69,7 +69,9 @@ public static partial class Protocol
     private static partial Regex HashPattern();
     [GeneratedRegex("access\\s+is\\s+denied|access\\s+denied|0x80070005", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex AccessDeniedPattern();
-    [GeneratedRegex("\\bthreat(?:s)?\\b.*\\b(?:found|detected)\\b|\\bfound\\s+[1-9]\\d*\\s+threat", RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant)]
+    // Exit code 2 is the authoritative threat signal; this single-line phrase is secondary and
+    // cannot be satisfied by a scanned path that merely contains the word "threat".
+    [GeneratedRegex("\\bfound\\s+[1-9]\\d*\\s+threats?\\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ThreatPattern();
 
     public static void ValidateRequest(ScanRequest request, int helperPid)
