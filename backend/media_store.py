@@ -225,6 +225,25 @@ class MediaStore:
                 record = self.update(media_id, artifacts=record['artifacts'])
             return record
 
+    def refuse_artifacts(self, media_id, artifacts=None):
+        """Persist the refusal of artifacts the moment Defender reports a threat, without touching files.
+
+        A threat on the source refuses every artifact (``artifacts=None``). Playback and artwork are
+        redirected in the same atomic update, so nothing is servable while the job finishes the rest
+        of its batch; ``purge_artifact`` deletes the bytes once no read lock is held.
+        """
+        with self._lock:
+            record = self.get(media_id)
+            names = list(record['artifacts']) if artifacts is None else [name for name in artifacts if name in record['artifacts']]
+            changes = {}
+            for name in names:
+                record['artifacts'][name]['purged'] = True
+                if name == 'source' or record.get('playback') == name:
+                    changes.update(self._source_playback(record))
+                if name in ('source', 'artwork') and record.get('artwork_status') == 'ready':
+                    changes['artwork_status'] = 'failed'
+            return self.update(media_id, artifacts=record['artifacts'], **changes)
+
     def retry_purges(self, media_id):
         """Finish an interrupted or held purge: every refused entry, and every derivative of a
         refused source, is purged again; one file that is still held never blocks the others.
@@ -406,7 +425,10 @@ class MediaStore:
     def public(self, record):
         result = {k: v for k, v in record.items() if k not in ('artifacts', 'playback', 'metadata_hints', 'metadata_overrides')}
         result['scan'] = public_scan(result.get('scan'))
-        if record.get('artwork_status') == 'ready':
+        artifacts = record.get('artifacts') or {}
+        refused = (artifacts.get('source', {}).get('purged') or artifacts.get('artwork', {}).get('purged')
+                   or (artifacts.get('source', {}).get('scan') or {}).get('reason_code') == 'defender_threat')
+        if record.get('artwork_status') == 'ready' and not refused:
             result['artwork_url'] = f'/api/media/{record["id"]}/artwork'
         return result
 

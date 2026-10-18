@@ -504,3 +504,54 @@ def test_held_refused_artwork_is_regenerated_by_the_next_rescan(context, monkeyp
     assert record['artwork_status'] == 'ready' and record['artifacts']['artwork'].get('purged') is None
     assert len(extractions) == 2 and artwork.exists()
     assert 'artwork_url' in store.public(record)
+
+
+def test_threat_verdict_refuses_artwork_and_derivatives_before_the_batch_finishes(context, monkeypatch):
+    """A verdict persisted by accept_scan must refuse every artifact at once; deletion follows later."""
+    store = context.app.state.store
+    service = context.app.state.service
+    monkeypatch.setattr(media_service, 'convert_managed',
+                        lambda src, out, kind, maximum, metadata=None: out.write_bytes(b'fLaC' + b'\x00' * 8))
+    media_id = imported(context)['files'][0]['media_id']
+    assert context.client.post(f'/api/media/{media_id}/prepare', json={'format': 'flac'}).status_code == 200
+    artwork = _ready_artwork(context, media_id)
+    flac = store.root / media_id / 'playback.flac'
+    assert context.client.get(f'/api/media/{media_id}/stream').status_code == 200
+    assert context.client.get(f'/api/media/{media_id}/artwork').status_code == 200
+    verdict = dict(ok=False, state='BLOCKED', reason='Microsoft Defender reported a threat', reason_code='defender_threat',
+                   defender_status='threat', sha256=store.get(media_id)['artifacts']['source']['sha256'], size_bytes=15)
+    with pytest.raises(MediaError):
+        service.accept_scan(media_id, 'source', verdict)  # what the job does the moment Defender reports
+    record = store.get(media_id)
+    assert all(info['purged'] for info in record['artifacts'].values())
+    assert flac.exists() and artwork.exists()  # bytes are deleted only after the batch's read locks are released
+    item = next(entry for entry in context.client.get('/api/queue').json()['items'] if entry['id'] == media_id)
+    assert item['status'] == 'blocked' and 'artwork_url' not in item
+    assert context.client.get(f'/api/media/{media_id}/stream').status_code == 400
+    assert context.client.get(f'/api/media/{media_id}/artwork').status_code == 404
+
+
+def test_routes_refuse_a_purged_or_flagged_source_even_with_stale_artwork_and_playback_fields(context, monkeypatch):
+    """Defence in depth for records written before refusal became atomic."""
+    store = context.app.state.store
+    monkeypatch.setattr(media_service, 'convert_managed',
+                        lambda src, out, kind, maximum, metadata=None: out.write_bytes(b'fLaC' + b'\x00' * 8))
+    media_id = imported(context)['files'][0]['media_id']
+    assert context.client.post(f'/api/media/{media_id}/prepare', json={'format': 'flac'}).status_code == 200
+    _ready_artwork(context, media_id)
+    record = store.get(media_id)
+    assert record['playback'] == 'playback' and record['artwork_status'] == 'ready'
+    # Only the source entry is flagged; playback and artwork fields are left as a pre-fix database would have them.
+    record['artifacts']['source']['purged'] = True
+    store.update(media_id, artifacts=record['artifacts'])
+    assert context.client.get(f'/api/media/{media_id}/artwork').status_code == 404
+    assert context.client.get(f'/api/media/{media_id}/stream').status_code == 423
+    assert 'artwork_url' not in store.public(store.get(media_id))
+    # A persisted threat verdict without any purged flag is refused the same way.
+    record = store.get(media_id)
+    record['artifacts']['source']['purged'] = False
+    record['artifacts']['source']['scan'] = dict(ok=False, state='BLOCKED', reason_code='defender_threat')
+    store.update(media_id, artifacts=record['artifacts'])
+    assert context.client.get(f'/api/media/{media_id}/artwork').status_code == 404
+    assert context.client.get(f'/api/media/{media_id}/stream').status_code == 423
+    assert 'artwork_url' not in store.public(store.get(media_id))

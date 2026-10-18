@@ -183,3 +183,35 @@ def test_retrying_purges_continues_past_a_held_file(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, 'unlink', real_unlink)
     assert store.retry_purges(media_id) == []
     assert not (store.root / media_id / 'source.mp3').exists()
+
+
+def test_purging_the_source_does_not_invent_an_artwork_status(tmp_path):
+    import io
+    store = MediaStore(tmp_path / 'state.db', tmp_path / 'cache')
+    record = store.import_file('song.mp3', io.BytesIO(b'\xff\xfb\x90\x00' + b'\x00' * 64))
+    store.update(record['id'], artwork_status='none')
+    assert store.purge_artifact(record['id'], 'source')['artwork_status'] == 'none'
+
+
+def test_refusing_artifacts_persists_without_touching_files(tmp_path):
+    import io
+    store = MediaStore(tmp_path / 'state.db', tmp_path / 'cache')
+    record = store.import_file('song.mp3', io.BytesIO(b'\xff\xfb\x90\x00' + b'\x00' * 64))
+    media_id = record['id']
+    flac = store.root / media_id / 'playback.flac'
+    flac.write_bytes(b'fLaC' + b'\x00' * 8)
+    artwork = store.root / media_id / 'artwork.jpg'
+    artwork.write_bytes(b'\xff\xd8\xff\xe0fake\xff\xd9')
+    record['artifacts']['playback'] = dict(name='playback.flac', size_bytes=12, sha256='0' * 64, scan={'ok': True})
+    record['artifacts']['artwork'] = dict(name='artwork.jpg', size_bytes=10, sha256='0' * 64, scan={'ok': True})
+    store.update(media_id, artifacts=record['artifacts'], playback='playback', mime='audio/flac', artwork_status='ready')
+    refused = store.refuse_artifacts(media_id)
+    assert all(info['purged'] for info in refused['artifacts'].values())
+    assert (refused['playback'], refused['mime'], refused['artwork_status']) == ('source', 'audio/mpeg', 'failed')
+    assert flac.exists() and artwork.exists() and 'artwork_url' not in store.public(refused)
+    for artifact in ('source', 'playback', 'artwork'):
+        with pytest.raises(MediaError):
+            store.path(refused, artifact)
+    assert store.retry_purges(media_id) == []
+    assert not flac.exists() and not artwork.exists()
+    assert set(store.get(media_id)['artifacts']) == {'source'}

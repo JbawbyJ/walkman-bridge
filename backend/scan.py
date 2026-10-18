@@ -399,10 +399,21 @@ def _id3_frames(body: bytes, version: int, extended: bool, *, decode_payloads: b
     end = len(body)
     cursor = 0
     if extended:
-        if end < 4:
+        if version == 2 or end < 4:
+            # ID3v2.2 defines bit 6 as compression, which the specification says to ignore and
+            # ffmpeg does not skip; the gate rejects rather than walk a different frame list.
             return None
         try:
-            ext_size = _synchsafe(body[:4]) if version == 4 else int.from_bytes(body[:4], "big") + 4
+            if version == 4:
+                ext_size = _synchsafe(body[:4])
+            else:
+                # The specification reads the ID3v2.3 extended-header size as a plain 32-bit
+                # integer; ffmpeg reads it with 7 bits per byte. Accept only sizes both read alike,
+                # which every legitimate value (6 or 10) satisfies, so the frame walk starts where
+                # ffmpeg's does and nothing can hide in the gap between the two readings.
+                ext_size = int.from_bytes(body[:4], "big") + 4
+                if _synchsafe(body[:4]) + 4 != ext_size:
+                    return None
         except ValueError:
             return None
         if ext_size < 4 or ext_size > end:

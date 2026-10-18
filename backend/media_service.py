@@ -89,6 +89,10 @@ class MediaService:
             self.store.update(media_id, artifacts=record['artifacts'], artwork_status=status)
         else:
             self.store.update(media_id, artifacts=record['artifacts'], status=status, scan=result)
+        if result.get('reason_code') == 'defender_threat':
+            # Refuse the bytes the moment Defender reports, before the rest of the batch is processed;
+            # purge_threats deletes them once every read lock has been released.
+            self.store.refuse_artifacts(media_id, None if artifact == 'source' else [artifact])
         if job:
             job.update_file(media_id, state=status, scan=result,
                             reason_code=result.get('reason_code'), detail=result.get('reason', ''))

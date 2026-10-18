@@ -332,8 +332,9 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
         def read_artwork():
             def refused(current):
                 info = current['artifacts'].get('artwork')
+                source = current['artifacts']['source']
                 return (current.get('artwork_status') != 'ready' or info is None or info.get('purged')
-                        or current['artifacts']['source'].get('purged'))
+                        or source.get('purged') or (source.get('scan') or {}).get('reason_code') == 'defender_threat')
             with store.lease(media_id) as record:
                 if refused(record):
                     raise HTTPException(404, 'No cleared artwork for this track')
@@ -400,8 +401,9 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
             # Re-read under the file lock: a threat purge may have committed after the lease snapshot.
             record = store.get(media_id)
             info = record['artifacts'].get(artifact)
+            source = record['artifacts']['source']
             if (info is None or info.get('purged') or record.get('playback') != artifact
-                    or record['artifacts']['source'].get('purged')):
+                    or source.get('purged') or (source.get('scan') or {}).get('reason_code') == 'defender_threat'):
                 raise HTTPException(423, 'Defender clearance is required; rescan this item')
             clearance = info.get('scan')
             if not clearance or not scanner.clearance_valid(path, clearance):

@@ -345,6 +345,32 @@ def test_frame_walk_starts_after_an_extended_header(tmp_path: Path):
     assert scan.scan_audio(path).reason_code == "invalid_audio_format"
 
 
+def test_extended_header_size_must_read_alike_for_the_specification_and_ffmpeg(tmp_path: Path):
+    """ffmpeg reads the ID3v2.3 extended-header size with 7 bits per byte; the specification uses 32."""
+    def synchsafe(n):
+        return bytes(((n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F))
+    hidden = _minimal_frame(b"APIC", b"\x00image/jpeg-without-terminator") + _minimal_frame(b"TIT2", b"\x00HIDDEN")
+    visible = _minimal_frame(b"TALB", b"\x00visible")
+    path = tmp_path / "extended.mp3"
+    for size_bytes, gate_skip, ffmpeg_skip in ((b"\x00\x00\x01\x00", 260, 132), (b"\x00\x00\x00\x8a", 142, 14)):
+        # The gate used to start at gate_skip while ffmpeg starts at ffmpeg_skip: frames in between
+        # were parsed by ffmpeg and never validated. Both such tags are now rejected outright.
+        gap = b"\x00" * (ffmpeg_skip - 4) + hidden
+        gap += b"\x00" * (gate_skip - 4 - len(gap))
+        body = size_bytes + gap + visible + b"\x00" * 8
+        path.write_bytes(b"ID3\x03\x00\x40" + synchsafe(len(body)) + body + MPEG_FRAME)
+        assert scan.scan_audio(path).reason_code == "invalid_audio_format", size_bytes.hex()
+    # The two legitimate sizes read alike and are accepted.
+    for extended in ((6).to_bytes(4, "big") + b"\x00" * 6, (10).to_bytes(4, "big") + b"\x00" * 10):
+        body = extended + visible
+        path.write_bytes(b"ID3\x03\x00\x40" + synchsafe(len(body)) + body + MPEG_FRAME)
+        assert scan.scan_audio(path).ok is True
+    # ID3v2.2 has no extended header (bit 6 is compression); ffmpeg does not skip anything there.
+    v22 = b"TT2" + (5).to_bytes(3, "big") + b"\x00abcd"
+    path.write_bytes(b"ID3\x02\x00\x40" + synchsafe(len(v22)) + v22 + MPEG_FRAME)
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+
+
 def test_unsynchronised_id3v23_tag_is_accepted_only_when_ffmpeg_reads_the_same_frames(tmp_path: Path):
     def synchsafe(n):
         return bytes(((n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F))
@@ -364,6 +390,20 @@ def test_unsynchronised_id3v23_tag_is_accepted_only_when_ffmpeg_reads_the_same_f
     apic = _minimal_frame(b"APIC", b"\x00image/jpeg\x00\x03\x00\xff\xd8\xff\xd9")
     text = _minimal_frame(b"TXXX", b"\x00" + b"\xff" * 10)
     body = text.replace(b"\xff", b"\xff\x00") + apic
+    path.write_bytes(b"ID3\x03\x00\x80" + synchsafe(len(body)) + body + MPEG_FRAME)
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+    # Both readings valid but with different contents (FF 00 41 read as "FF 41" by ffmpeg and as
+    # "FF 41 00" by the specification): the frame lists must be compared by content, not only by id.
+    body = b"TXXX" + (3).to_bytes(4, "big") + b"\x00\x00" + b"\xff\x00\x41" + b"\x00" * 16
+    path.write_bytes(b"ID3\x03\x00\x80" + synchsafe(len(body)) + body + MPEG_FRAME)
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+    # A two-byte payload FF 00: ffmpeg decodes it to one byte, the specification keeps two.
+    body = b"TXXX" + (2).to_bytes(4, "big") + b"\x00\x00" + b"\xff\x00" + b"\x00" * 16
+    path.write_bytes(b"ID3\x03\x00\x80" + synchsafe(len(body)) + body + MPEG_FRAME)
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+    # An unsynchronised byte inside a frame header (size 255 written as FF 00): the specification
+    # decodes the header, ffmpeg reads it raw, so the readings disagree and the tag is rejected.
+    body = b"TXXX" + b"\x00\x00\x00\xff\x00" + b"\x00\x00" + b"\x41" * 255 + b"\x00" * 16
     path.write_bytes(b"ID3\x03\x00\x80" + synchsafe(len(body)) + body + MPEG_FRAME)
     assert scan.scan_audio(path).reason_code == "invalid_audio_format"
 
