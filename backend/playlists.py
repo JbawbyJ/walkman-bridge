@@ -277,20 +277,27 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
         return await mutate('delete', request, playlist_id=playlist_id)
 
     @app.get('/api/device/playlist-recovery/inspect')
-    async def inspect_playlist_journal():
+    async def inspect_playlist_journal(response: Response):
         volume = await asyncio.to_thread(identity)
         ticket = admit('device_read', volume)
         def read():
             with coordinator.device_session(ticket) as mount:
-                return device_api.inspect_playlist_journal(mount)
+                journal = device_api.inspect_playlist_journal(mount)
+                return journal, journal_etag(volume, journal)
         try:
-            return await asyncio.to_thread(read)
+            journal, etag = await asyncio.to_thread(read)
+            response.headers['ETag'] = etag
+            return journal
         except RuntimeError as exc:
             raise HTTPException(409, read_fatal_detail(exc)) from exc
         finally:
             coordinator.finish(ticket)
 
-    async def recover_or_repair(action):
+    def journal_etag(volume, journal):
+        value = json.dumps([volume.volume_id, journal], sort_keys=True, separators=(',', ':')).encode()
+        return '"' + hashlib.sha256(value).hexdigest() + '"'
+
+    async def recover_or_repair(action, request):
         volume = await asyncio.to_thread(identity)
         job_id = uuid.uuid4().hex
         ticket = admit('playlist_' + action, volume, job_id)
@@ -306,6 +313,11 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
 
         def write():
             with coordinator.device_session(ticket) as mount:
+                # Every recovery confirmation is bound to the inspected journal
+                # and physical volume, rechecked while holding the device session.
+                journal = device_api.inspect_playlist_journal(mount)
+                if journal.get('guarded') is not True or journal_etag(volume, journal) != expected:
+                    raise HTTPException(409, 'Device or recovery journal changed, or engine needs updating; inspect again')
                 if action == 'repair':
                     # Always list. A stale non-empty cache must not skip the empty-library refusal.
                     rows = device_api.list_tracks(mount)
@@ -324,6 +336,7 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
             job.set_status(JobStatus.DONE, 'Playlist ' + action + ' finished')
             return result
         try:
+            expected = expected_etag(request)
             job = jobs.create(job_id, 1, kind='playlist_' + action)
             job.set_files([dict(file_id=job_id, name='Playlist ' + action, volume_id=volume.volume_id, state='queued')])
             result = await asyncio.to_thread(write)
@@ -381,9 +394,9 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
             coordinator.finish(ticket)
 
     @app.post('/api/device/playlist-recovery/recover')
-    async def recover_playlist_journal():
-        return await recover_or_repair('recover')
+    async def recover_playlist_journal(request: Request):
+        return await recover_or_repair('recover', request)
 
     @app.post('/api/device/playlist-recovery/repair')
-    async def repair_playlists():
-        return await recover_or_repair('repair')
+    async def repair_playlists(request: Request):
+        return await recover_or_repair('repair', request)

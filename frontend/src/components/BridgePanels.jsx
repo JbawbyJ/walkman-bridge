@@ -61,7 +61,7 @@ export function JobPanel({ job, pollingError }) {
     {!finished && <progress aria-label="Operation progress" aria-valuetext={percent === null ? undefined : `${percent} percent`} value={progress} max="1" />}
     <span className="visually-hidden" aria-live="polite">{bucket}</span>
     <p role="status">{pollingError || job.message || 'Waiting for operation update'}</p>
-    {job.needs_reconcile && <p className="reconcile-warning" role="status">Device state needs verification. Refresh the ledger before any retry.</p>}
+    {job.needs_reconcile && <p className="reconcile-warning" role="status">Device state needs verification. Open Walkman → Device recovery to inspect and acknowledge the state before any manual retry.</p>}
     <details className="job-details" key={`${job.job_id}:${finished}`}><summary>Operation details{job.files?.length ? ` · ${job.files.length} files` : ''}</summary>
       <div className="job-files">{(job.files || []).map((file, i) => <div key={file.file_id || `${file.media_id}-${i}`}><span title={file.detail || file.scan?.reason}>{file.name || 'Unnamed file'}</span><Status state={file.state} />{file.detail && <small>{file.detail}</small>}{file.state === 'awaiting_permission' && <small>Respond to the Windows permission prompt to continue.</small>}</div>)}</div>
       {job.log_tail?.length > 0 && <details className="diagnostics"><summary>Operation log</summary><pre>{job.log_tail.join('\n')}</pre></details>}

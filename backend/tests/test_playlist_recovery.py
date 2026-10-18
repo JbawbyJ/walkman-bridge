@@ -1,7 +1,7 @@
 """Playlist recovery endpoints driven by the fake shim (SHIM_CMD_PREFIX).
 
 Present `state` / `outcome` values are passed through from `playlistJournal`.
-Missing and unknown values stay null. Message text is never a substitute.
+Missing and unknown summaries fail closed. Message text is never a substitute.
 Repair summary ids are JSON numbers and come back as strings. A final `done`
 event is required.
 """
@@ -34,7 +34,7 @@ CODES = (
 RECOVERY_BY_CODE = {
     'PLAYLIST_REF_MISSING': 'repair',
     'PLAYLIST_JOURNAL_PENDING': 'inspect_recover',
-    'PLAYLIST_SLOTS_EXHAUSTED': 'free_slots',
+    'PLAYLIST_SLOTS_EXHAUSTED': 'reuse_playlist',
     'PLAYLIST_LIBRARY_NOT_LOADED': 'reconnect_retry',
     'DEVICE_ROLLBACK_FAILED': 'inspect_recover',
     'DEVICE_FILE_LOCKED': 'close_and_retry',
@@ -56,12 +56,63 @@ def bind_script(context, monkeypatch, events, exit_code=0):
     context.api.repair_playlists = jsymphonic.repair_playlists
 
 
+def recovery_headers(context):
+    """Confirm a valid inspection before exercising a separate mutation result.
+
+    Keep the inspector installed for the whole test, including concurrent writes.
+    Inspection-specific tests use their real shim instead of this helper.
+    """
+    context.api.inspect_playlist_journal = lambda mount: {
+        'state': 'none', 'exists': False, 'covers': {'files': []},
+        'fingerprint': None, 'library_fingerprint': 'a' * 64, 'guarded': True,
+    }
+    inspected = context.client.get(INSPECT)
+    assert inspected.status_code == 200, inspected.text
+    assert inspected.json()['guarded'] is True
+    return {'If-Match': inspected.headers['etag']}
+
+
+@pytest.mark.parametrize('path', [RECOVER, REPAIR])
+@pytest.mark.parametrize('headers', [{}, {'If-Match': ''}])
+def test_recovery_requires_if_match_before_inspection_or_write(context, path, headers):
+    inspected, written = [], []
+    context.api.inspect_playlist_journal = lambda mount: inspected.append(mount)
+    context.api.recover_playlist_journal = lambda mount: written.append(mount) or {'outcome': 'none'}
+    context.api.repair_playlists = lambda mount: written.append(mount) or {
+        'pruned_count': 0, 'pruned_track_ids': [], 'playlist_ids': []}
+
+    response = context.client.post(path, headers=headers)
+
+    assert response.status_code == 428, response.text
+    assert inspected == written == []
+    assert context.calls['list'] == 0
+    assert context.app.state.jobs.latest() is None
+    assert context.client.get('/api/engine-busy').json()['busy'] is False
+
+
+@pytest.mark.parametrize('path', [RECOVER, REPAIR])
+def test_recovery_refuses_unverified_engine_even_with_current_etag(context, monkeypatch, path):
+    use_fake(monkeypatch, context, 'playlist_inspect_none')
+    inspected = context.client.get(INSPECT)
+    assert inspected.status_code == 200, inspected.text
+    assert inspected.json()['guarded'] is False
+    written = []
+    context.api.recover_playlist_journal = lambda mount: written.append(mount)
+    context.api.repair_playlists = lambda mount: written.append(mount)
+
+    response = context.client.post(path, headers={'If-Match': inspected.headers['etag']})
+
+    assert response.status_code == 409, response.text
+    assert written == []
+    assert context.calls['list'] == 0
+    job = context.app.state.jobs.latest()
+    assert job.needs_reconcile is False
+    assert job.files[0]['state'] == 'failed'
+
+
 @pytest.mark.parametrize('scenario, state, exists', [
     ('playlist_inspect_committed', 'committed', True),
-    ('playlist_inspect_uncommitted', 'uncommitted', True),
     ('playlist_inspect_none', 'none', False),
-    ('playlist_inspect_missing', None, None),
-    ('playlist_inspect_unknown', None, None),
 ])
 def test_inspect_state_comes_only_from_the_state_field(context, monkeypatch, scenario, state, exists):
     use_fake(monkeypatch, context, scenario)
@@ -83,9 +134,10 @@ def test_inspect_covers_come_from_journal_files(context, monkeypatch):
 
 
 @pytest.mark.parametrize('scenario', ['playlist_inspect_missing', 'playlist_inspect_uncommitted', 'playlist_inspect_unknown'])
-def test_inspect_without_a_string_file_list_has_null_covers(context, monkeypatch, scenario):
+def test_inspect_without_valid_summary_is_rejected(context, monkeypatch, scenario):
     use_fake(monkeypatch, context, scenario)
-    assert context.client.get(INSPECT).json()['covers'] is None
+    assert context.client.get(INSPECT).status_code == 409
+    assert context.app.state.jobs.latest() is None
 
 
 def test_inspect_none_passes_an_empty_file_list(context, monkeypatch):
@@ -110,12 +162,10 @@ def test_step_state_does_not_hide_a_journal_state(monkeypatch):
     ('playlist_recover_rolled_forward', 'rolled_forward'),
     ('playlist_recover_discarded', 'discarded'),
     ('playlist_recover_none', 'none'),
-    ('playlist_recover_missing', None),
-    ('playlist_recover_unknown', None),
 ])
 def test_recover_outcome_comes_only_from_the_outcome_field(context, monkeypatch, scenario, outcome):
     use_fake(monkeypatch, context, scenario)
-    response = context.client.post(RECOVER)
+    response = context.client.post(RECOVER, headers=recovery_headers(context))
     assert response.status_code == 200, response.text
     assert response.json()['outcome'] == outcome
     assert response.json()['ok'] is True
@@ -123,7 +173,7 @@ def test_recover_outcome_comes_only_from_the_outcome_field(context, monkeypatch,
 
 def test_repair_zero_pruned_is_visible(context, monkeypatch):
     use_fake(monkeypatch, context, 'playlist_repair_zero')
-    response = context.client.post(REPAIR)
+    response = context.client.post(REPAIR, headers=recovery_headers(context))
     assert response.status_code == 200, response.text
     body = response.json()
     assert body['ok'] is True
@@ -135,26 +185,31 @@ def test_repair_zero_pruned_is_visible(context, monkeypatch):
 
 def test_repair_normalizes_numeric_summary_ids(context, monkeypatch):
     use_fake(monkeypatch, context, 'playlist_repair_some')
-    body = context.client.post(REPAIR).json()
+    body = context.client.post(REPAIR, headers=recovery_headers(context)).json()
     assert body['pruned_count'] == 2
     assert body['pruned_track_ids'] == ['3']
     assert body['playlist_ids'] == ['1']
     assert body['pruned_count'] > len(body['pruned_track_ids'])
 
 
-def test_repair_missing_count_stays_unknown(context, monkeypatch):
-    use_fake(monkeypatch, context, 'playlist_repair_missing')
-    body = context.client.post(REPAIR).json()
-    assert body['ok'] is True
-    assert body['pruned_count'] is None
-    assert body['pruned_track_ids'] is None
-    assert body['playlist_ids'] is None
+@pytest.mark.parametrize('scenario, route', [
+    ('playlist_repair_missing', REPAIR),
+    ('playlist_recover_missing', RECOVER),
+    ('playlist_recover_unknown', RECOVER),
+])
+def test_incomplete_mutation_summary_preserves_unknown_outcome(context, monkeypatch, scenario, route):
+    use_fake(monkeypatch, context, scenario)
+    response = context.client.post(route, headers=recovery_headers(context))
+    assert response.status_code == 409, response.text
+    job = context.app.state.jobs.latest()
+    assert job.needs_reconcile
+    assert job.files[0]['state'] == 'unknown'
 
 
 def test_repair_empty_mount_fatal_is_library_not_loaded(context, monkeypatch):
     use_fake(monkeypatch, context, 'playlist_repair_empty_mount')
     assert context.client.get('/api/tracks').status_code == 200
-    response = context.client.post(REPAIR)
+    response = context.client.post(REPAIR, headers=recovery_headers(context))
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
     assert detail['code'] == 'library_not_loaded'
@@ -173,7 +228,7 @@ def test_repair_empty_mount_fatal_is_library_not_loaded(context, monkeypatch):
 def test_repair_refuses_an_empty_track_list_before_the_shim(context, monkeypatch):
     context.tracks.clear()
     use_fake(monkeypatch, context, 'playlist_repair_some')
-    response = context.client.post(REPAIR)
+    response = context.client.post(REPAIR, headers=recovery_headers(context))
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
     assert detail['code'] == 'library_not_loaded'
@@ -193,7 +248,7 @@ def test_repair_lists_again_when_the_cache_is_stale(context, monkeypatch):
     context.tracks.clear()
     repaired = []
     context.api.repair_playlists = lambda mount: repaired.append(mount)
-    response = context.client.post(REPAIR)
+    response = context.client.post(REPAIR, headers=recovery_headers(context))
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
     assert detail['code'] == 'library_not_loaded'
@@ -210,7 +265,7 @@ def test_repair_refreshes_a_cached_empty_list_before_refusing(context, monkeypat
     assert context.client.get('/api/tracks').json() == []
     use_fake(monkeypatch, context, 'playlist_repair_zero')
     context.tracks.append({'id': '1', 'title': 'Track', 'artist': 'A', 'album': 'B'})
-    response = context.client.post(REPAIR)
+    response = context.client.post(REPAIR, headers=recovery_headers(context))
     assert response.status_code == 200, response.text
     assert context.calls['list'] == 2
 
@@ -222,7 +277,7 @@ def test_repair_surfaces_a_listing_failure_and_does_not_repair(context):
     context.api.list_tracks = fail
     repaired = []
     context.api.repair_playlists = lambda mount: repaired.append(mount)
-    response = context.client.post(REPAIR)
+    response = context.client.post(REPAIR, headers=recovery_headers(context))
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
     assert detail['message'] == 'device list failed'
@@ -254,7 +309,7 @@ def test_successful_mutation_clears_the_track_cache(context, monkeypatch, scenar
     client = context.client
     assert client.get('/api/tracks').status_code == 200
     assert context.calls['list'] == 1
-    result = client.post(path)
+    result = client.post(path, headers=recovery_headers(context))
     assert result.status_code == 200, result.text
     job = client.get('/api/jobs/' + result.json()['job_id']).json()
     assert job['status'] == 'done' and job['needs_reconcile'] is False
@@ -306,7 +361,7 @@ def test_mutation_passes_fatal_code_on_the_write_error(context, monkeypatch, pat
     if code is not None:
         event['code'] = code
     bind_script(context, monkeypatch, [event], 1)
-    response = context.client.post(path)
+    response = context.client.post(path, headers=recovery_headers(context))
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
     assert detail['code'] == 'verify_device_state'
@@ -332,6 +387,8 @@ def test_commands_use_device_flag_and_inspect_is_the_read_switch(monkeypatch, tm
     code = (
         'import json,sys,pathlib; '
         f'pathlib.Path({str(record)!r}).write_text(json.dumps(sys.argv[1:])); '
+        'print(json.dumps({"event":"playlistJournal","state":"none","files":[],"outcome":"none"}), flush=True); '
+        'print(json.dumps({"event":"playlistRepair","prunedCount":0,"prunedTrackIds":[],"playlistIds":[]}), flush=True); '
         'print(json.dumps({"event":"done"}), flush=True)'
     )
     monkeypatch.setattr(jsymphonic, 'SHIM_CMD_PREFIX', [sys.executable, '-c', code])
@@ -384,7 +441,7 @@ def test_probe_pending_warning_line_is_emitted_whole():
 ])
 def test_file_fatal_action_comes_from_the_endpoint(context, monkeypatch, path, scenario, reconcile, action, detail_code, file_state):
     use_fake(monkeypatch, context, scenario)
-    response = context.client.post(path)
+    response = context.client.post(path, headers=recovery_headers(context))
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
     if scenario == 'playlist_file_locked':
@@ -411,7 +468,7 @@ def test_locked_action_ignores_message_text(context, monkeypatch):
         'path': 'OMGAUDIO/10F00/10000001.OMA',
     }
     bind_script(context, monkeypatch, [committed], 1)
-    repair = context.client.post(REPAIR)
+    repair = context.client.post(REPAIR, headers=recovery_headers(context))
     assert repair.status_code == 409, repair.text
     repair_detail = repair.json()['detail']
     assert repair_detail['recovery_action'] == 'close_and_retry'
@@ -425,7 +482,7 @@ def test_locked_action_ignores_message_text(context, monkeypatch):
         'path': 'OMGAUDIO/10F00/10000001.OMA',
     }
     bind_script(context, monkeypatch, [untouched], 1)
-    recover = context.client.post(RECOVER)
+    recover = context.client.post(RECOVER, headers=recovery_headers(context))
     assert recover.status_code == 409, recover.text
     recover_detail = recover.json()['detail']
     assert recover_detail['fatal_code'] == 'DEVICE_FILE_LOCKED'
@@ -496,7 +553,7 @@ def test_locked_file_without_a_string_path_omits_fatal_path(context, monkeypatch
         'code': 'DEVICE_FILE_LOCKED',
         'path': {'file': 'OMGAUDIO/10F00/1000.mp3'},
     }], 1)
-    response = context.client.post(REPAIR)
+    response = context.client.post(REPAIR, headers=recovery_headers(context))
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
     assert detail['fatal_code'] == 'DEVICE_FILE_LOCKED'
@@ -510,7 +567,7 @@ def test_locked_file_without_a_string_path_omits_fatal_path(context, monkeypatch
 
 def test_rollback_failure_needs_reconcile(context, monkeypatch):
     use_fake(monkeypatch, context, 'playlist_rollback_failed')
-    response = context.client.post(REPAIR)
+    response = context.client.post(REPAIR, headers=recovery_headers(context))
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
     event = json.loads(ROLLBACK_FATAL_LINE)
@@ -586,7 +643,7 @@ def test_exit_zero_without_done_is_not_success(monkeypatch, call, reconcile):
 @pytest.mark.parametrize('path', [RECOVER, REPAIR])
 def test_mutation_without_done_needs_reconcile(context, monkeypatch, path):
     bind_script(context, monkeypatch, [{'event': 'playlistJournal', 'outcome': 'discarded', 'state': 'uncommitted'}])
-    response = context.client.post(path)
+    response = context.client.post(path, headers=recovery_headers(context))
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
     assert detail['code'] == 'verify_device_state'
@@ -675,12 +732,13 @@ def test_concurrent_recovery_requests_do_not_interleave(context, monkeypatch, tm
     context.api.list_tracks = jsymphonic.list_tracks
     context.api.recover_playlist_journal = jsymphonic.recover_playlist_journal
     context.api.repair_playlists = jsymphonic.repair_playlists
+    headers = recovery_headers(context)
     responses = []
     barrier = threading.Barrier(2)
 
     def post():
         barrier.wait(5)
-        responses.append(context.client.post(path))
+        responses.append(context.client.post(path, headers=headers))
 
     threads = [threading.Thread(target=post) for _ in range(2)]
     for thread in threads:
@@ -728,7 +786,7 @@ def test_probe_fatals_need_reconcile(context, monkeypatch, path, line, action):
     event = json.loads(line)
     scenario = 'playlist_probe_restore_failed' if event['code'] == 'DEVICE_PROBE_RESTORE_FAILED' else 'playlist_probe_conflict'
     use_fake(monkeypatch, context, scenario)
-    response = context.client.post(path)
+    response = context.client.post(path, headers=recovery_headers(context))
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
     assert detail['fatal_code'] == event['code']
@@ -753,7 +811,7 @@ def test_probe_path_markup_passes_through_unchanged(context, monkeypatch):
         'path': 'OMGAUDIO/10F00/10000001.OMA',
         'probe_path': MARKUP_PROBE_PATH,
     }], 1)
-    response = context.client.post(REPAIR)
+    response = context.client.post(REPAIR, headers=recovery_headers(context))
     assert response.status_code == 409, response.text
     detail = response.json()['detail']
     assert detail['fatal_probe_path'] == MARKUP_PROBE_PATH

@@ -106,7 +106,8 @@ binary. This document is neither the source nor that offer.
 `NOTICES.md` already says full Rust and native dependency notice
 reconciliation for Deno 2.9.5 is a publishing prerequisite and points at
 `notices/deno/README.md`. That reconciliation is still open. The
-`notices/deno/` tree is not in this checkout.
+`notices/deno/` tree is now tracked, including its recorded hashes and provenance.
+These selected notices do not complete the full dependency reconciliation.
 
 ## Not a compliance claim
 

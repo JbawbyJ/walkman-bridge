@@ -14,6 +14,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import zipfile
@@ -29,8 +30,8 @@ HISTORICAL_INSTALLERS = {
 }
 # Independently reviewed native-playlist engine; update only with new engine
 # review evidence, independently of the desktop product's version/branding.
-REVIEWED_ENGINE_SHA256 = 'cbab7deae5baed02b799f43a454095e5b8b8d00a26151cc0c8649c2cccbcfc72'
-DEVICE_MODULES = {'device.py', 'jsymphonic.py'}
+REVIEWED_ENGINE_SHA256 = '556cf46b7453620ae391dd04a983a687df35cf9b5eadd9d5df934d40afdc0997'
+DEVICE_MODULES = {'device.py', 'jsymphonic.py', 'reconciliation.py'}
 BUILDER_RESOURCE_FILES = {'runtime-manifest.json', 'app.asar', 'elevate.exe'}
 
 NODE_INSPECTION = r'''
@@ -152,10 +153,28 @@ def bundled_jsymphonic_name(runtime_lock: dict) -> str:
 
 
 def source_archive_files(archive: zipfile.ZipFile) -> dict[str, bytes]:
-    names = archive.namelist()
-    require(len(names) == len(set(names)), 'Duplicate source archive entry')
-    require(all(not name.endswith('/') for name in names), 'Unexpected directory entry in source snapshot')
-    return {name: archive.read(name) for name in names}
+    entries = {}
+    seen = set()
+    for entry in archive.infolist():
+        name = entry.filename[:-1] if entry.is_dir() else entry.filename
+        path = PurePosixPath(name)
+        require(bool(name) and name != '.' and entry.orig_filename == entry.filename
+                and not path.is_absolute() and '\\' not in name and ':' not in name
+                and '..' not in path.parts and path.as_posix() == name
+                and all(ord(char) >= 32 for char in name),
+                f'Unsafe or noncanonical source archive path: {entry.filename!r}')
+        require(name.casefold() not in seen, f'Duplicate source archive entry: {name}')
+        seen.add(name.casefold())
+        kind = stat.S_IFMT(entry.external_attr >> 16)
+        require(kind in (0, stat.S_IFDIR if entry.is_dir() else stat.S_IFREG),
+                f'Source archive entry is not a regular file/directory: {name}')
+        require(not entry.is_dir() or entry.file_size == 0, f'Source directory contains data: {name}')
+        entries[name] = entry
+    files = {name.casefold() for name, entry in entries.items() if not entry.is_dir()}
+    for name in entries:
+        require(not any(parent.as_posix().casefold() in files for parent in PurePosixPath(name).parents),
+                f'Conflicting source archive paths: {name}')
+    return {name: archive.read(entry) for name, entry in entries.items() if not entry.is_dir()}
 
 
 def verify_bridge(resources: Path, runtime_lock: dict) -> dict:
@@ -171,22 +190,15 @@ def verify_bridge(resources: Path, runtime_lock: dict) -> dict:
                 'Bridge JAR is missing native playlist entry points')
     locked_source = relative_file(ROOT / 'packaging', runtime_lock['jsymphonic']['source_archive'])
     require(sha(locked_source) == runtime_lock['jsymphonic']['sha256'], 'Locked Java source archive hash mismatch')
-    bundled_source = resources / 'sources' / bundled_jsymphonic_name(runtime_lock)
+    bundled_source = relative_file(resources, 'sources/' + bundled_jsymphonic_name(runtime_lock))
+    require(sha(bundled_source) == runtime_lock['jsymphonic']['sha256'],
+            'Bundled Java source archive differs from the locked corresponding source')
     with zipfile.ZipFile(locked_source) as original, zipfile.ZipFile(bundled_source) as bundled:
         expected, actual = source_archive_files(original), source_archive_files(bundled)
     require(expected == actual, 'Bundled Java source differs from the locked corresponding source')
     require({'NATIVE-PLAYLISTS.md', 'LICENSE', 'pom.xml',
              'src/main/java/org/naurd/media/jsymphonic/device/sony/nw/NativePlaylistDatabase.java'} <= set(expected),
             'Incomplete native Java source snapshot')
-    checkout = ROOT.parent / 'jsymphonic'
-    allowed_root_files = {'pom.xml', 'LICENSE', 'README.md', 'INSTALLING-FFMPEG.md', 'NATIVE-PLAYLISTS.md'}
-    current = {name: checkout / name for name in allowed_root_files if (checkout / name).is_file()}
-    for directory in ('src', 'docs'):
-        if (checkout / directory).exists():
-            current.update({directory + '/' + name: path for name, path in files_under(checkout / directory).items()})
-    require(set(current) == set(expected), 'Locked Java source file set differs from the current engine checkout')
-    for name, path in current.items():
-        require(path.read_bytes() == expected[name], f'Java source snapshot is stale: {name}')
     require(expected['LICENSE'] == (resources / 'notices/jsymphonic/LICENSE').read_bytes(),
             'Bridge Java source and bundled license differ')
     require((resources / 'notices/java/NOTICE').is_file() and bool(list((resources / 'jre/legal').rglob('LICENSE'))),

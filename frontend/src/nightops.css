@@ -92,3 +92,8 @@ input::placeholder{color:#a89589;opacity:1}input[type=checkbox]{accent-color:#e9
 .view-state-error p{color:#ffcabd}
 .playback-error{margin:var(--night-space-sm) var(--night-space-md) 0}
 .view-state-dismiss{flex:none;background:transparent;border:1px solid #8c4140;color:#ffe4dc;border-radius:var(--night-radius-control);padding:var(--night-space-xs) var(--night-space-sm);min-height:34px}
+.recovery-panel { grid-column: 1 / -1; padding: 1.25rem; display: grid; gap: .85rem; min-width: 0; }
+.recovery-panel h2, .recovery-panel p { margin: 0; }
+.recovery-panel details { max-height: 18rem; overflow: auto; overflow-wrap: anywhere; }
+.recovery-panel select { max-width: 100%; }
+.recovery-panel .button { justify-self: start; }

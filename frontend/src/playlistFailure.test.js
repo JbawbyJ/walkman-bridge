@@ -1,7 +1,25 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { api } from './api.js'
-import { playlistFailureMessage, resolvePlaylistCode, surfaceError, PLAYLIST_FAILURES } from './playlistFailure.js'
+import { playlistFailureMessage, resolvePlaylistCode, surfaceError, surfaceWorkspaceError, PLAYLIST_FAILURES } from './playlistFailure.js'
+
+test('a new generic error is not replaced by an old job or polling fatal', () => {
+  const old = { files: [{ fatal_code: 'PLAYLIST_JOURNAL_PENDING' }] }
+  for (const view of ['listening', 'device', 'transfer']) {
+    const result = surfaceWorkspaceError({ error: 'Import exceeds size limit', errorFatal: null,
+      pollError: 'Journal pending', pollFatal: 'PLAYLIST_JOURNAL_PENDING', failedJob: old, view })
+    assert.equal(result.strip, 'Import exceeds size limit')
+    assert.equal(result.alert, null)
+    assert.equal(result.role, 'alert')
+  }
+  assert.match(surfaceWorkspaceError({ failedJob: old }).strip, /recovery/i)
+})
+
+test('slot exhaustion does not recommend deleting a playlist', () => {
+  const copy = playlistFailureMessage('PLAYLIST_SLOTS_EXHAUSTED')
+  assert.match(copy.message, /edit|reuse/i)
+  assert.match(copy.message, /deleting.*does not/i)
+})
 
 test('PLAYLIST_REF_MISSING tells the user device writes are blocked by a playlist that references a missing track', () => {
   const copy = playlistFailureMessage('PLAYLIST_REF_MISSING')

@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
@@ -20,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PACKAGING = ROOT / "packaging"
 BUILD = PACKAGING / "build" / "redlotus"
 CACHE = PACKAGING / ".cache" / "nightops"
-DEVICE_MODULES = {"device.py", "jsymphonic.py"}
+DEVICE_MODULES = {"device.py", "jsymphonic.py", "reconciliation.py"}
 
 
 def sha256(path: Path) -> str:
@@ -126,6 +127,38 @@ def checked(command, **kwargs):
     return completed
 
 
+def verify_engine_contract(java: Path, jar: Path):
+    """Reject a stale JAR using only a new disposable device fixture."""
+    def require(condition):
+        if not condition:
+            raise ValueError('Invalid recovery contract')
+    with tempfile.TemporaryDirectory(prefix='engine-contract-') as temporary:
+        mount = Path(temporary) / 'device'
+        (mount / 'OMGAUDIO').mkdir(parents=True)
+        prefix = [str(java.resolve()), '-cp', str(jar.resolve()), 'org.naurd.media.jsymphonic.headless.HeadlessCli']
+        for command, options in (('playlist-recover', ['--inspect']), ('playlist-recover', []), ('playlist-repair', [])):
+            result = subprocess.run([*prefix, command, '--device', str(mount), *options],
+                capture_output=True, text=True, encoding='utf-8', errors='strict', timeout=45,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            try:
+                events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+                require(all(isinstance(event, dict) for event in events))
+                if command == 'playlist-repair':
+                    require(result.returncode != 0)
+                    require(any(e.get('event') == 'fatal' and e.get('code') == 'PLAYLIST_LIBRARY_NOT_LOADED' for e in events))
+                    require(not any(e.get('event') == 'done' for e in events))
+                else:
+                    require(result.returncode == 0 and events[-1].get('event') == 'done')
+                    journal = next(e for e in events if e.get('event') == 'playlistJournal')
+                    require(journal.get('state') == 'none')
+                    require(re.fullmatch(r'[0-9a-f]{64}', journal.get('library_fingerprint', '')))
+                    require(journal.get('files') == [])
+                    if not options:
+                        require(journal.get('outcome') == 'none')
+            except (ValueError, StopIteration, IndexError, TypeError) as exc:
+                raise ValueError(f'Packaged engine lacks the required recovery contract: {command}') from exc
+
+
 def verify_requirements(wheels):
     locked = {row["name"].lower().replace("_", "-"): row["version"] for row in wheels}
     for line in (ROOT / "backend" / "requirements.txt").read_text().splitlines():
@@ -210,6 +243,7 @@ def stage(args):
         release = (jdk / "release").read_text()
         if f'JAVA_VERSION="{runtime_lock["jdk"]["version"]}"' not in release:
             raise ValueError("JDK version does not match the runtime lock")
+        verify_engine_contract(jdk / 'bin' / 'java.exe', args.jar)
         checked([jdk / "bin" / "jlink.exe", "--add-modules",
                  "java.base,java.desktop,java.logging,java.naming,java.management",
                  "--strip-debug", "--no-header-files", "--no-man-pages", "--compress=zip-6",
@@ -250,6 +284,9 @@ def validate_layout(root: Path, product: str):
                 "python/python313.zip", "python/Lib/site-packages/fastapi/__init__.py",
                 "ffmpeg/ffmpeg.exe", "scanner-helper/RedLotus.ScanHelper.exe", "deno/deno.exe",
                 "backend/main.py", "backend/boot.py", "frontend/dist/index.html", "THIRD-PARTY-NOTICES.md"]
+    required += [f"notices/deno/{name}" for name in (
+        "LICENSE.md", "LICENSE-NODE-TYPES.txt", "LICENSE-RUSTY-V8.txt", "LICENSE-TYPESCRIPT.txt",
+        "LICENSE-UNDICI.txt", "LICENSE-V8.txt", "LICENSE-WEBGPU.md", "PROVENANCE.json", "README.md")]
     if product == "bridge":
         lock = json.loads((PACKAGING / "runtime-lock.json").read_text(encoding="utf-8"))
         required += ["jre/bin/java.exe", "backend/vendor/jsymphonic.jar",

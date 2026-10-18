@@ -10,8 +10,8 @@ test('recovery action ids map onto inspect, recover, repair, and delete', async 
   assert.equal(RECOVERY_ACTIONS.inspect_recover[1].call, 'recoverPlaylistJournal')
   assert.equal(RECOVERY_ACTIONS.repair[0].id, 'repair')
   assert.equal(RECOVERY_ACTIONS.repair[0].path, '/device/playlist-recovery/repair')
-  assert.deepEqual(RECOVERY_ACTIONS.free_slots, [
-    { id: 'deleteDevicePlaylist', method: 'DELETE', path: '/device/playlists/{id}', call: 'deleteDevicePlaylist' },
+  assert.deepEqual(RECOVERY_ACTIONS.reuse_playlist, [
+    { id: 'updateDevicePlaylist', method: 'PATCH', path: '/device/playlists/{id}', call: 'updateDevicePlaylist' },
   ])
   assert.deepEqual(RECOVERY_ACTIONS.inspect_recover.fatal_codes, [
     'PLAYLIST_JOURNAL_PENDING',
