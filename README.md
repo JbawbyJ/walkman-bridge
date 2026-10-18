@@ -39,7 +39,7 @@ Importing a provider's entire playlist, authenticated/private/paywalled streams,
 
 ## Device reliability
 
-JSymphonic HeadlessCli is the only OMGAUDIO writer. Backup, database reads, addition and deletion share a device coordinator and revalidate Windows volume identity. Deletion requires the current track-list ETag. Backups publish only after a complete verified copy. Interrupted or ambiguous writes display **Verify device state** and are never automatically retried.
+JSymphonic HeadlessCli is the only OMGAUDIO writer. Backup, database reads, addition and deletion share a device coordinator and revalidate Windows volume identity. Deletion requires the current track-list ETag. Backups publish only after a complete verified copy. Interrupted or ambiguous writes display **Verify device state** and are never automatically retried. When a Sony playlist change fails, follow [docs/user/playlist-recovery.md](docs/user/playlist-recovery.md).
 
 **Before a physical NW-S705F write, make a full device backup and verify it.** Mock-device integration proves the software round trip; firmware playback still requires an operator-controlled hardware test. Do not infer physical playback from API or Java success.
 
