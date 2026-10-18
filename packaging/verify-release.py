@@ -132,6 +132,25 @@ def checksums(path: Path) -> dict[str, str]:
     return result
 
 
+def require_ffmpeg_source_pin(runtime_lock: dict) -> None:
+    record = runtime_lock.get('ffmpeg_source')
+    require(isinstance(record, dict),
+            'FFmpeg corresponding source is not pinned; see packaging/RELEASE-GPL-CHECKLIST.md')
+    digest = record.get('sha256')
+    require(isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest) is not None
+            and 'todo' not in digest.lower(),
+            'FFmpeg corresponding source sha256 is not pinned; see packaging/RELEASE-GPL-CHECKLIST.md')
+
+
+def bundled_jsymphonic_name(runtime_lock: dict) -> str:
+    relative = runtime_lock['jsymphonic']['source_archive']
+    path = PurePosixPath(relative)
+    require(isinstance(relative, str) and not path.is_absolute() and '\\' not in relative
+            and ':' not in relative and '..' not in path.parts and path.as_posix() == relative
+            and path.name.endswith('.zip'), 'Unsafe JSymphonic source archive path')
+    return path.name
+
+
 def source_archive_files(archive: zipfile.ZipFile) -> dict[str, bytes]:
     names = archive.namelist()
     require(len(names) == len(set(names)), 'Duplicate source archive entry')
@@ -152,7 +171,8 @@ def verify_bridge(resources: Path, runtime_lock: dict) -> dict:
                 'Bridge JAR is missing native playlist entry points')
     locked_source = relative_file(ROOT / 'packaging', runtime_lock['jsymphonic']['source_archive'])
     require(sha(locked_source) == runtime_lock['jsymphonic']['sha256'], 'Locked Java source archive hash mismatch')
-    with zipfile.ZipFile(locked_source) as original, zipfile.ZipFile(resources / 'sources/jsymphonic.zip') as bundled:
+    bundled_source = resources / 'sources' / bundled_jsymphonic_name(runtime_lock)
+    with zipfile.ZipFile(locked_source) as original, zipfile.ZipFile(bundled_source) as bundled:
         expected, actual = source_archive_files(original), source_archive_files(bundled)
     require(expected == actual, 'Bundled Java source differs from the locked corresponding source')
     require({'NATIVE-PLAYLISTS.md', 'LICENSE', 'pom.xml',
@@ -216,7 +236,10 @@ def verify_product(product: str, metadata: dict, version: str, runtime_lock: dic
     if product == 'player':
         require(not any(name.lower().endswith('.jar') for name in actual) and not (resources / 'jre').exists(), 'Player contains Java')
         require(not any((resources / 'backend' / name).exists() for name in DEVICE_MODULES), 'Player contains device modules')
-        require(not (resources / 'sources/jsymphonic.zip').exists(), 'Player contains a device-engine source archive')
+        source_name = bundled_jsymphonic_name(runtime_lock)
+        require(not (resources / 'sources' / source_name).exists()
+                and not (resources / 'sources/jsymphonic.zip').exists(),
+                'Player contains a device-engine source archive')
     else:
         engine = verify_bridge(resources, runtime_lock)
     filename = definition['artifactName'].replace('${version}', version).replace('${arch}', 'x64').replace('${ext}', 'exe')
@@ -238,6 +261,8 @@ def verify_product(product: str, metadata: dict, version: str, runtime_lock: dic
 
 
 def verify(node: str, report: dict) -> None:
+    runtime_lock = load_json(ROOT / 'packaging/runtime-lock.json')
+    require_ffmpeg_source_pin(runtime_lock)
     inspection = subprocess.run([node, '-e', NODE_INSPECTION, str(ROOT)], cwd=ROOT, capture_output=True,
                                 text=True, encoding='utf-8', timeout=60,
                                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -253,7 +278,6 @@ def verify(node: str, report: dict) -> None:
         require(sha(file) == digest, f'Historical 0.4.0 installer changed: {name}')
         historical.append({'filename': name, 'sha256': digest, 'preserved': True})
     report['historical_installers'] = historical
-    runtime_lock = load_json(ROOT / 'packaging/runtime-lock.json')
     for product in ('bridge', 'player'):
         report['products'].append(verify_product(product, metadata['products'][product], version, runtime_lock))
     report['old_installers_preserved'] = True

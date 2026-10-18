@@ -235,3 +235,67 @@ def test_del_failed_raises_with_error_text(shim, tmp_path):
     with pytest.raises(JSymphonicError) as exc:
         jsymphonic.remove_track(tmp_path, "1")
     assert "could not be deleted" in str(exc.value)
+
+
+FATAL_CODES = (
+    "PLAYLIST_REF_MISSING",
+    "PLAYLIST_JOURNAL_PENDING",
+    "PLAYLIST_SLOTS_EXHAUSTED",
+)
+
+
+def test_fatal_codes_are_defined_once():
+    assert tuple(code.value for code in jsymphonic.FatalCode) == FATAL_CODES
+
+
+@pytest.mark.parametrize("code", FATAL_CODES)
+def test_known_fatal_code_passes_through(monkeypatch, code):
+    scripted(monkeypatch, [{"event": "fatal", "message": "playlist blocked", "code": code}], exit_code=1)
+    with pytest.raises(JSymphonicError) as error:
+        jsymphonic.list_playlists(Path("X:/"))
+    assert error.value.code == code
+    assert str(error.value) == "playlist blocked"
+
+
+def test_fatal_without_code_stays_generic(monkeypatch):
+    scripted(monkeypatch, [{"event": "fatal", "message": "device database is corrupt"}], exit_code=1)
+    with pytest.raises(JSymphonicError) as error:
+        jsymphonic.list_playlists(Path("X:/"))
+    assert error.value.code is None
+    assert str(error.value) == "device database is corrupt"
+
+
+def test_message_text_does_not_invent_fatal_code(monkeypatch):
+    scripted(monkeypatch, [{
+        "event": "fatal",
+        "message": "blocked: PLAYLIST_REF_MISSING PLAYLIST_JOURNAL_PENDING PLAYLIST_SLOTS_EXHAUSTED",
+    }], exit_code=1)
+    with pytest.raises(JSymphonicError) as error:
+        jsymphonic.list_playlists(Path("X:/"))
+    assert error.value.code is None
+
+
+def test_unknown_fatal_code_is_generic_and_does_not_crash(monkeypatch):
+    scripted(monkeypatch, [{"event": "fatal", "message": "nope", "code": "PLAYLIST_OTHER"}], exit_code=1)
+    with pytest.raises(JSymphonicError) as error:
+        jsymphonic.list_playlists(Path("X:/"))
+    assert error.value.code is None
+    assert str(error.value) == "nope"
+
+
+@pytest.mark.parametrize("raw", [None, "", 12, True, ["PLAYLIST_REF_MISSING"]])
+def test_non_string_fatal_code_is_generic(monkeypatch, raw):
+    scripted(monkeypatch, [{"event": "fatal", "message": "nope", "code": raw}], exit_code=1)
+    with pytest.raises(JSymphonicError) as error:
+        jsymphonic.list_playlists(Path("X:/"))
+    assert error.value.code is None
+
+
+def test_step_error_does_not_adopt_a_fatal_code(monkeypatch):
+    scripted(monkeypatch, [
+        {"event": "step", "error": "copy failed", "code": "PLAYLIST_REF_MISSING"},
+        {"event": "done"},
+    ])
+    with pytest.raises(JSymphonicError) as error:
+        jsymphonic.add_tracks(Path("X:/"), [Path("a.mp3")], lambda _: None)
+    assert error.value.code is None

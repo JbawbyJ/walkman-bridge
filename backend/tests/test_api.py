@@ -133,6 +133,46 @@ def test_etag_rejects_stale_deletion_before_write(context):
     assert c.delete('/api/tracks/1', headers={'If-Match': fresh}).status_code == 200
     assert len(c.get('/api/tracks').json()) == 1
 
+def test_transfer_job_passes_fatal_code(context):
+    def coded(*args):
+        raise jsymphonic.JSymphonicError('journal open', code='PLAYLIST_JOURNAL_PENDING', needs_reconcile=True)
+    context.api.add_tracks = coded
+    job = imported(context)
+    response = context.client.post('/api/transfers', json={'media_ids': [job['files'][0]['media_id']]})
+    result = context.client.get('/api/jobs/' + response.json()['job_id']).json()
+    assert result['files'][0]['fatal_code'] == 'PLAYLIST_JOURNAL_PENDING'
+    assert result['files'][0]['detail'] == 'journal open'
+
+
+def test_transfer_job_does_not_invent_fatal_code_from_message(context):
+    def generic(*args):
+        raise jsymphonic.JSymphonicError('see PLAYLIST_REF_MISSING', needs_reconcile=True)
+    context.api.add_tracks = generic
+    job = imported(context)
+    response = context.client.post('/api/transfers', json={'media_ids': [job['files'][0]['media_id']]})
+    result = context.client.get('/api/jobs/' + response.json()['job_id']).json()
+    assert result['files'][0]['fatal_code'] is None
+    assert 'PLAYLIST_REF_MISSING' in result['files'][0]['detail']
+
+
+def test_track_read_and_delete_pass_fatal_code(context, monkeypatch):
+    from test_jsymphonic import scripted
+    scripted(monkeypatch, [{'event': 'fatal', 'message': 'journal open', 'code': 'PLAYLIST_JOURNAL_PENDING'}], exit_code=1)
+    context.api.list_tracks = jsymphonic.list_tracks
+    listed = context.client.get('/api/tracks')
+    assert listed.status_code == 409
+    assert listed.json()['detail'] == {'message': 'journal open', 'fatal_code': 'PLAYLIST_JOURNAL_PENDING'}
+    context.api.list_tracks = lambda mount: list(context.tracks)
+    context.api.remove_track = jsymphonic.remove_track
+    etag = context.client.get('/api/tracks').headers['etag']
+    deleted = context.client.delete('/api/tracks/1', headers={'If-Match': etag})
+    assert deleted.status_code == 409, deleted.text
+    assert deleted.json()['detail']['fatal_code'] == 'PLAYLIST_JOURNAL_PENDING'
+    assert deleted.json()['detail']['code'] == 'verify_device_state'
+    job = context.client.get('/api/jobs/' + deleted.json()['detail']['job_id']).json()
+    assert job['files'][0]['fatal_code'] == 'PLAYLIST_JOURNAL_PENDING'
+
+
 def test_uncertain_add_is_never_reported_as_nothing_written(context):
     def fail(*args):
         raise jsymphonic.JSymphonicError('Write interrupted', needs_reconcile=True)

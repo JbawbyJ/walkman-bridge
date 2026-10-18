@@ -15,6 +15,8 @@ The maintained React application selects the product through the isolated Electr
 
 Both windows normally resize to a minimum 640 × 560, bounded by the active display's available work area. The shell fits the viewport, its workspace scrolls, and dialogs have bounded scrolling bodies. Scaling is tested through 200%, including 320 CSS-pixel effective widths. Native titlebar buttons minimize, maximize/restore and close. Inputs have keyboard operation, visible focus and accessible names. Reduced-motion preferences disable decorative motion. Spectrum and waveform modes use actual Web Audio analyser samples.
 
+Bridge Listening, Walkman and Transfer viewport fit, dialog bounds, and a renderer boot with no console errors are checked headlessly by `frontend/tests/walkman-smoke.test.mjs`. Operator hardware, clean-guest, listening, and the Electron zoom/audio harnesses stay separate; see [packaging/README-WINDOWS.md](../packaging/README-WINDOWS.md).
+
 Manage music groups Files, Playlists and Bridge-only Sony playlists in a dedicated dialog. Search and sort find managed copies; details edit without changing originals. Local playlists define ordered playback scope and can stage their members for transfer. Sony playlists edit the native device database and use membership from the current device ledger. Removing a playlist or member keeps its audio; removing managed files requires confirmation. Device mutations remain unavailable while incompatible work is active.
 
 The playback hook owns transport intent, seek, volume, queue advance and persistent session state. Restoration is paused. The optional ten-band equalizer defaults to bypass. Conservative headroom subtracts positive band boosts; loudness matching trims measured loud sources toward -18 LUFS and never boosts quiet sources. The optional compressor and final ceiling limit peaks. These controls affect playback only, never the transfer MP3.
@@ -27,4 +29,4 @@ The player leases managed media before loading it and releases it on Stop/remova
 
 ## Follow-up
 
-Concepts B and D, AI restoration, automatic upsampling, streaming-service playback, folder watching and a full indexed music library remain outside this version. Public single-track link import is supported as documented in README.md. Current management/layout evidence is in MANAGEMENT-0.4.0.md; earlier verification is recorded in IMPLEMENTATION-PROGRESS.md and MEDIA-UPGRADE-0.3.0.md.
+Concepts B and D, AI restoration, automatic upsampling, streaming-service playback, folder watching and a full indexed music library remain outside this version. Public single-track link import is supported as documented in README.md. Current 0.4.1 acceptance is in BRANDING-SANDBOX-0.4.1.md. Management and layout evidence for 0.4.0 is in MANAGEMENT-0.4.0.md. Metadata, artwork, and link-import evidence is in MEDIA-UPGRADE-0.3.0.md. The 0.2.0 verification log is archived at archive/IMPLEMENTATION-PROGRESS.md.

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -48,6 +49,20 @@ class StagingSafetyTests(unittest.TestCase):
             self.assertTrue((root / "site-packages" / "example.py").is_file())
             self.assertFalse(list((root / "site-packages").rglob("*.exe")))
             self.assertTrue((root / "site-packages" / "dependency.dist-info" / "LICENSE").is_file())
+
+    def test_pinned_jsymphonic_archive_mismatch_fails_closed(self):
+        lock = json.loads((stage.PACKAGING / "runtime-lock.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            packaging = root / "packaging"
+            archive = packaging / lock["jsymphonic"]["source_archive"]
+            archive.parent.mkdir(parents=True)
+            archive.write_bytes(b"not-the-pinned-archive")
+            staged = root / "staged-sources"
+            with self.assertRaisesRegex(ValueError, "hash mismatch"):
+                stage.copy_pinned_jsymphonic(lock, staged, packaging)
+            self.assertFalse(staged.exists())
+            self.assertEqual(list(packaging.rglob("*.partial")), [])
 
 
 if __name__ == "__main__":

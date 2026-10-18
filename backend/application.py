@@ -481,7 +481,10 @@ def register_device_routes(app, device_api, identity, admit, coordinator, jobs, 
             response.headers['ETag'] = track_etag(volume, rows)
             return rows if not q else [t for t in rows if any(q.casefold() in str(t.get(k) or '').casefold() for k in ('title', 'artist', 'album'))]
         except RuntimeError as exc:
-            raise HTTPException(409, str(exc)) from exc
+            from jsymphonic import fatal_code_of
+            code = fatal_code_of(exc)
+            detail = {'message': str(exc), 'fatal_code': code} if code else str(exc)
+            raise HTTPException(409, detail) from exc
         finally:
             coordinator.finish(ticket)
 
@@ -517,12 +520,16 @@ def register_device_routes(app, device_api, identity, admit, coordinator, jobs, 
             job.set_status(JobStatus.FAILED, 'Deletion rejected')
             raise
         except Exception as exc:
+            from jsymphonic import fatal_code_of
             uncertain = job.phase == 'device_writing'
+            fatal_code = fatal_code_of(exc)
             job.needs_reconcile = uncertain
-            job.update_file(track_id, state='unknown' if uncertain else 'failed', detail=str(exc))
+            job.update_file(track_id, state='unknown' if uncertain else 'failed', detail=str(exc),
+                            fatal_code=fatal_code)
             job.set_status(JobStatus.FAILED, 'Verify device state' if uncertain else str(exc))
             raise HTTPException(409, {'code': 'verify_device_state' if uncertain else 'delete_failed',
-                                     'message': job.message, 'job_id': job_id}) from exc
+                                     'message': job.message, 'job_id': job_id,
+                                     'fatal_code': fatal_code}) from exc
         finally:
             cache.clear()
             coordinator.finish(ticket)

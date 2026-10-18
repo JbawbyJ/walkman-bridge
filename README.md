@@ -53,6 +53,6 @@ Electron starts the Python factory using an authenticated, signed dynamic-port a
 
 The backend API requires a per-launch capability and exact permitted origin; renderer requests use an HttpOnly/SameSite cookie. Electron restricts outgoing requests to the exact backend origin including its port. Native scan and shutdown routes require the main-process capability.
 
-See [STRUCTURE.md](STRUCTURE.md), [docs/DESIGN.md](docs/DESIGN.md), [docs/IMPLEMENTATION-CONTRACT.md](docs/IMPLEMENTATION-CONTRACT.md) and [docs/IMPLEMENTATION-PROGRESS.md](docs/IMPLEMENTATION-PROGRESS.md) for modules, decisions, interfaces and verification evidence.
+See [STRUCTURE.md](STRUCTURE.md), [docs/DESIGN.md](docs/DESIGN.md) and [docs/IMPLEMENTATION-CONTRACT.md](docs/IMPLEMENTATION-CONTRACT.md) for modules, decisions and interfaces. Current 0.4.1 acceptance is [docs/BRANDING-SANDBOX-0.4.1.md](docs/BRANDING-SANDBOX-0.4.1.md). The 0.2.0 verification log is archived at [docs/archive/IMPLEMENTATION-PROGRESS.md](docs/archive/IMPLEMENTATION-PROGRESS.md). Human checks are in [docs/acceptance/](docs/acceptance/).
 
 Application code is MIT. Bundled dependencies retain their own notices, including GPL components. Bridge includes the companion JSymphonic source snapshot. Review [packaging/NOTICES.md](packaging/NOTICES.md) before distribution; the complete ffmpeg corresponding-source package remains a publishing prerequisite. Local builds are not a public release or a claim that hardware, listening and clean-machine acceptance have all passed.

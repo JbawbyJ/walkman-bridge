@@ -11,6 +11,7 @@ every invocation is serialized behind a single module-level lock.
 """
 from __future__ import annotations
 
+import enum
 import json
 import base64
 import logging
@@ -58,12 +59,49 @@ class AddResult:
     needs_reconcile: bool = False
 
 
+class FatalCode(enum.StrEnum):
+    """HeadlessCli fatal `code` values the backend forwards.
+
+    PLAYLIST_REF_MISSING: a dangling track ID blocks playlist writes.
+    PLAYLIST_JOURNAL_PENDING: a leftover .jsymphonic-playlist-transaction
+    journal blocks reads and writes.
+    PLAYLIST_SLOTS_EXHAUSTED: all 2048 lifetime playlist slots are used.
+
+    Any other fatal omits `code`. Missing, non-string, and unrecognized
+    values are generic (None). Message text is never parsed for a code.
+    Unrecognized strings are dropped, not forwarded, and do not raise.
+    """
+
+    PLAYLIST_REF_MISSING = "PLAYLIST_REF_MISSING"
+    PLAYLIST_JOURNAL_PENDING = "PLAYLIST_JOURNAL_PENDING"
+    PLAYLIST_SLOTS_EXHAUSTED = "PLAYLIST_SLOTS_EXHAUSTED"
+
+
+def normalize_fatal_code(value) -> str | None:
+    """Return a known fatal code, or None for a generic failure."""
+    if isinstance(value, FatalCode):
+        return value.value
+    if not isinstance(value, str):
+        return None
+    try:
+        return FatalCode(value).value
+    except ValueError:
+        return None
+
+
+def fatal_code_of(exc) -> str | None:
+    """Known fatal code carried by an exception, else None."""
+    return normalize_fatal_code(getattr(exc, "code", None))
+
+
 class JSymphonicError(RuntimeError):
-    def __init__(self, message, *, events=(), needs_reconcile=False):
+    def __init__(self, message, *, events=(), needs_reconcile=False, code=None):
         super().__init__(message)
         self.events = list(events)
         self.needs_reconcile = needs_reconcile
         self.result: AddResult | None = None
+        # None means generic: no code, or a code outside FatalCode.
+        self.code = normalize_fatal_code(code)
 
 
 def _ensure_java() -> str:
@@ -185,6 +223,7 @@ def _run(
                     raise JSymphonicError(
                         str(event.get("message") or "shim reported a fatal error"),
                         events=events, needs_reconcile=mutating,
+                        code=event.get("code"),
                     )
             tail = "\n".join(list(stderr_lines)[-5:]).strip()
             raise JSymphonicError(
@@ -200,6 +239,7 @@ def _require_terminal(events: list[dict], terminal: str, *, mutating=False) -> N
             raise JSymphonicError(
                 str(event.get("message") or event.get("error") or "Shim reported a fatal error"),
                 events=events, needs_reconcile=mutating,
+                code=event.get("code") if event.get("event") == "fatal" else None,
             )
     if not events or events[-1].get("event") != terminal:
         raise JSymphonicError(
