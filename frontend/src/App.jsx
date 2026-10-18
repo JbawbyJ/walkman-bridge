@@ -194,7 +194,7 @@ function Workspace({ product, version, session }) {
 
   return <div className={`nightops-app ${isBridge ? 'bridge-composition' : 'player-composition'}`}>
     <Brand product={product} version={version} />
-    <input ref={fileInput} type="file" multiple accept="audio/*,.mp3,.flac,.wav,.m4a,.aac,.ogg,.opus,.wma,.aif,.aiff" hidden onChange={e => { importFiles(e.target.files); e.target.value = '' }} />
+    <input ref={fileInput} type="file" multiple accept="audio/*,.mp3,.flac,.wav,.m4a,.aac,.ogg,.opus" hidden onChange={e => { importFiles(e.target.files); e.target.value = '' }} />
     {(error || pollError || notice) && <div className={`notice-strip ${error || pollError ? 'error' : ''}`} role={error ? 'alert' : 'status'}><span>{error || pollError || notice}</span><button aria-label="Dismiss notification" onClick={() => { setError(null); setNotice(null) }}>{pollError && !error && !notice ? 'Reconnecting…' : '×'}</button></div>}
     {operations.draining && <div className="notice-strip" role="status">Finishing admitted operations before closing… Playback has stopped.</div>}
     {isBridge && <nav className="workspace-tabs" aria-label="Bridge views">{[['listening', 'Listening'], ['device', 'Walkman'], ['transfer', 'Transfer']].map(([view, label]) => <button key={view} className={bridgeView === view ? 'active' : ''} aria-pressed={bridgeView === view} onClick={() => setBridgeView(view)}>{label}{view === 'transfer' && selection.size > 0 && <span>{selection.size}</span>}</button>)}<span className={device.connected ? 'connection connected' : 'connection'}><i />{device.connected ? device.model || 'CONNECTED' : 'NO DEVICE'}</span></nav>}

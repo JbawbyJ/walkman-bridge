@@ -200,3 +200,80 @@ def test_source_clearance_failure_during_optional_artwork_fails_import(context, 
     job = imported(context)
     assert job['status'] == 'failed' and job['files'][0]['state'] == 'failed'
     assert context.app.state.store.get(job['files'][0]['media_id'])['status'] == 'failed'
+
+
+def test_defender_threat_bytes_are_removed_and_the_item_stays_blocked(context):
+    store = context.app.state.store
+
+    def threat(path):
+        result = dict(ok=False, state='BLOCKED', reason='Microsoft Defender reported a threat',
+                      reason_code='defender_threat', defender_status='threat',
+                      sha256=hashlib.sha256(path.read_bytes()).hexdigest(), size_bytes=path.stat().st_size)
+        return SimpleNamespace(to_dict=lambda: result)
+
+    context.scanner.scan_audio = threat
+    job = imported(context)
+    media_id = job['files'][0]['media_id']
+    assert job['status'] == 'failed' and job['files'][0]['state'] == 'blocked'
+    record = store.get(media_id)
+    assert record['status'] == 'blocked' and record['artifacts']['source']['purged'] is True
+    assert record['scan']['reason_code'] == 'defender_threat'
+    assert not list((store.root / media_id).glob('source.*'))
+    item = next(entry for entry in context.client.get('/api/queue').json()['items'] if entry['id'] == media_id)
+    assert item['status'] == 'blocked' and item['scan']['reason_code'] == 'defender_threat'
+    assert 'artifacts' not in item
+    assert context.client.get(f'/api/media/{media_id}/stream').status_code == 400
+    rescan = context.client.post(f'/api/media/{media_id}/rescan').json()
+    job = context.client.get('/api/jobs/' + rescan['job_id']).json()
+    assert job['files'][0]['state'] == 'blocked' and 'removed' in job['files'][0]['detail']
+    assert store.get(media_id)['status'] == 'blocked'
+    assert context.client.delete(f'/api/queue/items/{media_id}').status_code in (200, 204)
+    assert not (store.root / media_id).exists()
+
+
+def test_format_rejections_keep_their_bytes(context):
+    def rejected(path):
+        result = dict(ok=False, state='BLOCKED', reason='extension and audio container do not match',
+                      reason_code='invalid_audio_format', defender_status='not_scanned',
+                      sha256=hashlib.sha256(path.read_bytes()).hexdigest(), size_bytes=path.stat().st_size)
+        return SimpleNamespace(to_dict=lambda: result)
+
+    context.scanner.scan_audio = rejected
+    job = imported(context)
+    media_id = job['files'][0]['media_id']
+    store = context.app.state.store
+    assert job['files'][0]['state'] == 'blocked'
+    assert store.get(media_id)['artifacts']['source'].get('purged') is None
+    assert list((store.root / media_id).glob('source.*'))
+
+
+def test_rescan_threat_on_the_source_purges_its_derivatives_too(context, monkeypatch):
+    store = context.app.state.store
+    monkeypatch.setattr(media_service, 'convert_managed',
+                        lambda src, out, kind, maximum, metadata=None: out.write_bytes(b'converted'))
+    job = imported(context)
+    media_id = job['files'][0]['media_id']
+    response = context.client.post('/api/transfers', json={'media_ids': [media_id]})
+    assert response.status_code == 200, response.text
+    assert (store.root / media_id / 'transfer.mp3').exists()
+
+    def threat(path):
+        result = dict(ok=False, state='BLOCKED', reason='Microsoft Defender reported a threat',
+                      reason_code='defender_threat', defender_status='threat',
+                      sha256=hashlib.sha256(path.read_bytes()).hexdigest(), size_bytes=path.stat().st_size)
+        return SimpleNamespace(to_dict=lambda: result)
+
+    context.scanner.scan_audio = threat
+    context.scanner.ok = False  # the stored clearance no longer validates, so the rescan runs Defender again
+    rescan = context.client.post(f'/api/media/{media_id}/rescan').json()
+    job = context.client.get('/api/jobs/' + rescan['job_id']).json()
+    assert job['files'][0]['state'] == 'blocked'
+    record = store.get(media_id)
+    assert record['status'] == 'blocked'
+    assert record['artifacts']['source']['purged'] is True
+    assert 'transfer' not in record['artifacts']
+    assert list((store.root / media_id).iterdir()) == []
+    assert context.client.get(f'/api/media/{media_id}/stream').status_code == 400
+    # Admission refuses a blocked item outright; the device saw exactly the one earlier write.
+    assert context.client.post('/api/transfers', json={'media_ids': [media_id]}).status_code == 409
+    assert context.calls['add'] == 1

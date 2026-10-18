@@ -30,11 +30,14 @@ _EXT_FAMILY = {
 }
 _MP4_BRANDS = {b"M4A ", b"M4B ", b"M4P ", b"mp41", b"mp42", b"isom", b"iso2", b"mp71"}
 _DENIED = re.compile(r"access\s+is\s+denied|access\s+denied|requires?\s+elevation|error\s*740|0x80070005", re.I)
-# MpCmdRun exit code 2 is Microsoft's documented "threats found" result and is authoritative.
-# The text form is a secondary signal only; it is deliberately a single-line phrase so that a
-# scanned path containing the word "threat" can never make clean output read as a detection.
+# A detection is the explicit per-file verdict line "Scanning <path> found N threats." It is a
+# single-line phrase so that a scanned path containing the word "threat" can never make the clean
+# line "found no threats" read as a detection. MpCmdRun returns only 0 or 2 unless -ReturnHR is
+# given, and Microsoft documents 2 as "malware found and not remediated, user action required, or
+# scanning errors": exit code 2 is therefore a fail-closed "not cleared" signal, never a confirmed
+# detection on its own, and access-denied output is evaluated before it so elevation stays reachable.
 _THREAT = re.compile(r"\bfound\s+[1-9]\d*\s+threats?\b", re.I)
-_THREAT_EXIT_CODE = 2
+_NOT_CLEARED_EXIT_CODE = 2
 
 
 class ScanError(RuntimeError):
@@ -67,17 +70,28 @@ _rows: deque[dict[str, Any]] = deque(maxlen=50)
 _counters = {"cleared": 0, "blocked": 0}
 _seq = 0
 
+# Consumption checks (every stream or artwork request, including each media-element range
+# request) re-verify content and live Defender status. These short caches bound that cost.
+# Scans never use them: a new verdict always hashes and queries live.
+STATUS_CACHE_SECONDS = 5.0
+DIGEST_CACHE_SECONDS = 10.0
+_status_cache: tuple[float, dict[str, Any]] | None = None
+_digest_cache: dict[str, tuple[tuple[int, int, int], tuple[str, int], float]] = {}
+_DIGEST_CACHE_ENTRIES = 256
+
 
 def _utc_timestamp() -> float:
     return time.time()
 
 
 def reset_for_tests() -> None:
-    global _seq
+    global _seq, _status_cache
     with _lock:
         _rows.clear()
         _counters.update(cleared=0, blocked=0)
         _seq = 0
+        _status_cache = None
+        _digest_cache.clear()
 
 
 def begin(target: str, proc: str = ENGINE) -> str:
@@ -183,12 +197,14 @@ def _scan(path: Path, pid: str, *, artwork=False) -> ScanResult:
         return _result(pid, ok=False, state="ERROR", reason="Microsoft Defender is unavailable", reason_code="defender_unavailable", defender_status="unavailable", fingerprint=fingerprint)
 
     blob = f"{invocation.stdout or ''}\n{invocation.stderr or ''}"
-    if invocation.returncode == _THREAT_EXIT_CODE or _THREAT.search(blob):
+    if _THREAT.search(blob):
         return _result(pid, ok=False, state="BLOCKED", reason="Microsoft Defender reported a threat", reason_code="defender_threat", defender_status="threat", fingerprint=fingerprint)
     if _DENIED.search(blob) or invocation.returncode in {5, 740}:
         return _result(pid, ok=False, state="AWAITING_PERMISSION", reason="Microsoft Defender requires elevation for this file", reason_code="defender_elevation_required", defender_status="elevation_required", fingerprint=fingerprint)
     if invocation.returncode != 0:
-        return _result(pid, ok=False, state="ERROR", reason=f"Microsoft Defender exited with code {invocation.returncode}", reason_code="defender_scan_error", defender_status="error", fingerprint=fingerprint)
+        reason = ("Microsoft Defender did not clear this file (exit code 2: threat, user action required or scanning error)"
+                  if invocation.returncode == _NOT_CLEARED_EXIT_CODE else f"Microsoft Defender exited with code {invocation.returncode}")
+        return _result(pid, ok=False, state="ERROR", reason=reason, reason_code="defender_scan_error", defender_status="error", fingerprint=fingerprint)
 
     try:
         after = _fingerprint(path)
@@ -220,10 +236,10 @@ def clearance_valid(path: Path, record: dict[str, Any], *,
         age = _utc_timestamp() - float(record.get("scanned_at", 0))
         if age < 0 or age > CLEARANCE_SECONDS:
             return False
-        digest, size = _fingerprint(Path(path))
+        digest, size = _cached_fingerprint(Path(path))
         if digest != record.get("sha256") or size != int(record.get("size_bytes", -1)):
             return False
-        status = trusted_status if trusted_status is not None else _query_defender_status()
+        status = trusted_status if trusted_status is not None else _cached_defender_status()
         if not _status_complete(status):
             return False
         return all(
@@ -239,6 +255,11 @@ def clearance_valid(path: Path, record: dict[str, Any], *,
 
 
 def _fingerprint(path: Path) -> tuple[str, int]:
+    return _fingerprint_with_stat(path)[0]
+
+
+def _fingerprint_with_stat(path: Path) -> tuple[tuple[str, int], os.stat_result]:
+    """Hash the file and return the stat that was verified unchanged across the read."""
     before = path.stat()
     digest = hashlib.sha256()
     size = 0
@@ -249,7 +270,53 @@ def _fingerprint(path: Path) -> tuple[str, int]:
     after = path.stat()
     if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns or size != after.st_size:
         raise OSError("file changed while hashing")
-    return digest.hexdigest(), size
+    return (digest.hexdigest(), size), after
+
+
+def _signature(info: os.stat_result) -> tuple[int, int, int]:
+    return info.st_size, info.st_mtime_ns, info.st_ino
+
+
+def _cached_fingerprint(path: Path) -> tuple[str, int]:
+    """Digest for consumption checks, reused for a few seconds while size, mtime and file identity match.
+
+    Managed files are never rewritten in place by the application: derivatives are unlinked and
+    recreated, so a changed file index or mtime always misses. The signature is taken from the
+    stat that the hash itself verified, never from a later stat.
+    """
+    key = str(path)
+    current = _signature(path.stat())
+    now = time.monotonic()
+    with _lock:
+        entry = _digest_cache.get(key)
+        if entry and entry[0] == current and now - entry[2] <= DIGEST_CACHE_SECONDS:
+            return entry[1]
+    fingerprint, verified = _fingerprint_with_stat(path)
+    with _lock:
+        for stale in [cached for cached, value in _digest_cache.items() if now - value[2] > DIGEST_CACHE_SECONDS]:
+            del _digest_cache[stale]
+        if len(_digest_cache) < _DIGEST_CACHE_ENTRIES:
+            _digest_cache[key] = (_signature(verified), fingerprint, now)
+    return fingerprint
+
+
+def _cached_defender_status() -> dict[str, Any]:
+    """Live Defender status for consumption checks, reused for a few seconds.
+
+    Only a complete, active status is cached; unavailable or disabled results are re-queried
+    every time so recovery is immediate and a disabled engine is never remembered as active.
+    """
+    global _status_cache
+    now = time.monotonic()
+    with _lock:
+        cached = _status_cache
+    if cached is not None and now - cached[0] <= STATUS_CACHE_SECONDS:
+        return dict(cached[1])
+    status = _query_defender_status()
+    if _status_complete(status):
+        with _lock:
+            _status_cache = (now, dict(status))
+    return status
 
 
 def _has_reparse_component(path: Path) -> bool:
@@ -291,10 +358,16 @@ def _validate_audio_format(path: Path, size: int) -> str | None:
                 offset = total
             stream.seek(offset)
             body = stream.read(64)
+            kind = _detect_kind(body)
+            family = _EXT_FAMILY.get(path.suffix.lower())
+            if kind is None and family in ("mpeg", "aac"):
+                # Taggers commonly leave zero padding or stray bytes between the tag and the first
+                # frame. Accept the stream only when two consecutive valid frames follow within a
+                # bounded window; a lone sync word inside junk is not audio.
+                stream.seek(offset)
+                kind = _find_frame_sync(stream.read(SYNC_SEARCH_BYTES + MAX_FRAME_BYTES))
     except (OSError, ValueError) as exc:
         return f"audio header is unreadable: {exc}"
-    kind = _detect_kind(body)
-    family = _EXT_FAMILY.get(path.suffix.lower())
     if not kind or not family or not (family == kind or family == "aac" and kind in {"aac", "mp4"}):
         return "extension and audio container do not match"
     return None
@@ -323,6 +396,10 @@ def _validate_id3(tag: bytes) -> bool:
     """
     version = tag[3]
     body = tag[10:-10] if tag[5] & 0x10 else tag[10:]
+    if version in (2, 3) and tag[5] & 0x80:
+        # ID3v2.2/2.3 unsynchronisation applies to the whole tag body: a zero byte was inserted
+        # after every 0xFF. Frame headers describe the decoded bytes, so decode before walking.
+        body = body.replace(b"\xff\x00", b"\xff")
     end = len(body)
     cursor = 0
     if tag[5] & 0x40:
@@ -414,6 +491,60 @@ def _detect_kind(data: bytes) -> str | None:
     return None
 
 
+SYNC_SEARCH_BYTES = 64 * 1024
+MAX_FRAME_BYTES = 8192  # ADTS frames are at most 8191 bytes; MPEG audio frames are shorter.
+# Bitrates in kbps for bitrate indexes 1..14, keyed by (MPEG generation, layer bits).
+_MPEG_BITRATES_KBPS = {
+    (3, 3): (32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448),  # MPEG-1 Layer I
+    (3, 2): (32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384),     # MPEG-1 Layer II
+    (3, 1): (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),      # MPEG-1 Layer III
+    (2, 3): (32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256),     # MPEG-2/2.5 Layer I
+    (2, 2): (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),          # MPEG-2/2.5 Layer II/III
+}
+# Sample rates keyed by the header's version bits: 3 = MPEG-1, 2 = MPEG-2, 0 = MPEG-2.5.
+_MPEG_SAMPLE_RATES = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000), 0: (11025, 12000, 8000)}
+
+
+def _mpeg_frame_length(header: bytes) -> int | None:
+    """Byte length of an MPEG audio frame from its header, or None when the header is invalid."""
+    if len(header) < 4 or header[0] != 0xFF or header[1] & 0xE0 != 0xE0:
+        return None
+    version, layer = (header[1] >> 3) & 0x03, (header[1] >> 1) & 0x03
+    bitrate_index, rate_index, padding = header[2] >> 4, (header[2] >> 2) & 0x03, (header[2] >> 1) & 0x01
+    if version == 1 or layer == 0 or bitrate_index in (0, 15) or rate_index == 3:
+        return None
+    table = _MPEG_BITRATES_KBPS[(3, layer) if version == 3 else (2, 3 if layer == 3 else 2)]
+    bitrate = table[bitrate_index - 1] * 1000
+    rate = _MPEG_SAMPLE_RATES[version][rate_index]
+    if layer == 3:
+        return (12 * bitrate // rate + padding) * 4
+    if layer == 1 and version != 3:
+        return 72 * bitrate // rate + padding
+    return 144 * bitrate // rate + padding
+
+
+def _adts_frame_length(header: bytes) -> int | None:
+    """Byte length of an ADTS AAC frame from its header, or None when the header is invalid."""
+    if len(header) < 7 or header[0] != 0xFF or header[1] & 0xF6 != 0xF0 or (header[2] >> 2) & 0x0F == 15:
+        return None
+    length = ((header[3] & 0x03) << 11) | (header[4] << 3) | (header[5] >> 5)
+    return length if length >= 7 else None
+
+
+def _find_frame_sync(data: bytes) -> str | None:
+    """Kind of the first two consecutive valid MPEG or ADTS frames in the window, else None."""
+    limit = min(len(data), SYNC_SEARCH_BYTES)
+    index = data.find(b"\xff")
+    while 0 <= index < limit:
+        if index + 7 <= len(data) and data[index + 1] & 0xE0 == 0xE0:
+            for kind, measure in (("mpeg", _mpeg_frame_length), ("aac", _adts_frame_length)):
+                length = measure(data[index:index + 7])
+                if length and measure(data[index + length:index + length + 7]) is not None:
+                    return kind
+        index = data.find(b"\xff", index + 1)
+    return None
+
+
 def _defender_exe() -> Path | None:
     candidates = [
         Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Windows Defender" / "MpCmdRun.exe",
@@ -423,7 +554,8 @@ def _defender_exe() -> Path | None:
         return candidates[0]
     platform = candidates[1]
     if platform.is_dir():
-        for folder in sorted(platform.iterdir(), reverse=True):
+        # Numeric order: "4.18.25080.11" is newer than "4.18.25080.5" although it sorts lower as text.
+        for folder in sorted(platform.iterdir(), key=lambda entry: _version_key(entry.name), reverse=True):
             executable = folder / "MpCmdRun.exe"
             if executable.is_file():
                 return executable

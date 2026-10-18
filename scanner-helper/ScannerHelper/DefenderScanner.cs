@@ -24,8 +24,16 @@ public static class DefenderScanner
         var platform = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "Microsoft", "Windows Defender", "Platform");
         if (!Directory.Exists(platform)) return null;
-        return Directory.EnumerateDirectories(platform).OrderByDescending(value => value, StringComparer.OrdinalIgnoreCase)
+        // Numeric order: "4.18.25080.11-0" is newer than "4.18.25080.5-0" although it sorts lower as text.
+        return Directory.EnumerateDirectories(platform)
+            .OrderByDescending(folder => PlatformVersion(System.IO.Path.GetFileName(folder)))
             .Select(folder => System.IO.Path.Combine(folder, "MpCmdRun.exe")).FirstOrDefault(File.Exists);
+    }
+
+    public static Version PlatformVersion(string folder)
+    {
+        var dash = folder.IndexOf('-');
+        return Version.TryParse(dash < 0 ? folder : folder[..dash], out var version) ? version : new Version(0, 0);
     }
 
     public static string BuildStatusScript()

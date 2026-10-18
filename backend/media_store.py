@@ -19,7 +19,7 @@ MAX_BATCH = 2 * 1024**3
 MAX_FILES = 200
 CACHE_LIMIT = 10 * 1024**3
 MIMES = {'.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.flac': 'audio/flac',
-         '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.ogg': 'audio/ogg'}
+         '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.ogg': 'audio/ogg', '.opus': 'audio/ogg'}
 
 def public_scan(record):
     if not isinstance(record, dict):
@@ -39,6 +39,10 @@ class MediaError(ValueError):
 
 class MediaBusyError(MediaError):
     pass
+
+
+class BlockedBytesRemoved(MediaError):
+    """Defender reported a threat and the managed bytes were deleted; only removal and re-import remain."""
 
 
 class PlaylistConflictError(MediaError):
@@ -167,12 +171,49 @@ class MediaStore:
 
     def path(self, record, artifact='source'):
         media_id = self._id(record['id'])
-        name = record['artifacts'][artifact]['name']
-        if Path(name).name != name or ':' in name or '\\' in name:
-            raise MediaError('Invalid artifact name')
-        path = self.root / media_id / name
+        info = record['artifacts'][artifact]
+        if info.get('purged'):
+            raise BlockedBytesRemoved('Microsoft Defender reported a threat and the blocked bytes were removed '
+                                      'from the managed cache. Remove this item and import a clean copy.')
+        path = self.root / media_id / self._artifact_name(info)
         no_links(path, self.root)
         return path
+
+    @staticmethod
+    def _artifact_name(info):
+        name = info['name']
+        if Path(name).name != name or ':' in name or '\\' in name:
+            raise MediaError('Invalid artifact name')
+        return name
+
+    def purge_artifact(self, media_id, artifact):
+        """Delete the bytes of an artifact Defender reported as a threat; the verdict stays on the record.
+
+        The source entry remains, marked purged, so the item stays visibly blocked and a rescan
+        reports why. Derivative entries are dropped so a clean source can regenerate them.
+        Callers hold no read lock on the file; on Windows an open share-read handle makes the
+        unlink fail and the caller retries on the next job.
+        """
+        with self._lock:
+            record = self.get(media_id)
+            info = record['artifacts'].get(artifact)
+            if info is None or info.get('purged'):
+                return record
+            path = self.root / self._id(media_id) / self._artifact_name(info)
+            if path.exists():
+                no_links(path, self.root)
+                path.unlink()
+            changes = {}
+            if artifact == 'source':
+                info['purged'] = True
+            else:
+                record['artifacts'].pop(artifact)
+                if record.get('playback') == artifact:
+                    source_suffix = Path(record['artifacts']['source']['name']).suffix.lower()
+                    changes.update(playback='source', mime=MIMES.get(source_suffix, 'application/octet-stream'))
+                if artifact == 'artwork':
+                    changes['artwork_status'] = 'failed'
+            return self.update(media_id, artifacts=record['artifacts'], **changes)
 
     def queue(self):
         with self._lock:

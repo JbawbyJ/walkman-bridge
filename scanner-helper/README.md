@@ -10,7 +10,11 @@ named pipe and calls Windows `GetNamedPipeServerProcessId`. Electron then claims
 the pending requests with the backend and sends their secrets over the exchange
 process's private stdin. The exchange verifies the pipe server PID again before
 writing any nonce or file identity. The elevated pipe server independently checks
-the exchange client PID using `GetNamedPipeClientProcessId`.
+the exchange client PID using `GetNamedPipeClientProcessId`. The exchange also
+passes its own account SID (`--expected-client-sid`); the elevated server grants
+pipe access to that identity rather than to its own elevated identity, so a
+standard user who elevates with an administrator's credentials can still connect.
+The PID check, not the SID, binds the connection to the exact exchange process.
 
 Private stdin and pipe payload: `{ "requests": [ScanRequest, ...] }`.
 Result: `{ "results": [ScanResponse, ...] }`. Each request includes the existing

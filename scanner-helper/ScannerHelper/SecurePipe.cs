@@ -8,17 +8,20 @@ namespace NightOps.ScannerHelper;
 
 public static class SecurePipe
 {
-    public static NamedPipeServerStream Create(string fullPipeName)
+    public static NamedPipeServerStream Create(string fullPipeName, SecurityIdentifier client)
     {
         const string prefix = "\\\\.\\pipe\\NightOps.Scanner.";
         if (!fullPipeName.StartsWith(prefix, StringComparison.Ordinal) || fullPipeName.Length > 240)
             throw new SecurityException("invalid scanner pipe name");
         var pipeName = fullPipeName[9..];
-        var user = WindowsIdentity.GetCurrent().User ?? throw new SecurityException("current Windows user has no SID");
         var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
         var security = new PipeSecurity();
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-        security.AddAccessRule(new PipeAccessRule(user, PipeAccessRights.ReadWrite, AccessControlType.Allow));
+        // The exchange client is the identity that must connect. When a standard user elevates with
+        // an administrator's credentials it differs from this elevated process's own identity, so the
+        // client SID supplied at launch is granted rather than WindowsIdentity.GetCurrent(). The
+        // kernel-reported client PID check below still binds the connection to the exact process.
+        security.AddAccessRule(new PipeAccessRule(client, PipeAccessRights.ReadWrite, AccessControlType.Allow));
         security.AddAccessRule(new PipeAccessRule(administrators, PipeAccessRights.FullControl, AccessControlType.Allow));
         return NamedPipeServerStreamAcl.Create(pipeName, PipeDirection.InOut, 1,
             PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 64 * 1024, 64 * 1024, security);

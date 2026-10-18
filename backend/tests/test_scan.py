@@ -77,9 +77,11 @@ def test_defender_receives_absolute_path(monkeypatch, tmp_path: Path):
     ("outcome", "state", "code", "defender_status"),
     [
         (SimpleNamespace(returncode=2, stdout="Scanning C:\\x\\source.mp3 found 1 threats.", stderr=""), "BLOCKED", "defender_threat", "threat"),
-        # Localized Windows: exit code 2 is authoritative even when no English phrase appears.
-        (SimpleNamespace(returncode=2, stdout="Analyse terminée.", stderr=""), "BLOCKED", "defender_threat", "threat"),
         (SimpleNamespace(returncode=0, stdout="Scanning C:\\x\\source.mp3 found 3 threats.", stderr=""), "BLOCKED", "defender_threat", "threat"),
+        # MpCmdRun exit code 2 also covers scanning errors; without a detection line it is a non-clearing error.
+        (SimpleNamespace(returncode=2, stdout="Scan starting...\nCmdTool: Failed with hr = 0x80070002", stderr=""), "ERROR", "defender_scan_error", "error"),
+        # Access denied arrives with exit code 2 as well and must still request elevation.
+        (SimpleNamespace(returncode=2, stdout="Scan starting...\nCmdTool: Failed with hr = 0x80070005. Check C:\\MpCmdRun.log", stderr=""), "AWAITING_PERMISSION", "defender_elevation_required", "elevation_required"),
         (SimpleNamespace(returncode=5, stdout="", stderr="Access is denied"), "AWAITING_PERMISSION", "defender_elevation_required", "elevation_required"),
         (SimpleNamespace(returncode=9, stdout="error", stderr=""), "ERROR", "defender_scan_error", "error"),
     ],
@@ -108,8 +110,7 @@ def test_missing_defender_is_error_not_clear(monkeypatch, tmp_path: Path):
 @pytest.mark.parametrize('outcome,expected', [
     (SimpleNamespace(returncode=0, stdout='Scan finished.', stderr=''), 'CLEAN'),
     (SimpleNamespace(returncode=2, stdout='found 1 threats.', stderr=''), 'BLOCKED'),
-    (SimpleNamespace(returncode=2, stdout='Scanning error', stderr=''), 'BLOCKED'),
-    (SimpleNamespace(returncode=9, stdout='Scanning error', stderr=''), 'ERROR'),
+    (SimpleNamespace(returncode=2, stdout='Scanning error', stderr=''), 'ERROR'),
     (None, 'ERROR'),
 ])
 def test_generated_artwork_requires_its_own_explicit_defender_verdict(monkeypatch, tmp_path, outcome, expected):
@@ -249,13 +250,25 @@ def test_clean_scan_of_a_path_naming_threats_stays_clean(monkeypatch, tmp_path: 
     assert scan.snapshot()["threats"] == 0
 
 
-def test_exit_code_two_is_counted_as_a_threat_without_english_output(monkeypatch, tmp_path: Path):
+def test_exit_code_two_without_a_detection_line_is_an_error_not_a_threat(monkeypatch, tmp_path: Path):
     path = tmp_path / "song.mp3"
     path.write_bytes(_mp3_stub())
     monkeypatch.setattr(scan, "_invoke_defender",
-                        lambda _path: SimpleNamespace(returncode=2, stdout="Überprüfung abgeschlossen.", stderr=""))
+                        lambda _path: SimpleNamespace(returncode=2, stdout="Scan starting...\nCmdTool: Failed with hr = 0x8050800C", stderr=""))
     result = scan.scan_audio(path)
     assert result.ok is False
+    assert (result.state, result.reason_code, result.defender_status) == ("ERROR", "defender_scan_error", "error")
+    assert "exit code 2" in result.reason
+    snapshot = scan.snapshot()
+    assert snapshot["threats"] == 0 and snapshot["blocked"] == 0 and snapshot["cleared"] == 0
+
+
+def test_detection_line_counts_as_a_threat_in_the_snapshot(monkeypatch, tmp_path: Path):
+    path = tmp_path / "song.mp3"
+    path.write_bytes(_mp3_stub())
+    monkeypatch.setattr(scan, "_invoke_defender",
+                        lambda _path: SimpleNamespace(returncode=2, stdout="Scan finished.\nScanning C:\\x\\source.mp3 found 1 threats.", stderr=""))
+    result = scan.scan_audio(path)
     assert (result.state, result.reason_code, result.defender_status) == ("BLOCKED", "defender_threat", "threat")
     snapshot = scan.snapshot()
     assert snapshot["threats"] == 1 and snapshot["blocked"] == 1 and snapshot["cleared"] == 0
@@ -291,6 +304,9 @@ def test_frame_walk_is_linear_for_a_tag_packed_with_tiny_frames(tmp_path: Path):
     (_minimal_frame()[:-1], b"", True),                      # truncated final frame
     (_minimal_frame(b"tx1x"), b"", True),                    # lowercase frame id
     (_minimal_frame(b"TXXX", b""), b"", True),               # zero-length frame
+    # Frames of differing sizes with APIC second: sizes and payloads must be read at the cursor.
+    (_minimal_frame(b"TIT2", b"\x00abc") + _minimal_frame(b"APIC", b"\x00image/jpeg\x00\x03\x00\xff\xd8\xff\xd9") + _minimal_frame(), b"", False),
+    (_minimal_frame(b"TIT2", b"\x00abc") + _minimal_frame(b"APIC", b"\x00image/jpeg-without-terminator") + _minimal_frame(), b"", True),
 ])
 def test_frame_walk_preserves_padding_and_malformation_rules(tmp_path: Path, frames, padding, malformed):
     path = tmp_path / "frames.mp3"
@@ -302,11 +318,133 @@ def test_frame_walk_preserves_padding_and_malformation_rules(tmp_path: Path, fra
 
 
 def test_frame_walk_handles_v22_and_v24_headers(tmp_path: Path):
-    v22_frame = b"TT2" + (1).to_bytes(3, "big") + b"\x00"
-    v22 = b"ID3\x02\x00\x00" + bytes((0, 0, 0, len(v22_frame))) + v22_frame + MPEG_FRAME
-    v24_frame = b"TIT2" + bytes((0, 0, 0, 1)) + b"\x00\x00" + b"\x00"
-    v24 = b"ID3\x04\x00\x00" + bytes((0, 0, 0, len(v24_frame))) + v24_frame + MPEG_FRAME
+    # Two frames of differing sizes per version, so the second header must be read at the cursor.
+    v22_frames = b"TT2" + (5).to_bytes(3, "big") + b"\x00abcd" + b"TP1" + (1).to_bytes(3, "big") + b"\x00"
+    v22 = b"ID3\x02\x00\x00" + bytes((0, 0, 0, len(v22_frames))) + v22_frames + MPEG_FRAME
+    v24_frames = b"TIT2" + bytes((0, 0, 0, 5)) + b"\x00\x00" + b"\x00abcd" + b"TPE1" + bytes((0, 0, 0, 1)) + b"\x00\x00" + b"\x00"
+    v24 = b"ID3\x04\x00\x00" + bytes((0, 0, 0, len(v24_frames))) + v24_frames + MPEG_FRAME
     for content in (v22, v24):
         path = tmp_path / "versions.mp3"
         path.write_bytes(content)
         assert scan.scan_audio(path).ok is True
+
+
+def test_frame_walk_starts_after_an_extended_header(tmp_path: Path):
+    frames = _minimal_frame(b"TIT2", b"\x00abc") + _minimal_frame()
+    extended = (6).to_bytes(4, "big") + b"\x00\x00" + b"\x00\x00\x00\x00"  # v2.3: size excludes its own 4 bytes
+    n = len(extended) + len(frames)
+    size = bytes(((n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F))
+    path = tmp_path / "extended.mp3"
+    path.write_bytes(b"ID3\x03\x00\x40" + size + extended + frames + MPEG_FRAME)
+    assert scan.scan_audio(path).ok is True
+    oversized = (200).to_bytes(4, "big") + b"\x00\x00"
+    n = len(oversized)
+    size = bytes(((n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F))
+    path.write_bytes(b"ID3\x03\x00\x40" + size + oversized + MPEG_FRAME)
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+
+
+def test_unsynchronised_id3v23_tag_is_accepted(tmp_path: Path):
+    payload = b"\x00\xff\xe0abc"  # a text frame whose bytes need unsynchronisation
+    frame = _minimal_frame(b"TXXX", payload)
+    on_disk = frame.replace(b"\xff\xe0", b"\xff\x00\xe0")
+    n = len(on_disk)
+    size = bytes(((n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F))
+    path = tmp_path / "unsync.mp3"
+    path.write_bytes(b"ID3\x03\x00\x80" + size + on_disk + MPEG_FRAME)
+    assert scan.scan_audio(path).ok is True
+    # The same bytes without the unsynchronisation flag are a misaligned frame list.
+    path.write_bytes(b"ID3\x03\x00\x00" + size + on_disk + MPEG_FRAME)
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+
+
+def _mpeg_frames(count: int) -> bytes:
+    # MPEG-1 Layer III, 128 kbps, 44.1 kHz: 417-byte frames.
+    return (b"\xff\xfb\x90\x00" + b"\x00" * 413) * count
+
+
+@pytest.mark.parametrize("prefix", [ID3_EMPTY, b""])
+@pytest.mark.parametrize("filler", [b"\x00" * 2048, b"APETAGEX" + b"\x11" * 300, b"\x7f" * 60000])
+def test_padding_or_junk_before_the_first_frame_is_tolerated(tmp_path: Path, prefix, filler):
+    path = tmp_path / "padded.mp3"
+    path.write_bytes(prefix + filler + _mpeg_frames(2))
+    assert scan.scan_audio(path).ok is True
+
+
+def test_a_lone_sync_word_inside_junk_is_not_audio(tmp_path: Path):
+    path = tmp_path / "fake.mp3"
+    path.write_bytes(ID3_EMPTY + b"\x00" * 64 + b"\xff\xfb\x90\x00" + b"\x00" * 100)
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+    path.write_bytes(ID3_EMPTY + b"\x00" * (scan.SYNC_SEARCH_BYTES + 16) + _mpeg_frames(2))
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"  # beyond the bounded window
+
+
+def test_adts_aac_with_leading_padding_is_tolerated(tmp_path: Path):
+    frame = bytes((0xFF, 0xF1, 0x50, 0x80, 0x02, 0x1F, 0xFC)) + b"\x00" * 9  # 16-byte ADTS frame
+    path = tmp_path / "padded.aac"
+    path.write_bytes(b"\x00" * 512 + frame * 3)
+    assert scan.scan_audio(path).ok is True
+    path.write_bytes(b"\x00" * 512 + frame)
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+
+
+def test_frame_length_tables_match_known_headers():
+    assert scan._mpeg_frame_length(b"\xff\xfb\x90\x00") == 417      # MPEG-1 L3 128k 44.1k
+    assert scan._mpeg_frame_length(b"\xff\xfb\x92\x00") == 418      # same frame with the padding bit
+    assert scan._mpeg_frame_length(b"\xff\xf3\x90\x00") == 261      # MPEG-2 L3 80k 22.05k: 72*80000//22050
+    assert scan._mpeg_frame_length(b"\xff\xfd\x90\x00") == 522      # MPEG-1 L2 160k 44.1k: 144*160000//44100
+    assert scan._mpeg_frame_length(b"\xff\xff\x90\x00") == 312      # MPEG-1 L1 288k 44.1k: (12*288000//44100)*4
+    assert scan._mpeg_frame_length(b"\xff\xfb\x00\x00") is None     # free-format bitrate index
+    assert scan._mpeg_frame_length(b"\xff\xfb\xf0\x00") is None     # reserved bitrate index
+    assert scan._mpeg_frame_length(b"\xff\xfb\x9c\x00") is None     # reserved sample-rate index
+    assert scan._mpeg_frame_length(b"\xff\xeb\x90\x00") is None     # reserved version bits
+    assert scan._adts_frame_length(bytes((0xFF, 0xF1, 0x50, 0x80, 0x02, 0x1F, 0xFC))) == 16
+    assert scan._adts_frame_length(bytes((0xFF, 0xF1, 0x50, 0x80, 0x00, 0x1F, 0xFC))) is None  # shorter than its header
+
+
+def test_opus_extension_is_an_ogg_container(tmp_path: Path):
+    path = tmp_path / "song.opus"
+    path.write_bytes(b"OggS" + b"\x00" * 60)
+    assert scan.scan_audio(path).ok is True
+
+
+def test_platform_fallback_prefers_the_numerically_newest_defender(monkeypatch, tmp_path: Path):
+    program_files = tmp_path / "Program Files"
+    program_files.mkdir()
+    platform = tmp_path / "ProgramData" / "Microsoft" / "Windows Defender" / "Platform"
+    for folder in ("4.18.25080.5-0", "4.18.25080.11-0", "4.18.24100.4-0"):
+        (platform / folder).mkdir(parents=True)
+        (platform / folder / "MpCmdRun.exe").write_bytes(b"")
+    monkeypatch.setenv("ProgramFiles", str(program_files))
+    monkeypatch.setenv("ProgramData", str(tmp_path / "ProgramData"))
+    monkeypatch.setattr(scan.shutil, "which", lambda name: None)
+    assert scan._defender_exe() == platform / "4.18.25080.11-0" / "MpCmdRun.exe"
+
+
+def test_consumption_checks_reuse_digest_and_status_briefly(monkeypatch, tmp_path: Path):
+    path = tmp_path / "song.mp3"
+    path.write_bytes(_mp3_stub())
+    record = scan.scan_audio(path).to_dict()
+    hashed, queried = [], []
+    original = scan._fingerprint_with_stat
+    monkeypatch.setattr(scan, "_fingerprint_with_stat", lambda target: hashed.append(target) or original(target))
+    monkeypatch.setattr(scan, "_query_defender_status", lambda: queried.append(1) or dict(STATUS))
+    assert scan.clearance_valid(path, record) is True
+    assert scan.clearance_valid(path, record) is True
+    assert (len(hashed), len(queried)) == (1, 1)
+    path.write_bytes(_mp3_stub() + b"x")  # a changed file never hits the cached digest
+    assert scan.clearance_valid(path, record) is False
+    assert len(hashed) == 2
+
+
+def test_scans_never_use_cached_status_and_unavailable_status_is_not_cached(monkeypatch, tmp_path: Path):
+    path = tmp_path / "song.mp3"
+    path.write_bytes(_mp3_stub())
+    record = scan.scan_audio(path).to_dict()
+    assert scan.clearance_valid(path, record) is True  # populates the status cache
+    monkeypatch.setattr(scan, "_query_defender_status", lambda: {"available": False})
+    assert scan.scan_audio(path).reason_code == "defender_status_unavailable"
+    scan.reset_for_tests()
+    assert scan.clearance_valid(path, record) is False
+    monkeypatch.setattr(scan, "_query_defender_status", lambda: dict(STATUS))
+    assert scan.clearance_valid(path, record) is True  # recovery is immediate

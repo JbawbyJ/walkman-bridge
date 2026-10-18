@@ -1,3 +1,4 @@
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using NightOps.ScannerHelper;
@@ -12,7 +13,7 @@ static async Task<int> MainAsync(string[] args)
         var options = HelperOptions.Parse(args);
         TrustedProcess.SanitizeCurrentEnvironment();
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(30));
-        await using var pipe = SecurePipe.Create(options.PipeName);
+        await using var pipe = SecurePipe.Create(options.PipeName, options.ExpectedClient);
         await pipe.WaitForConnectionAsync(timeout.Token);
         SecurePipe.VerifyClientProcess(pipe, options.ExpectedClientPid);
         var raw = await SecurePipe.ReadLineAsync(pipe, NativeExchange.MaximumMessageBytes, timeout.Token);
@@ -54,20 +55,23 @@ static async Task<int> MainAsync(string[] args)
     catch { Console.Error.WriteLine("scanner_exchange_failed"); return 1; }
 }
 
-internal sealed record HelperOptions(string PipeName, string CacheRoot, int ExpectedClientPid)
+internal sealed record HelperOptions(string PipeName, string CacheRoot, int ExpectedClientPid, SecurityIdentifier ExpectedClient)
 {
     public static HelperOptions Parse(string[] args)
     {
-        if (args.Length != 6) throw new ArgumentException("invalid helper arguments");
+        if (args.Length != 8) throw new ArgumentException("invalid helper arguments");
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
         for (var index = 0; index < args.Length; index += 2)
         {
-            if (args[index] is not ("--pipe" or "--cache-root" or "--expected-client-pid")
+            if (args[index] is not ("--pipe" or "--cache-root" or "--expected-client-pid" or "--expected-client-sid")
                 || !values.TryAdd(args[index], args[index + 1]))
                 throw new ArgumentException("invalid helper argument");
         }
         if (!int.TryParse(values["--expected-client-pid"], out var pid) || pid <= 0)
             throw new ArgumentException("invalid expected client process");
-        return new HelperOptions(values["--pipe"], System.IO.Path.GetFullPath(values["--cache-root"]), pid);
+        SecurityIdentifier client;
+        try { client = new SecurityIdentifier(values["--expected-client-sid"]); }
+        catch (ArgumentException) { throw new ArgumentException("invalid expected client identity"); }
+        return new HelperOptions(values["--pipe"], System.IO.Path.GetFullPath(values["--cache-root"]), pid, client);
     }
 }

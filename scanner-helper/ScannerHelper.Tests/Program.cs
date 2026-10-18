@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Security;
 using System.Diagnostics;
 using System.IO.Pipes;
@@ -14,6 +15,8 @@ Run("clean result requires signature status", TestCleanRequiresStatus);
 Run("clean result rejects disabled or passive Defender", TestDisabledDefender);
 Run("trusted PowerShell and sanitized child environment", TestTrustedProcess);
 Run("batch limits and duplicate identities reject", TestBatchLimits);
+Run("platform folders order numerically", TestPlatformOrdering);
+Run("threat verdict follows the detection line, not exit code 2", TestThreatClassification);
 await RunAsync("wrong pipe server PID receives zero secret bytes", TestWrongServerPid);
 await RunAsync("one-shot named pipe binds process and harmless Defender result", TestOneShotHelper);
 
@@ -22,7 +25,7 @@ if (failures.Count > 0)
     Console.Error.WriteLine(string.Join(Environment.NewLine, failures));
     return 1;
 }
-Console.WriteLine("ScannerHelper.Tests: 9 passed");
+Console.WriteLine("ScannerHelper.Tests: 11 passed");
 return 0;
 
 void Run(string name, Action test)
@@ -84,10 +87,31 @@ void TestBatchLimits()
     Protocol.ValidateBatch(new ScanBatch([request, request with { RequestId = "second" }]), Environment.ProcessId);
 }
 
+void TestThreatClassification()
+{
+    var request = new ScanRequest("r", new string('n', 32), new string('a', 32), "C:\\x", new string('a', 64), 1, Environment.ProcessId);
+    var status = new DefenderStatus("1", "2", "3", true, true, "Normal");
+    var detected = Protocol.CreateResult(request, Environment.ProcessId, new DefenderOutcome(2, "Scan finished.\nScanning C:\\x\\source.mp3 found 1 threats.", "", null), 1.0);
+    Assert(!detected.Ok && detected.State == "BLOCKED" && detected.ReasonCode == "defender_threat", "an explicit detection line must be a threat");
+    var listed = Protocol.CreateResult(request, Environment.ProcessId, new DefenderOutcome(0, "found 3 threats.", "", status), 1.0);
+    Assert(!listed.Ok && listed.ReasonCode == "defender_threat", "a detection line is a threat even with exit code 0");
+    var scanError = Protocol.CreateResult(request, Environment.ProcessId, new DefenderOutcome(2, "Scan starting...\nCmdTool: Failed with hr = 0x80070002", "", null), 1.0);
+    Assert(!scanError.Ok && scanError.State == "ERROR" && scanError.ReasonCode == "defender_scan_error", "exit code 2 without a detection line is a non-clearing error, not a threat");
+    var namedPath = Protocol.CreateResult(request, Environment.ProcessId, new DefenderOutcome(0, "Scanning C:\\Users\\Threat Lab\\cache\\source.mp3 found no threats.", "", status), 1.0);
+    Assert(namedPath.Ok && namedPath.ReasonCode == "clean", "a path containing the word threat must not read as a detection");
+}
+
+void TestPlatformOrdering()
+{
+    Assert(DefenderScanner.PlatformVersion("4.18.25080.11-0") > DefenderScanner.PlatformVersion("4.18.25080.5-0"), "same-month platform revisions must order numerically");
+    Assert(DefenderScanner.PlatformVersion("4.18.24100.4-0") > DefenderScanner.PlatformVersion("4.18.24090.11-0"), "newer platform month must order first");
+    Assert(DefenderScanner.PlatformVersion("not-a-version") == new Version(0, 0), "unparseable folders must sort last");
+}
+
 async Task TestWrongServerPid()
 {
     var name = $"\\\\.\\pipe\\NightOps.Scanner.{Guid.NewGuid():N}";
-    await using var server = SecurePipe.Create(name);
+    await using var server = SecurePipe.Create(name, WindowsIdentity.GetCurrent().User!);
     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
     var accepted = server.WaitForConnectionAsync(timeout.Token);
     await using (var client = new NamedPipeClientStream(".", name[9..], PipeDirection.InOut, PipeOptions.Asynchronous))
@@ -132,7 +156,7 @@ async Task TestOneShotHelper()
     Assert(File.Exists(helper), "helper apphost is missing");
     var fullPipe = $"\\\\.\\pipe\\NightOps.Scanner.{Guid.NewGuid():N}";
     var start = new ProcessStartInfo(helper) { UseShellExecute = false, CreateNoWindow = true };
-    foreach (var argument in new[] { "--pipe", fullPipe, "--cache-root", fixture.Root, "--expected-client-pid", Environment.ProcessId.ToString() })
+    foreach (var argument in new[] { "--pipe", fullPipe, "--cache-root", fixture.Root, "--expected-client-pid", Environment.ProcessId.ToString(), "--expected-client-sid", WindowsIdentity.GetCurrent().User!.Value })
         start.ArgumentList.Add(argument);
     using var process = Process.Start(start) ?? throw new Exception("could not start helper");
     var original = fixture.Request();

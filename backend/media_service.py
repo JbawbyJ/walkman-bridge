@@ -4,7 +4,7 @@ import hashlib
 from contextlib import ExitStack
 from pathlib import Path
 from jobs import JobStatus
-from media_store import MAX_FILE, MediaError, locked_read, no_links
+from media_store import MAX_FILE, BlockedBytesRemoved, MediaError, locked_read, no_links
 from transcode import convert_managed, analyze_cleared_audio, extract_cleared_artwork
 from metadata import normalize_metadata, TRANSFER_TAGS
 from scan_bridge import ELEVATION_WAIT_SECONDS
@@ -37,7 +37,7 @@ class MediaService:
 
     def clear(self, media_id, artifact='source', job=None, batch_id=None):
         record = self.store.get(media_id)
-        path = self.store.path(record, artifact)
+        path = self.store.path(record, artifact)  # raises BlockedBytesRemoved for purged threat bytes
         previous = record['artifacts'][artifact].get('scan')
         if previous and self.scanner.clearance_valid(path, previous):
             if artifact == 'artwork':
@@ -132,8 +132,34 @@ class MediaService:
     def scan_failure(self, job, media_id, exc):
         row = next(row for row in job.to_dict()['files'] if row['file_id'] == media_id)
         if row['state'] not in ('blocked', 'failed'):
-            job.update_file(media_id, state='failed', detail=str(exc), reason_code='scan_failed')
-            self.store.update(media_id, status='failed')
+            blocked = isinstance(exc, BlockedBytesRemoved)
+            job.update_file(media_id, state='blocked' if blocked else 'failed', detail=str(exc),
+                            reason_code='defender_threat' if blocked else 'scan_failed')
+            self.store.update(media_id, status='blocked' if blocked else 'failed')
+
+    def purge_threats(self, job, ids):
+        """Delete managed bytes Defender reported as threats, once every read lock has been released.
+
+        Only explicit Defender threat verdicts are purged. A threat verdict on the source also removes
+        every derivative decoded from those bytes. Format rejections keep their bytes so a later gate
+        relaxation can clear them with a rescan.
+        """
+        for media_id in ids:
+            try:
+                record = self.store.get(media_id)
+            except MediaError:
+                continue
+            def is_threat(info):
+                return (info.get('scan') or {}).get('reason_code') == 'defender_threat'
+            source_threat = is_threat(record['artifacts']['source']) or record['artifacts']['source'].get('purged')
+            for artifact, info in list(record['artifacts'].items()):
+                if info.get('purged') or not (source_threat or is_threat(info)):
+                    continue
+                try:
+                    self.store.purge_artifact(media_id, artifact)
+                    job.log(f'Removed blocked bytes ({artifact}) for {record["name"]}')
+                except OSError as exc:
+                    job.log(f'Blocked bytes ({artifact}) for {record["name"]} are still held and will be removed later: {exc}')
 
     def derivative(self, media_id, kind, job, scan_output=True):
         record = self.store.get(media_id)
@@ -306,6 +332,7 @@ class MediaService:
                     self.clear_group(playback_ids, 'playback', job)
             if kind in ('upload', 'transfer') and ready:
                 self.write_device(job, ready, ticket)
+            self.purge_threats(job, ids)
             rows = job.to_dict()['files']
             good = sum(row['state'] in ('ready', 'transferred') for row in rows)
             unknown = any(row['state'] == 'unknown' for row in rows)
