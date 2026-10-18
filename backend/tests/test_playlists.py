@@ -357,7 +357,7 @@ def test_playlist_write_passes_fatal_code_to_frontend_payload(context, monkeypat
     assert detail['recovery_action'] == {
         'PLAYLIST_REF_MISSING': 'repair',
         'PLAYLIST_JOURNAL_PENDING': 'inspect_recover',
-        'PLAYLIST_SLOTS_EXHAUSTED': 'free_slots',
+        'PLAYLIST_SLOTS_EXHAUSTED': 'reuse_playlist',
     }.get(code)
     assert detail['code'] == 'verify_device_state'
     assert detail['message'] == 'Verify device state before another playlist edit'

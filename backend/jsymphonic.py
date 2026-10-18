@@ -633,7 +633,17 @@ def inspect_playlist_journal(mount: Path) -> dict:
     covers = _journal_covers(journal)
     if state is None or covers is None or (state == 'none' and covers['files']):
         raise JSymphonicError('Shim did not return a valid journal inspection')
-    return _with_probe_warnings({"exists": state != 'none', "state": state, "covers": covers}, events)
+    result = {"exists": state != 'none', "state": state, "covers": covers}
+    # New engines bind confirmation to journal payloads and current Sony tables.
+    # Legacy engines remain inspectable, but cannot enable guarded UI writes.
+    for field in ('fingerprint', 'library_fingerprint'):
+        value = journal.get(field)
+        if value is not None:
+            if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value):
+                raise JSymphonicError('Shim returned an invalid recovery fingerprint')
+            result[field] = value
+    result['guarded'] = bool(result.get('library_fingerprint') and (state == 'none' or result.get('fingerprint')))
+    return _with_probe_warnings(result, events)
 
 
 def recover_playlist_journal(mount: Path) -> dict:

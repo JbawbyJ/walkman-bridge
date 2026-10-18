@@ -20,7 +20,7 @@ export default function DeviceRecoveryPanel({ connected, busy = false, onBusy = 
     setJournal(inspected); setSnapshot(state); setSelected(state.jobs?.[0]?.job_id || '')
   })
   const recover = action => run(async () => {
-    if (!confirmed || !journal?.etag) return
+    if (!confirmed || !journal?.etag || !journal.guarded) return
     const token = journal.etag
     clear()
     const result = await (action === 'recover' ? api.recoverPlaylistJournal(token) : api.repairPlaylists(token))
@@ -57,9 +57,10 @@ export default function DeviceRecoveryPanel({ connected, busy = false, onBusy = 
         <ul>{snapshot.playlists.map(row => <li key={row.id}>Playlist {row.id}: {row.name} ({row.track_ids?.length || 0} tracks)</li>)}</ul>
       </details>}
       {(pending || repairable) ? <>
+        {!journal?.guarded && <p role="alert">This engine cannot bind recovery confirmation to the inspected data. Update the packaged engine before recovery.</p>}
         <p>{pending ? 'Recovery restores or finishes the interrupted transaction according to its journal.' : 'Repair removes playlist references to missing tracks.'} Back up the Walkman first. This action writes to the device.</p>
         <label className="toggle"><input type="checkbox" checked={confirmed} disabled={disabled} onChange={e => setConfirmed(e.target.checked)} />I reviewed the recovery state and want to proceed.</label>
-        <button type="button" className="button" disabled={disabled || !confirmed || !journal?.etag} onClick={() => recover(pending ? 'recover' : 'repair')}>{pending ? 'Recover interrupted write' : 'Repair missing references'}</button>
+        <button type="button" className="button" disabled={disabled || !confirmed || !journal?.etag || !journal.guarded} onClick={() => recover(pending ? 'recover' : 'repair')}>{pending ? 'Recover interrupted write' : 'Repair missing references'}</button>
       </> : !!snapshot.jobs?.length && <>
         <label>Interrupted operation <select aria-label="Interrupted operation" value={selected} disabled={disabled} onChange={e => { setSelected(e.target.value); setConfirmed(false) }}>
           {snapshot.jobs.map(job => <option key={job.job_id} value={job.job_id}>{job.kind || 'Operation'} — {job.files?.[0]?.name || job.job_id}</option>)}

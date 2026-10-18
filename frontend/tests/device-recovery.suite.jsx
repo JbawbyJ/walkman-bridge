@@ -42,7 +42,7 @@ test('pending recovery requires confirmation, sends journal token and discards s
   Object.defineProperty(globalThis, 'document', { value: dom.window.document, configurable: true })
   globalThis.IS_REACT_ACT_ENVIRONMENT = true
   const original = { ...api }, calls = []
-  api.inspectRecoveryJournal = async () => ({ state: 'committed', etag: 'old-journal', covers: { files: ['01TREE22.DAT'] } })
+  api.inspectRecoveryJournal = async () => ({ state: 'committed', guarded: true, etag: 'old-journal', covers: { files: ['01TREE22.DAT'] } })
   api.inspectDeviceState = async () => ({ can_acknowledge: false, tracks: [], playlists: [], jobs: [], warnings: [] })
   api.recoverPlaylistJournal = async etag => { calls.push(etag); throw new Error('Device changed; inspect again') }
   const host = document.querySelector('#root'), root = createRoot(host)

@@ -1,9 +1,12 @@
 import importlib.util
+import hashlib
 import json
 import shutil
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 import zipfile
 
 spec = importlib.util.spec_from_file_location("nightops_stage", Path(__file__).with_name("stage.py"))
@@ -12,6 +15,37 @@ spec.loader.exec_module(stage)
 
 
 class StagingSafetyTests(unittest.TestCase):
+    def test_stale_jar_cannot_be_staged_even_with_a_done_event(self):
+        old = SimpleNamespace(returncode=0, stdout='{"event":"playlistJournal","state":"none","files":[]}\n{"event":"done"}\n')
+        with patch.object(stage.subprocess, 'run', return_value=old):
+            with self.assertRaisesRegex(ValueError, 'recovery contract'):
+                stage.verify_engine_contract(Path('java.exe'), Path('old.jar'))
+
+    def test_recovery_contract_probe_is_confined_to_disposable_empty_device(self):
+        observed = []
+        def run(command, **kwargs):
+            mount = Path(command[command.index('--device') + 1])
+            self.assertTrue((mount / 'OMGAUDIO').is_dir())
+            self.assertEqual(list((mount / 'OMGAUDIO').iterdir()), [])
+            observed.append(mount)
+            if 'playlist-repair' in command:
+                events, code = [{'event': 'fatal', 'code': 'PLAYLIST_LIBRARY_NOT_LOADED'}], 1
+            else:
+                events, code = [{'event': 'playlistJournal', 'state': 'none', 'files': [],
+                                 'outcome': 'none', 'library_fingerprint': 'a' * 64}, {'event': 'done'}], 0
+            return SimpleNamespace(returncode=code, stdout='\n'.join(json.dumps(e) for e in events))
+        with patch.object(stage.subprocess, 'run', side_effect=run):
+            stage.verify_engine_contract(Path('java.exe'), Path('candidate.jar'))
+        self.assertEqual(len(observed), 3)
+        self.assertFalse(observed[0].exists())
+
+    def test_vendored_deno_notice_bytes_match_recorded_provenance(self):
+        directory = stage.PACKAGING / 'notices/deno'
+        for entry in json.loads((directory / 'PROVENANCE.json').read_text(encoding='utf-8')):
+            data = (directory / entry['file']).read_bytes()
+            self.assertEqual(len(data), entry['bytes'])
+            self.assertEqual(hashlib.sha256(data).hexdigest(), entry['sha256'])
+
     def test_player_requires_deno_notices_and_excludes_device_reconciliation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

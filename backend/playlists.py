@@ -316,8 +316,10 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
                 # UI recovery confirmation is bound to the inspected journal
                 # and physical volume. Legacy API callers may omit If-Match.
                 expected = request.headers.get('if-match')
-                if expected and journal_etag(volume, device_api.inspect_playlist_journal(mount)) != expected:
-                    raise HTTPException(409, 'Device or recovery journal changed; inspect again')
+                if expected:
+                    journal = device_api.inspect_playlist_journal(mount)
+                    if not journal.get('guarded') or journal_etag(volume, journal) != expected:
+                        raise HTTPException(409, 'Device or recovery journal changed, or engine needs updating; inspect again')
                 if action == 'repair':
                     # Always list. A stale non-empty cache must not skip the empty-library refusal.
                     rows = device_api.list_tracks(mount)

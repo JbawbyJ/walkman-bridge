@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
@@ -126,6 +127,35 @@ def checked(command, **kwargs):
     return completed
 
 
+def verify_engine_contract(java: Path, jar: Path):
+    """Reject a stale JAR using only a new disposable device fixture."""
+    with tempfile.TemporaryDirectory(prefix='engine-contract-') as temporary:
+        mount = Path(temporary) / 'device'
+        (mount / 'OMGAUDIO').mkdir(parents=True)
+        prefix = [str(java.resolve()), '-cp', str(jar.resolve()), 'org.naurd.media.jsymphonic.headless.HeadlessCli']
+        for command, options in (('playlist-recover', ['--inspect']), ('playlist-recover', []), ('playlist-repair', [])):
+            result = subprocess.run([*prefix, command, '--device', str(mount), *options],
+                capture_output=True, text=True, encoding='utf-8', errors='strict', timeout=45,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            try:
+                events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+                assert all(isinstance(event, dict) for event in events)
+                if command == 'playlist-repair':
+                    assert result.returncode != 0
+                    assert any(e.get('event') == 'fatal' and e.get('code') == 'PLAYLIST_LIBRARY_NOT_LOADED' for e in events)
+                    assert not any(e.get('event') == 'done' for e in events)
+                else:
+                    assert result.returncode == 0 and events[-1].get('event') == 'done'
+                    journal = next(e for e in events if e.get('event') == 'playlistJournal')
+                    assert journal.get('state') == 'none'
+                    assert re.fullmatch(r'[0-9a-f]{64}', journal.get('library_fingerprint', ''))
+                    assert journal.get('files') == []
+                    if not options:
+                        assert journal.get('outcome') == 'none'
+            except (AssertionError, ValueError, StopIteration, IndexError, TypeError) as exc:
+                raise ValueError(f'Packaged engine lacks the required recovery contract: {command}') from exc
+
+
 def verify_requirements(wheels):
     locked = {row["name"].lower().replace("_", "-"): row["version"] for row in wheels}
     for line in (ROOT / "backend" / "requirements.txt").read_text().splitlines():
@@ -210,6 +240,7 @@ def stage(args):
         release = (jdk / "release").read_text()
         if f'JAVA_VERSION="{runtime_lock["jdk"]["version"]}"' not in release:
             raise ValueError("JDK version does not match the runtime lock")
+        verify_engine_contract(jdk / 'bin' / 'java.exe', args.jar)
         checked([jdk / "bin" / "jlink.exe", "--add-modules",
                  "java.base,java.desktop,java.logging,java.naming,java.management",
                  "--strip-debug", "--no-header-files", "--no-man-pages", "--compress=zip-6",

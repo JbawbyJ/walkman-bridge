@@ -165,6 +165,7 @@ def test_dangling_playlist_exposes_repair_without_unlocking(context):
 
 def test_recovery_confirmation_refuses_replaced_volume(context, tmp_path):
     uncertain(context)
+    context.api.inspect_playlist_journal = lambda mount: {'state': 'none', 'guarded': True, 'library_fingerprint': 'a' * 64}
     calls = []
     context.api.recover_playlist_journal = lambda mount: calls.append(mount) or {'outcome': 'none'}
     inspected = context.client.get('/api/device/playlist-recovery/inspect')
@@ -173,6 +174,21 @@ def test_recovery_confirmation_refuses_replaced_volume(context, tmp_path):
     context.api.find_walkman = lambda: other
     response = context.client.post('/api/device/playlist-recovery/recover', headers={'If-Match': inspected.headers['etag']})
     assert response.status_code == 409
+    assert not calls
+
+
+@pytest.mark.parametrize('field', ['fingerprint', 'library_fingerprint'])
+def test_confirmed_recovery_rejects_changed_bytes_with_same_coverage(context, field):
+    uncertain(context)
+    journal = {'state': 'committed', 'guarded': True, 'files': ['01TREE22.DAT'],
+               'fingerprint': 'a' * 64, 'library_fingerprint': 'b' * 64}
+    context.api.inspect_playlist_journal = lambda mount: dict(journal)
+    calls = []
+    context.api.recover_playlist_journal = lambda mount: calls.append(mount) or {'outcome': 'rolled_forward'}
+    response = context.client.get('/api/device/playlist-recovery/inspect')
+    journal[field] = 'c' * 64
+    result = context.client.post('/api/device/playlist-recovery/recover', headers={'If-Match': response.headers['etag']})
+    assert result.status_code == 409
     assert not calls
 
 

@@ -2,3 +2,5 @@
 *.sh text eol=lf
 *.bat text eol=crlf
 *.jar binary
+# Vendored notices retain upstream bytes (including CRLF and license whitespace).
+packaging/notices/deno/* -text -whitespace
