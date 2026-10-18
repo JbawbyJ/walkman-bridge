@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import { backupFailureMessage, backupSavedMessage, backupSuccessPath } from './backup.js'
 import { moveTrack, playable, transferable, timeLabel, processingBusy } from './playback.js'
@@ -46,6 +46,12 @@ function Workspace({ product, version, session }) {
   const [linkDialog, setLinkDialog] = useState(null)
   const [musicManager, setMusicManager] = useState(null)
   const [bridgeView, setBridgeView] = useState('listening')
+  const workspace = useRef(null)
+  useLayoutEffect(() => {
+    // A new view starts at its heading; polling and other state updates leave
+    // the current view's scroll alone. Keep the player and workspace mounted.
+    if (workspace.current) workspace.current.scrollTop = 0
+  }, [bridgeView])
   const [dragOver, setDragOver] = useState(false)
   const [showQueue, setShowQueue] = useState(() => readPreference(`nightops:${product}:queue-wing`, true))
   const [showEq, setShowEq] = useState(() => readPreference(`nightops:${product}:eq-wing`, false))
@@ -211,7 +217,7 @@ function Workspace({ product, version, session }) {
     {operations.draining && <div className="notice-strip" role="status">Finishing admitted operations before closing… Playback has stopped.</div>}
     {isBridge && <nav className="workspace-tabs" aria-label="Bridge views">{[['listening', 'Listening'], ['device', 'Walkman'], ['transfer', 'Transfer']].map(([view, label]) => <button type="button" key={view} className={bridgeView === view ? 'active' : ''} aria-pressed={bridgeView === view} aria-label={view === 'transfer' && selection.size > 0 ? `Transfer, ${selection.size} files selected` : undefined} onClick={() => setBridgeView(view)}>{label}{view === 'transfer' && selection.size > 0 && <span>{selection.size}</span>}</button>)}<span className={device.connected ? 'connection connected' : 'connection'} role="status" aria-live="polite"><i />{device.connected ? device.model || 'CONNECTED' : 'NO DEVICE'}</span></nav>}
     {!isBridge && <nav className="player-wing-controls" aria-label="Player panels"><button type="button" className={showQueue ? 'active' : ''} aria-pressed={showQueue} onClick={() => changeWing('queue', !showQueue)}>Playback queue</button><span>CRAFTED FOR THE LISTENING HOURS</span><button type="button" className={showEq ? 'active' : ''} aria-pressed={showEq} onClick={() => changeWing('eq', !showEq)}>Equalizer</button></nav>}
-    <main id="workspace" tabIndex={-1} aria-label={isBridge ? { listening: 'Listening', device: 'Walkman', transfer: 'Transfer' }[bridgeView] : 'Player'} className={isBridge ? `bridge-workspace view-${bridgeView}` : `player-workspace ${showQueue ? 'has-queue' : ''} ${showEq ? 'has-eq' : ''}`}>
+    <main ref={workspace} id="workspace" tabIndex={-1} aria-label={isBridge ? { listening: 'Listening', device: 'Walkman', transfer: 'Transfer' }[bridgeView] : 'Player'} className={isBridge ? `bridge-workspace view-${bridgeView}` : `player-workspace ${showQueue ? 'has-queue' : ''} ${showEq ? 'has-eq' : ''}`}>
       {(currentJob || jobError) && <div className="workspace-operation"><JobPanel job={currentJob} pollingError={jobError} /></div>}
       {isBridge ? <>
         {bridgeView === 'listening' && <ListeningView player={player} available={available} mode={visualMode} onMode={changeVisual} showEq={showEq} onToggleEq={() => changeWing('eq', !showEq)} queueProps={queueProps} loading={!ready} />}

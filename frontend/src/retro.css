@@ -123,6 +123,9 @@
   .device-summary{gap:var(--night-space-sm);padding:14px 10px}.device-copy h2{font-size:16px}.device-copy .button{padding-inline:5px}
 }
 /* Bridge reuses the same deck; leave space for its outer rim in the column. */
-.bridge-workspace .listening-column{padding:var(--night-space-2xs);gap:var(--night-space-xl)}
+.bridge-workspace .listening-column{grid-column:1/-1;display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);align-items:start;padding:var(--night-space-2xs);gap:var(--night-space-xl)}
+.listening-player{display:flex;flex-direction:column;gap:var(--night-space-xl);min-width:0}
+.bridge-workspace .listening-column>.queue-panel{min-width:0}
 .bridge-workspace .retro-deck{width:100%;margin-top:var(--night-space-2xs)}
+@media(max-width:900px){.bridge-workspace .listening-column{grid-template-columns:minmax(0,1fr)}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

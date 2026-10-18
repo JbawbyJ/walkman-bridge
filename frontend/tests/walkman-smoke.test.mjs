@@ -10,6 +10,8 @@ import { dialogReport, layoutReport, openBridge, startHarness } from './smoke-ha
 const VIEWS = ['listening', 'device', 'transfer']
 const VIEWPORTS = [
   [1280, 800],
+  [1280, 632],
+  [1360, 720],
   [1140, 860],
   [1380, 860],
   [900, 700],
@@ -120,6 +122,88 @@ test('Listening, Walkman and Transfer views fit representative viewports', { tim
   console.log(`Bridge viewport cases: ${cases}`)
   assertQuiet(page, 'viewport sweep')
   await page.close()
+})
+
+async function completedOperation(page) {
+  await page.route('**/api/jobs/latest', route => route.fulfill({ json: {
+    job_id: 'layout-completed', kind: 'rescan', status: 'done', phase: 'finished',
+    progress: 1, message: 'Synthetic scan completed', files: [],
+  } }))
+}
+
+test('Listening uses the workspace width with the queue beside the player on desktop', { timeout: 180000 }, async () => {
+  const page = await harness.newPage()
+  try {
+    await completedOperation(page)
+    await openBridge(page, harness.origin)
+    await page.waitForSelector('.workspace-operation')
+    for (const [width, height] of [[1280, 632], [1360, 720], [900, 700], [640, 560], [320, 280]]) {
+      await page.setViewportSize({ width, height })
+      await showView(page, 'listening', false)
+      const boxes = await page.evaluate(() => {
+        const rect = selector => {
+          const r = document.querySelector(selector).getBoundingClientRect()
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width }
+        }
+        const main = document.querySelector('main'), style = getComputedStyle(main)
+        return { main: rect('main'), listening: rect('.listening-column'), deck: rect('.retro-deck'), queue: rect('.queue-panel'),
+          inset: parseFloat(style.paddingLeft) + parseFloat(style.paddingRight), scrollbar: main.offsetWidth - main.clientWidth }
+      })
+      const label = `${width}x${height}: ${JSON.stringify(boxes)}`
+      assert.ok(boxes.listening.width >= boxes.main.width - boxes.inset - boxes.scrollbar - 2, label)
+      if (width > 900) {
+        assert.ok(boxes.queue.left >= boxes.deck.right, label)
+        assert.ok(Math.abs(boxes.queue.top - boxes.deck.top) < 10, label)
+      } else assert.ok(boxes.queue.top >= boxes.deck.bottom, label)
+      assertLayout(await page.evaluate(layoutReport), label)
+    }
+    assertQuiet(page, 'Listening column regression')
+  } finally { await page.close() }
+})
+
+test('Bridge view changes start at the top without resetting scroll on refresh', { timeout: 180000 }, async () => {
+  const page = await harness.newPage()
+  try {
+    await completedOperation(page)
+    await page.setViewportSize({ width: 640, height: 560 })
+    await openBridge(page, harness.origin)
+    await page.waitForSelector('.workspace-operation')
+    for (const target of ['transfer', 'device', 'listening', 'transfer']) {
+      const scrolled = await page.evaluate(() => {
+        const main = document.querySelector('main')
+        main.scrollTop = main.scrollHeight
+        return main.scrollTop
+      })
+      assert.ok(scrolled > 30, 'fixture must really scroll before switching views')
+      await showView(page, target, false)
+      assert.equal(await page.locator('main').evaluate(main => main.scrollTop), 0, `${target} inherited another view\'s scroll`)
+      if (target === 'transfer') {
+        await page.getByRole('checkbox', { name: /^Stage Track 1 / }).check({ timeout: 5000 })
+      }
+    }
+    await page.evaluate(() => { document.querySelector('main').scrollTop = 80 })
+    const before = await page.locator('main').evaluate(main => main.scrollTop)
+    assert.ok(before > 0)
+    await page.waitForResponse(response => response.url().endsWith('/api/queue'))
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    assert.equal(await page.locator('main').evaluate(main => main.scrollTop), before, 'ordinary refresh must preserve scroll')
+    assert.match(await page.locator('.workspace-tabs button.active').innerText(), /1/)
+    // Staging a saved playlist also changes views without clicking a tab.
+    await page.route('**/api/playlists', route => route.fulfill({ json: { items: [
+      { id: 'layout-list', name: 'Layout playlist', media_ids: ['layout-0'], etag: '"layout-list"' },
+    ] } }))
+    await showView(page, 'listening', false)
+    await page.evaluate(() => { document.querySelector('main').scrollTop = 100 })
+    await page.locator('footer .manage-music').click()
+    await page.getByRole('button', { name: 'Playlists', exact: true }).click()
+    await page.getByRole('button', { name: 'Layout playlist 1 tracks' }).click()
+    await page.getByRole('button', { name: 'Stage for transfer', exact: true }).click()
+    await page.waitForSelector('.staging-panel')
+    assert.equal(await page.locator('main').evaluate(main => main.scrollTop), 0, 'playlist staging inherited Listening scroll')
+    assert.equal(await page.getByRole('checkbox', { name: /^Stage Track 1 / }).isChecked(), true)
+    assert.equal(harness.unexpected().length, 0)
+    assertQuiet(page, 'view navigation regression')
+  } finally { await page.close() }
 })
 
 async function showView(page, view, equalizer) {
