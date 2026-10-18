@@ -365,8 +365,15 @@ def test_extended_header_size_must_read_alike_for_the_specification_and_ffmpeg(t
         body = extended + visible
         path.write_bytes(b"ID3\x03\x00\x40" + synchsafe(len(body)) + body + MPEG_FRAME)
         assert scan.scan_audio(path).ok is True
-    # ID3v2.2 has no extended header (bit 6 is compression); ffmpeg does not skip anything there.
-    v22 = b"TT2" + (5).to_bytes(3, "big") + b"\x00abcd"
+    # A well-formed frame straddling the 32-bit offset: only the agreement check rejects this one,
+    # since a walk from ffmpeg's offset alone would find valid frames.
+    straddling = _minimal_frame(b"TIT2", b"\x00" + b"S" * (260 - 132 + 10))
+    body = b"\x00\x00\x01\x00" + b"\x00" * (132 - 4) + straddling + visible + b"\x00" * 8
+    path.write_bytes(b"ID3\x03\x00\x40" + synchsafe(len(body)) + body + MPEG_FRAME)
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+    # ID3v2.2 bit 6 is compression, which ffmpeg does not skip; the size bytes read alike here, so
+    # only the version rule can reject the tag.
+    v22 = (6).to_bytes(4, "big") + b"\x00" * 6 + b"TT2" + (5).to_bytes(3, "big") + b"\x00abcd"
     path.write_bytes(b"ID3\x02\x00\x40" + synchsafe(len(v22)) + v22 + MPEG_FRAME)
     assert scan.scan_audio(path).reason_code == "invalid_audio_format"
 
@@ -404,6 +411,11 @@ def test_unsynchronised_id3v23_tag_is_accepted_only_when_ffmpeg_reads_the_same_f
     # An unsynchronised byte inside a frame header (size 255 written as FF 00): the specification
     # decodes the header, ffmpeg reads it raw, so the readings disagree and the tag is rejected.
     body = b"TXXX" + b"\x00\x00\x00\xff\x00" + b"\x00\x00" + b"\x41" * 255 + b"\x00" * 16
+    path.write_bytes(b"ID3\x03\x00\x80" + synchsafe(len(body)) + body + MPEG_FRAME)
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+    # The same header without the inserted zero: ffmpeg's raw reading is a valid 255-byte frame,
+    # but the specification decodes the FF 00 pair across the header and shifts the payload.
+    body = b"TXXX" + b"\x00\x00\x00\xff" + b"\x00\x00" + b"\x41" * 255 + b"\x00" * 16
     path.write_bytes(b"ID3\x03\x00\x80" + synchsafe(len(body)) + body + MPEG_FRAME)
     assert scan.scan_audio(path).reason_code == "invalid_audio_format"
 

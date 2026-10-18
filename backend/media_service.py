@@ -158,9 +158,10 @@ class MediaService:
                 for artifact, info in list(record['artifacts'].items()):
                     if not (source_threat or is_threat(info) or info.get('purged')):
                         continue
+                    present = (self.store.root / media_id / info['name']).exists()
                     try:
                         self.store.purge_artifact(media_id, artifact)
-                        if not info.get('purged'):
+                        if present:
                             job.log(f'Removed blocked bytes ({artifact}) for {record["name"]}')
                     except OSError as exc:
                         job.log(f'Blocked bytes ({artifact}) for {record["name"]} are refused and still held; '

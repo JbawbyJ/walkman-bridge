@@ -386,8 +386,9 @@ def _validate_id3(tag: bytes) -> bool:
         # The ID3v2.2/2.3 specification unsynchronises the whole tag body (a zero byte inserted
         # after every 0xFF), so frame headers describe the decoded bytes. ffmpeg instead walks
         # frame headers over the raw bytes and decodes only each frame's contents. Both readings
-        # are validated and the tag is accepted only when they agree frame for frame, so ffmpeg can
-        # never parse a frame sequence this gate did not see.
+        # are validated and the tag is accepted only when they agree frame for frame, so ffmpeg
+        # cannot read a different frame sequence from this leading tag than the gate validated.
+        # (ID3 tags elsewhere, such as a WAV "id3 " chunk, are outside this gate's scope.)
         by_specification = _id3_frames(body.replace(b"\xff\x00", b"\xff"), version, extended, decode_payloads=False)
         by_ffmpeg = _id3_frames(body, version, extended, decode_payloads=True)
         return by_specification is None or by_ffmpeg is None or by_specification != by_ffmpeg

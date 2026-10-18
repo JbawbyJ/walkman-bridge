@@ -555,3 +555,59 @@ def test_routes_refuse_a_purged_or_flagged_source_even_with_stale_artwork_and_pl
     assert context.client.get(f'/api/media/{media_id}/artwork').status_code == 404
     assert context.client.get(f'/api/media/{media_id}/stream').status_code == 423
     assert 'artwork_url' not in store.public(store.get(media_id))
+
+
+def _verdict(store, media_id, artifact):
+    info = store.get(media_id)['artifacts'][artifact]
+    return dict(ok=False, state='BLOCKED', reason='Microsoft Defender reported a threat', reason_code='defender_threat',
+                defender_status='threat', sha256=info['sha256'], size_bytes=info['size_bytes'])
+
+
+def test_derivative_only_verdicts_refuse_that_derivative_and_leave_the_clean_source_alone(context, monkeypatch):
+    store = context.app.state.store
+    service = context.app.state.service
+    monkeypatch.setattr(media_service, 'convert_managed',
+                        lambda src, out, kind, maximum, metadata=None: out.write_bytes(b'fLaC' + b'\x00' * 8))
+    media_id = imported(context)['files'][0]['media_id']
+    assert context.client.post(f'/api/media/{media_id}/prepare', json={'format': 'flac'}).status_code == 200
+    assert context.client.post('/api/transfers', json={'media_ids': [media_id]}).status_code == 200
+    _ready_artwork(context, media_id)
+    record = store.get(media_id)
+    assert set(record['artifacts']) == {'source', 'playback', 'transfer', 'artwork'} and record['playback'] == 'playback'
+
+    # A threat verdict on transfer.mp3 refuses only that file.
+    with pytest.raises(MediaError):
+        service.accept_scan(media_id, 'transfer', _verdict(store, media_id, 'transfer'))
+    record = store.get(media_id)
+    assert record['artifacts']['transfer']['purged'] is True
+    assert record['artifacts']['source'].get('purged') is None and record['artifacts']['playback'].get('purged') is None
+    assert record['playback'] == 'playback' and record['artwork_status'] == 'ready'
+    assert context.client.get(f'/api/media/{media_id}/stream').status_code == 200
+    assert context.client.get(f'/api/media/{media_id}/artwork').status_code == 200
+    assert 'artwork_url' in store.public(record)
+
+    # A threat verdict on the playback derivative falls playback back to the clean source.
+    with pytest.raises(MediaError):
+        service.accept_scan(media_id, 'playback', _verdict(store, media_id, 'playback'))
+    record = store.get(media_id)
+    assert record['artifacts']['playback']['purged'] is True and record['artifacts']['source'].get('purged') is None
+    assert (record['playback'], record['mime']) == ('source', 'audio/wav')
+    assert context.client.get(f'/api/media/{media_id}/stream').status_code == 200
+
+    # A threat verdict on the artwork hides the artwork and nothing else.
+    with pytest.raises(MediaError):
+        service.accept_scan(media_id, 'artwork', _verdict(store, media_id, 'artwork'))
+    record = store.get(media_id)
+    assert record['artwork_status'] == 'blocked' and record['artifacts']['source'].get('purged') is None
+    assert 'artwork_url' not in store.public(record)
+    assert context.client.get(f'/api/media/{media_id}/artwork').status_code == 404
+    assert context.client.get(f'/api/media/{media_id}/stream').status_code == 200
+
+    # The next job deletes the refused bytes, drops the derivative entries and keeps the source.
+    job_id = context.client.post(f'/api/media/{media_id}/rescan').json()['job_id']
+    job = context.client.get('/api/jobs/' + job_id).json()
+    record = store.get(media_id)
+    assert set(record['artifacts']) == {'source'} and record['artifacts']['source'].get('purged') is None
+    assert sorted(path.name for path in (store.root / media_id).iterdir()) == ['source.wav']
+    assert any('Removed blocked bytes' in line for line in job['log_tail'])
+    assert context.client.get(f'/api/media/{media_id}/stream').status_code == 200

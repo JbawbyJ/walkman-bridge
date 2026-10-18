@@ -215,3 +215,27 @@ def test_refusing_artifacts_persists_without_touching_files(tmp_path):
     assert store.retry_purges(media_id) == []
     assert not flac.exists() and not artwork.exists()
     assert set(store.get(media_id)['artifacts']) == {'source'}
+
+
+def test_refusing_a_derivative_redirects_playback_and_leaves_the_source_alone(tmp_path):
+    import io
+    store = MediaStore(tmp_path / 'state.db', tmp_path / 'cache')
+    record = store.import_file('song.mp3', io.BytesIO(b'\xff\xfb\x90\x00' + b'\x00' * 64))
+    media_id = record['id']
+    (store.root / media_id / 'playback.flac').write_bytes(b'fLaC' + b'\x00' * 8)
+    record['artifacts']['playback'] = dict(name='playback.flac', size_bytes=12, sha256='0' * 64, scan={'ok': True})
+    store.update(media_id, artifacts=record['artifacts'], playback='playback', mime='audio/flac', artwork_status='none')
+    refused = store.refuse_artifacts(media_id, ['playback'])
+    assert refused['artifacts']['playback']['purged'] is True
+    assert refused['artifacts']['source'].get('purged') is None
+    assert (refused['playback'], refused['mime'], refused['artwork_status']) == ('source', 'audio/mpeg', 'none')
+    assert store.path(refused, 'source').exists()
+
+
+def test_public_record_drops_artwork_url_for_a_stale_refused_artwork_entry(tmp_path):
+    import io
+    store = MediaStore(tmp_path / 'state.db', tmp_path / 'cache')
+    record = store.import_file('song.mp3', io.BytesIO(b'\xff\xfb\x90\x00' + b'\x00' * 64))
+    record['artifacts']['artwork'] = dict(name='artwork.jpg', size_bytes=10, sha256='0' * 64, scan={'ok': True}, purged=True)
+    stale = store.update(record['id'], artifacts=record['artifacts'], artwork_status='ready')  # pre-fix row shape
+    assert 'artwork_url' not in store.public(stale)
