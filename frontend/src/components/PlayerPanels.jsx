@@ -177,9 +177,11 @@ export function Queue({ items, player, onImport, onImportLink, onRemove, onMove,
 
 export function ListeningView({ player, available, mode, onMode, showEq, onToggleEq, queueProps, loading = false }) {
   return <div className="listening-column" role="region" aria-label="Listening" aria-busy={loading || undefined}>
-    <NowPlaying player={player} available={available} retro mode={mode} onMode={onMode} />
-    <div className="bridge-eq-toggle"><button type="button" className="text-button" aria-expanded={showEq} onClick={onToggleEq}>{showEq ? '− Hide' : '+ Show'} equalizer</button><span className="micro" role="status">{player.dsp.enabled ? 'PROCESSING ON' : 'DSP BYPASSED'}</span></div>
-    {showEq && <Equalizer player={player} />}
+    <div className="listening-player">
+      <NowPlaying player={player} available={available} retro mode={mode} onMode={onMode} />
+      <div className="bridge-eq-toggle"><button type="button" className="text-button" aria-expanded={showEq} onClick={onToggleEq}>{showEq ? '− Hide' : '+ Show'} equalizer</button><span className="micro" role="status">{player.dsp.enabled ? 'PROCESSING ON' : 'DSP BYPASSED'}</span></div>
+      {showEq && <Equalizer player={player} />}
+    </div>
     <Queue {...queueProps} loading={loading} />
   </div>
 }
