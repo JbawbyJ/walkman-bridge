@@ -82,6 +82,15 @@ try { Get-SmokeProcesses -RootProcessId 32100 -OwnedPath $ownedPath -SmokeStart 
 catch { $rejected = $true }
 if (-not $rejected) { throw 'Discovery substituted the current PID occupant for missing launch identity' }
 
+# Merely opening a log from the run does not transfer ownership of an editor.
+# A sibling whose name shares the run prefix is also outside the boundary.
+$editor = ProcessRow 32103 999 $started.AddSeconds(2) 'C:\Windows\notepad.exe'
+$editor.CommandLine = 'notepad.exe "' + $ownedPath + '\local-data\redlotus.log"'
+$script:Snapshot = @($editor,
+    (ProcessRow 32104 999 $started.AddSeconds(3) "${ownedPath}-unrelated\app.exe"),
+    (ProcessRow 32105 999 $started.AddSeconds(4) "$ownedPath\backend\python.exe"))
+Assert-Ids @(Get-SmokeProcesses -RootProcessId 0 -OwnedPath $ownedPath -SmokeStart $started) @(32105) 'Fallback ownership requires an executable beneath the exact run directory'
+
 # The PID changes occupants between validation and termination. A pinned handle
 # must continue to identify the checked process, never reopen its numeric PID.
 $script:Original = ProcessRow 32101 32100 $started.AddSeconds(1)

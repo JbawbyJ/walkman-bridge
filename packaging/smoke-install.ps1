@@ -134,14 +134,19 @@ function Get-SmokeProcesses {
             foreach ($child in $childrenOf[$current]) { $pending.Enqueue([string][int]$child.ProcessId) }
         }
     }
-    $owned = if ($OwnedPath) { $OwnedPath.TrimEnd('\') } else { '' }
+    $owned = if ($OwnedPath) { [System.IO.Path]::GetFullPath($OwnedPath).Replace('/', '\').TrimEnd('\') + '\' } else { '' }
     if ($owned -and $smokeStart) {
         foreach ($item in $snapshot) {
             $idKey = [string][int]$item.ProcessId
             if ($seen.ContainsKey($idKey)) { continue }
-            $command = [string]$item.CommandLine
             $executablePath = [string]$item.ExecutablePath
-            $ownedHit = ($command -and $command.IndexOf($owned, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or ($executablePath -and $executablePath.IndexOf($owned, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+            # An argument may merely name a log in this run (e.g. an editor).
+            # Only an executable beneath the exact owned directory is a fallback.
+            $ownedHit = $false
+            if ($executablePath) {
+                try { $ownedHit = [System.IO.Path]::GetFullPath($executablePath).Replace('/', '\').StartsWith($owned, [System.StringComparison]::OrdinalIgnoreCase) }
+                catch { $ownedHit = $false }
+            }
             $itemStart = ConvertTo-SmokeInstant $item.CreationDate
             if ($ownedHit -and $itemStart -and -not (Test-SmokeStartedBefore $itemStart $smokeStart)) {
                 [void]$found.Add((Copy-OwnedProcess $item)); $seen[$idKey] = $true
