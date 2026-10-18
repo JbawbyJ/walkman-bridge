@@ -71,13 +71,17 @@ _counters = {"cleared": 0, "blocked": 0}
 _seq = 0
 
 # Consumption checks (every stream or artwork request, including each media-element range
-# request) re-verify content and live Defender status. These short caches bound that cost.
-# Scans never use them: a new verdict always hashes and queries live.
+# request) re-verify content and live Defender status. The content hash is recomputed every
+# time: a stat-based shortcut (size, mtime, file index) is defeated by a same-size in-place
+# rewrite with the mtime restored, which a file's owner can always do. Only the Defender status
+# query is reused, for a few seconds, and only when it reported a complete, active engine. Scans
+# never use the cache: a new verdict always queries live.
 STATUS_CACHE_SECONDS = 5.0
-DIGEST_CACHE_SECONDS = 10.0
 _status_cache: tuple[float, dict[str, Any]] | None = None
-_digest_cache: dict[str, tuple[tuple[int, int, int], tuple[str, int], float]] = {}
-_DIGEST_CACHE_ENTRIES = 256
+
+
+def _monotonic() -> float:
+    return time.monotonic()
 
 
 def _utc_timestamp() -> float:
@@ -91,7 +95,6 @@ def reset_for_tests() -> None:
         _counters.update(cleared=0, blocked=0)
         _seq = 0
         _status_cache = None
-        _digest_cache.clear()
 
 
 def begin(target: str, proc: str = ENGINE) -> str:
@@ -236,7 +239,7 @@ def clearance_valid(path: Path, record: dict[str, Any], *,
         age = _utc_timestamp() - float(record.get("scanned_at", 0))
         if age < 0 or age > CLEARANCE_SECONDS:
             return False
-        digest, size = _cached_fingerprint(Path(path))
+        digest, size = _fingerprint(Path(path))
         if digest != record.get("sha256") or size != int(record.get("size_bytes", -1)):
             return False
         status = trusted_status if trusted_status is not None else _cached_defender_status()
@@ -255,11 +258,6 @@ def clearance_valid(path: Path, record: dict[str, Any], *,
 
 
 def _fingerprint(path: Path) -> tuple[str, int]:
-    return _fingerprint_with_stat(path)[0]
-
-
-def _fingerprint_with_stat(path: Path) -> tuple[tuple[str, int], os.stat_result]:
-    """Hash the file and return the stat that was verified unchanged across the read."""
     before = path.stat()
     digest = hashlib.sha256()
     size = 0
@@ -270,34 +268,7 @@ def _fingerprint_with_stat(path: Path) -> tuple[tuple[str, int], os.stat_result]
     after = path.stat()
     if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns or size != after.st_size:
         raise OSError("file changed while hashing")
-    return (digest.hexdigest(), size), after
-
-
-def _signature(info: os.stat_result) -> tuple[int, int, int]:
-    return info.st_size, info.st_mtime_ns, info.st_ino
-
-
-def _cached_fingerprint(path: Path) -> tuple[str, int]:
-    """Digest for consumption checks, reused for a few seconds while size, mtime and file identity match.
-
-    Managed files are never rewritten in place by the application: derivatives are unlinked and
-    recreated, so a changed file index or mtime always misses. The signature is taken from the
-    stat that the hash itself verified, never from a later stat.
-    """
-    key = str(path)
-    current = _signature(path.stat())
-    now = time.monotonic()
-    with _lock:
-        entry = _digest_cache.get(key)
-        if entry and entry[0] == current and now - entry[2] <= DIGEST_CACHE_SECONDS:
-            return entry[1]
-    fingerprint, verified = _fingerprint_with_stat(path)
-    with _lock:
-        for stale in [cached for cached, value in _digest_cache.items() if now - value[2] > DIGEST_CACHE_SECONDS]:
-            del _digest_cache[stale]
-        if len(_digest_cache) < _DIGEST_CACHE_ENTRIES:
-            _digest_cache[key] = (_signature(verified), fingerprint, now)
-    return fingerprint
+    return digest.hexdigest(), size
 
 
 def _cached_defender_status() -> dict[str, Any]:
@@ -307,7 +278,7 @@ def _cached_defender_status() -> dict[str, Any]:
     every time so recovery is immediate and a disabled engine is never remembered as active.
     """
     global _status_cache
-    now = time.monotonic()
+    now = _monotonic()
     with _lock:
         cached = _status_cache
     if cached is not None and now - cached[0] <= STATUS_CACHE_SECONDS:
@@ -338,24 +309,36 @@ def _synchsafe(raw: bytes) -> int:
     return (raw[0] << 21) | (raw[1] << 14) | (raw[2] << 7) | raw[3]
 
 
+MAX_ID3_TAGS = 4
+
+
 def _validate_audio_format(path: Path, size: int) -> str | None:
     try:
         with path.open("rb") as stream:
-            header = stream.read(10)
             offset = 0
-            if header.startswith(b"ID3"):
+            tags = 0
+            while True:
+                # ffmpeg reads every consecutive ID3v2 tag at the start of a file, so each one is
+                # validated here before the frame search below may skip past it.
+                stream.seek(offset)
+                header = stream.read(10)
+                if not header.startswith(b"ID3"):
+                    break
+                tags += 1
+                if tags > MAX_ID3_TAGS:
+                    return "too many consecutive ID3 tags"
                 if len(header) != 10 or header[3] not in (2, 3, 4):
                     return "invalid ID3 header"
                 tag_size = _synchsafe(header[6:10])
                 footer = 10 if header[5] & 0x10 else 0
                 total = 10 + tag_size + footer
-                if tag_size > MAX_TAG_BYTES or total >= size:
+                if tag_size > MAX_TAG_BYTES or offset + total >= size:
                     return "truncated or oversized ID3 tag"
-                stream.seek(0)
+                stream.seek(offset)
                 tag = stream.read(total)
                 if len(tag) != total or _validate_id3(tag):
                     return "malformed ID3 frames"
-                offset = total
+                offset += total
             stream.seek(offset)
             body = stream.read(64)
             kind = _detect_kind(body)

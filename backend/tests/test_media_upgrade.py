@@ -277,3 +277,49 @@ def test_rescan_threat_on_the_source_purges_its_derivatives_too(context, monkeyp
     # Admission refuses a blocked item outright; the device saw exactly the one earlier write.
     assert context.client.post('/api/transfers', json={'media_ids': [media_id]}).status_code == 409
     assert context.calls['add'] == 1
+
+
+def _threat_scanner(path):
+    result = dict(ok=False, state='BLOCKED', reason='Microsoft Defender reported a threat',
+                  reason_code='defender_threat', defender_status='threat',
+                  sha256=hashlib.sha256(path.read_bytes()).hexdigest(), size_bytes=path.stat().st_size)
+    return SimpleNamespace(to_dict=lambda: result)
+
+
+def test_source_threat_with_a_held_derivative_refuses_playback_and_retries_the_unlink(context, monkeypatch):
+    from pathlib import Path
+    store = context.app.state.store
+    monkeypatch.setattr(media_service, 'convert_managed',
+                        lambda src, out, kind, maximum, metadata=None: out.write_bytes(b'fLaC' + b'\x00' * 8))
+    job = imported(context)
+    media_id = job['files'][0]['media_id']
+    assert context.client.post(f'/api/media/{media_id}/prepare', json={'format': 'flac'}).status_code == 200
+    assert store.get(media_id)['playback'] == 'playback'
+    flac = store.root / media_id / 'playback.flac'
+    assert flac.exists()
+    real_unlink = Path.unlink
+
+    def held_unlink(self, *args, **kwargs):
+        if self.name == 'playback.flac':
+            raise PermissionError(13, 'The process cannot access the file because it is being used by another process')
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'unlink', held_unlink)
+    context.scanner.scan_audio = _threat_scanner
+    context.scanner.ok = False
+    rescan = context.client.post(f'/api/media/{media_id}/rescan').json()
+    assert context.client.get('/api/jobs/' + rescan['job_id']).json()['files'][0]['state'] == 'blocked'
+    record = store.get(media_id)
+    assert record['status'] == 'blocked'
+    assert record['artifacts']['source']['purged'] is True
+    assert record['playback'] == 'source' and record['mime'] == 'audio/wav'
+    assert record['artifacts']['playback']['purged'] is True and flac.exists()  # refused, still held
+    assert context.client.get(f'/api/media/{media_id}/stream').status_code == 400
+    with pytest.raises(MediaError):
+        store.path(record, 'playback')
+    monkeypatch.setattr(Path, 'unlink', real_unlink)  # the reader released the file
+    rescan = context.client.post(f'/api/media/{media_id}/rescan').json()
+    assert context.client.get('/api/jobs/' + rescan['job_id']).json()['files'][0]['state'] == 'blocked'
+    record = store.get(media_id)
+    assert not flac.exists() and 'playback' not in record['artifacts']
+    assert list((store.root / media_id).iterdir()) == []

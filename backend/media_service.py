@@ -144,22 +144,25 @@ class MediaService:
         every derivative decoded from those bytes. Format rejections keep their bytes so a later gate
         relaxation can clear them with a rescan.
         """
+        def is_threat(info):
+            return (info.get('scan') or {}).get('reason_code') == 'defender_threat'
         for media_id in ids:
             try:
                 record = self.store.get(media_id)
-            except MediaError:
-                continue
-            def is_threat(info):
-                return (info.get('scan') or {}).get('reason_code') == 'defender_threat'
-            source_threat = is_threat(record['artifacts']['source']) or record['artifacts']['source'].get('purged')
-            for artifact, info in list(record['artifacts'].items()):
-                if info.get('purged') or not (source_threat or is_threat(info)):
-                    continue
-                try:
-                    self.store.purge_artifact(media_id, artifact)
-                    job.log(f'Removed blocked bytes ({artifact}) for {record["name"]}')
-                except OSError as exc:
-                    job.log(f'Blocked bytes ({artifact}) for {record["name"]} are still held and will be removed later: {exc}')
+                source = record['artifacts']['source']
+                source_threat = is_threat(source) or source.get('purged')
+                for artifact, info in list(record['artifacts'].items()):
+                    if not (source_threat or is_threat(info) or info.get('purged')):
+                        continue
+                    try:
+                        self.store.purge_artifact(media_id, artifact)
+                        if not info.get('purged'):
+                            job.log(f'Removed blocked bytes ({artifact}) for {record["name"]}')
+                    except OSError as exc:
+                        job.log(f'Blocked bytes ({artifact}) for {record["name"]} are refused and still held; '
+                                f'removal is retried on the next job and at startup: {exc}')
+            except Exception as exc:  # a storage error on one item must not skip the others or fail the job
+                job.log(f'Could not remove blocked bytes for one item: {exc}')
 
     def derivative(self, media_id, kind, job, scan_output=True):
         record = self.store.get(media_id)

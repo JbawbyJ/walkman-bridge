@@ -154,6 +154,12 @@ class MediaStore:
                 if name not in retained and path.exists():
                     no_links(path, self.root)
                     path.unlink()
+        for media_id, record in known.items():
+            if any(info.get('purged') for info in record['artifacts'].values()):
+                try:
+                    self.retry_purges(media_id)
+                except (OSError, MediaError):
+                    pass  # still held or already gone; the next job retries
 
     @staticmethod
     def _id(value):
@@ -187,33 +193,48 @@ class MediaStore:
         return name
 
     def purge_artifact(self, media_id, artifact):
-        """Delete the bytes of an artifact Defender reported as a threat; the verdict stays on the record.
+        """Refuse, then delete, the bytes of an artifact Defender reported as a threat.
 
-        The source entry remains, marked purged, so the item stays visibly blocked and a rescan
-        reports why. Derivative entries are dropped so a clean source can regenerate them.
-        Callers hold no read lock on the file; on Windows an open share-read handle makes the
-        unlink fail and the caller retries on the next job.
+        The refusal (``purged``) is persisted before the unlink, so a crash in between still
+        refuses the bytes, and playback is pointed back at the source so no derivative of a purged
+        source can be streamed. The source entry remains, marked purged, so the item stays visibly
+        blocked and a rescan reports why. A derivative entry is dropped once its file is gone; if a
+        reader still holds the file (Windows share-read handle), the entry stays refused and the
+        unlink is retried by the next job and at startup.
         """
         with self._lock:
             record = self.get(media_id)
             info = record['artifacts'].get(artifact)
-            if info is None or info.get('purged'):
+            if info is None:
                 return record
+            if not info.get('purged'):
+                info['purged'] = True
+                changes = {}
+                if artifact == 'source' or record.get('playback') == artifact:
+                    changes.update(self._source_playback(record))
+                if artifact == 'artwork':
+                    changes['artwork_status'] = 'failed'
+                record = self.update(media_id, artifacts=record['artifacts'], **changes)
             path = self.root / self._id(media_id) / self._artifact_name(info)
             if path.exists():
                 no_links(path, self.root)
                 path.unlink()
-            changes = {}
-            if artifact == 'source':
-                info['purged'] = True
-            else:
-                record['artifacts'].pop(artifact)
-                if record.get('playback') == artifact:
-                    source_suffix = Path(record['artifacts']['source']['name']).suffix.lower()
-                    changes.update(playback='source', mime=MIMES.get(source_suffix, 'application/octet-stream'))
-                if artifact == 'artwork':
-                    changes['artwork_status'] = 'failed'
-            return self.update(media_id, artifacts=record['artifacts'], **changes)
+            if artifact != 'source':
+                record['artifacts'].pop(artifact, None)
+                record = self.update(media_id, artifacts=record['artifacts'])
+            return record
+
+    def retry_purges(self, media_id):
+        """Unlink refused artifact bytes that an earlier purge could not delete."""
+        record = self.get(media_id)
+        for artifact, info in list(record['artifacts'].items()):
+            if info.get('purged'):
+                self.purge_artifact(media_id, artifact)
+
+    @staticmethod
+    def _source_playback(record):
+        suffix = Path(record['artifacts']['source']['name']).suffix.lower()
+        return dict(playback='source', mime=MIMES.get(suffix, 'application/octet-stream'))
 
     def queue(self):
         with self._lock:

@@ -74,3 +74,35 @@ def test_purging_a_derivative_restores_source_playback(tmp_path):
     with pytest.raises(MediaError):
         store.path(source_purged)
     store.purge_artifact(media_id, 'source')  # idempotent
+
+
+def test_purge_persists_the_refusal_before_unlinking_and_startup_retries_a_held_file(tmp_path, monkeypatch):
+    import io
+    from pathlib import Path
+    store = MediaStore(tmp_path / 'state.db', tmp_path / 'cache')
+    record = store.import_file('song.mp3', io.BytesIO(b'\xff\xfb\x90\x00' + b'\x00' * 64))
+    media_id = record['id']
+    derivative = store.root / media_id / 'playback.flac'
+    derivative.write_bytes(b'fLaC' + b'\x00' * 8)
+    record['artifacts']['playback'] = dict(name='playback.flac', size_bytes=12, sha256='0' * 64,
+                                           scan={'reason_code': 'defender_threat'})
+    store.update(media_id, artifacts=record['artifacts'], playback='playback', mime='audio/flac')
+    real_unlink = Path.unlink
+
+    def held_unlink(self, *args, **kwargs):
+        if self.name == 'playback.flac':
+            raise PermissionError(13, 'held by a reader')
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'unlink', held_unlink)
+    with pytest.raises(PermissionError):
+        store.purge_artifact(media_id, 'playback')
+    refused = store.get(media_id)
+    assert refused['artifacts']['playback']['purged'] is True and derivative.exists()
+    assert (refused['playback'], refused['mime']) == ('source', 'audio/mpeg')
+    with pytest.raises(MediaError):
+        store.path(refused, 'playback')
+    monkeypatch.setattr(Path, 'unlink', real_unlink)
+    reopened = MediaStore(tmp_path / 'state.db', tmp_path / 'cache')  # startup retries the refused unlink
+    assert not derivative.exists()
+    assert 'playback' not in reopened.get(media_id)['artifacts']

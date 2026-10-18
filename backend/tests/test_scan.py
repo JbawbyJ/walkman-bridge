@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -358,6 +359,37 @@ def test_unsynchronised_id3v23_tag_is_accepted(tmp_path: Path):
     assert scan.scan_audio(path).reason_code == "invalid_audio_format"
 
 
+def test_unsynchronisation_decode_applies_only_to_v22_and_v23_with_the_flag(tmp_path: Path):
+    def synchsafe(n):
+        return bytes(((n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F))
+    # ID3v2.4 frame sizes count the on-disk (unsynchronised) bytes; the tag must not be decoded first.
+    v24_payload = b"\x00\xff\x00\xe0abc"
+    v24_frame = b"TXXX" + synchsafe(len(v24_payload)) + b"\x00\x00" + v24_payload
+    path = tmp_path / "v24.mp3"
+    path.write_bytes(b"ID3\x04\x00\x80" + synchsafe(len(v24_frame)) + v24_frame + MPEG_FRAME)
+    assert scan.scan_audio(path).ok is True
+    # ID3v2.3 with only the extended-header bit set: 0xFF 0x00 inside a payload is literal, not unsync.
+    payload = b"\x00\xff\x00abc"
+    frames = _minimal_frame(b"TXXX", payload)
+    extended = (6).to_bytes(4, "big") + b"\x00\x00" + b"\x00\x00\x00\x00"
+    body = extended + frames
+    path.write_bytes(b"ID3\x03\x00\x40" + synchsafe(len(body)) + body + MPEG_FRAME)
+    assert scan.scan_audio(path).ok is True
+
+
+def test_every_consecutive_leading_id3_tag_is_validated(tmp_path: Path):
+    first = _id3v23_tag(_minimal_frame(b"TIT2", b"\x00first"))
+    good_second = _id3v23_tag(_minimal_frame(b"TALB", b"\x00second"))
+    bad_second = _id3v23_tag(_minimal_frame(b"APIC", b"\x00image/jpeg-without-terminator") + _minimal_frame(b"TALB", b"\x00x"))
+    path = tmp_path / "tags.mp3"
+    path.write_bytes(first + good_second + _mpeg_frames(2))
+    assert scan.scan_audio(path).ok is True
+    path.write_bytes(first + bad_second + _mpeg_frames(2))
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+    path.write_bytes(first * (scan.MAX_ID3_TAGS + 1) + _mpeg_frames(2))
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+
+
 def _mpeg_frames(count: int) -> bytes:
     # MPEG-1 Layer III, 128 kbps, 44.1 kHz: 417-byte frames.
     return (b"\xff\xfb\x90\x00" + b"\x00" * 413) * count
@@ -391,6 +423,9 @@ def test_adts_aac_with_leading_padding_is_tolerated(tmp_path: Path):
 def test_frame_length_tables_match_known_headers():
     assert scan._mpeg_frame_length(b"\xff\xfb\x90\x00") == 417      # MPEG-1 L3 128k 44.1k
     assert scan._mpeg_frame_length(b"\xff\xfb\x92\x00") == 418      # same frame with the padding bit
+    assert scan._mpeg_frame_length(b"\xff\xfb\x94\x00") == 384      # MPEG-1 L3 128k 48k
+    assert scan._mpeg_frame_length(b"\xff\xfb\xe0\x00") == 1044     # MPEG-1 L3 320k 44.1k
+    assert scan._mpeg_frame_length(b"\xff\xe3\x40\x00") == 208      # MPEG-2.5 L3 32k 11.025k: 72*32000//11025
     assert scan._mpeg_frame_length(b"\xff\xf3\x90\x00") == 261      # MPEG-2 L3 80k 22.05k: 72*80000//22050
     assert scan._mpeg_frame_length(b"\xff\xfd\x90\x00") == 522      # MPEG-1 L2 160k 44.1k: 144*160000//44100
     assert scan._mpeg_frame_length(b"\xff\xff\x90\x00") == 312      # MPEG-1 L1 288k 44.1k: (12*288000//44100)*4
@@ -400,6 +435,41 @@ def test_frame_length_tables_match_known_headers():
     assert scan._mpeg_frame_length(b"\xff\xeb\x90\x00") is None     # reserved version bits
     assert scan._adts_frame_length(bytes((0xFF, 0xF1, 0x50, 0x80, 0x02, 0x1F, 0xFC))) == 16
     assert scan._adts_frame_length(bytes((0xFF, 0xF1, 0x50, 0x80, 0x00, 0x1F, 0xFC))) is None  # shorter than its header
+
+
+# Independent reference for ISO 11172-3 / 13818-3 frame lengths, written out in full.
+_REFERENCE_BITRATES = {
+    ("1", 1): [32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
+    ("1", 2): [32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
+    ("1", 3): [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+    ("2", 1): [32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
+    ("2", 2): [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+    ("2", 3): [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+}
+_REFERENCE_RATES = {"1": [44100, 48000, 32000], "2": [22050, 24000, 16000], "2.5": [11025, 12000, 8000]}
+
+
+def test_frame_length_matches_the_reference_formula_for_every_valid_header():
+    checked = 0
+    for version_bits, version in ((3, "1"), (2, "2"), (0, "2.5")):
+        for layer_bits, layer in ((3, 1), (2, 2), (1, 3)):
+            for bitrate_index in range(1, 15):
+                for rate_index in range(3):
+                    for padding in (0, 1):
+                        header = bytes((0xFF, 0xE0 | (version_bits << 3) | (layer_bits << 1) | 1,
+                                        (bitrate_index << 4) | (rate_index << 2) | (padding << 1), 0x00))
+                        generation = "1" if version == "1" else "2"
+                        bitrate = _REFERENCE_BITRATES[(generation, layer)][bitrate_index - 1] * 1000
+                        rate = _REFERENCE_RATES[version][rate_index]
+                        if layer == 1:
+                            expected = (12 * bitrate // rate + padding) * 4
+                        elif layer == 3 and version != "1":
+                            expected = 72 * bitrate // rate + padding
+                        else:
+                            expected = 144 * bitrate // rate + padding
+                        assert scan._mpeg_frame_length(header) == expected, header.hex()
+                        checked += 1
+    assert checked == 3 * 3 * 14 * 3 * 2
 
 
 def test_opus_extension_is_an_ogg_container(tmp_path: Path):
@@ -421,20 +491,40 @@ def test_platform_fallback_prefers_the_numerically_newest_defender(monkeypatch, 
     assert scan._defender_exe() == platform / "4.18.25080.11-0" / "MpCmdRun.exe"
 
 
-def test_consumption_checks_reuse_digest_and_status_briefly(monkeypatch, tmp_path: Path):
+def test_consumption_checks_rehash_every_time_and_reuse_status_briefly(monkeypatch, tmp_path: Path):
     path = tmp_path / "song.mp3"
     path.write_bytes(_mp3_stub())
     record = scan.scan_audio(path).to_dict()
     hashed, queried = [], []
-    original = scan._fingerprint_with_stat
-    monkeypatch.setattr(scan, "_fingerprint_with_stat", lambda target: hashed.append(target) or original(target))
+    original = scan._fingerprint
+    monkeypatch.setattr(scan, "_fingerprint", lambda target: hashed.append(target) or original(target))
     monkeypatch.setattr(scan, "_query_defender_status", lambda: queried.append(1) or dict(STATUS))
     assert scan.clearance_valid(path, record) is True
     assert scan.clearance_valid(path, record) is True
-    assert (len(hashed), len(queried)) == (1, 1)
-    path.write_bytes(_mp3_stub() + b"x")  # a changed file never hits the cached digest
+    assert (len(hashed), len(queried)) == (2, 1)
+    # A same-size in-place rewrite with the mtime restored is still caught: the digest is never cached.
+    before = path.stat()
+    path.write_bytes(_mp3_stub()[:-1] + b"\x01")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert path.stat().st_mtime_ns == before.st_mtime_ns
     assert scan.clearance_valid(path, record) is False
-    assert len(hashed) == 2
+    assert len(hashed) == 3
+
+
+def test_status_cache_expires_and_requeries_live(monkeypatch, tmp_path: Path):
+    path = tmp_path / "song.mp3"
+    path.write_bytes(_mp3_stub())
+    record = scan.scan_audio(path).to_dict()
+    clock = [1000.0]
+    monkeypatch.setattr(scan, "_monotonic", lambda: clock[0])
+    assert scan.clearance_valid(path, record) is True  # fills the cache
+    monkeypatch.setattr(scan, "_query_defender_status", lambda: {"available": False})
+    clock[0] += scan.STATUS_CACHE_SECONDS  # the documented reuse window
+    assert scan.clearance_valid(path, record) is True
+    clock[0] += 0.01  # expired: the live query now says unavailable
+    assert scan.clearance_valid(path, record) is False
+    monkeypatch.setattr(scan, "_query_defender_status", lambda: dict(STATUS))
+    assert scan.clearance_valid(path, record) is True
 
 
 def test_scans_never_use_cached_status_and_unavailable_status_is_not_cached(monkeypatch, tmp_path: Path):
