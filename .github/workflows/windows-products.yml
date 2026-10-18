@@ -176,7 +176,11 @@ jobs:
           Copy-Item -LiteralPath packaging/build/redlotus/player/deno/deno.exe -Destination deno/deno.exe
           python -m pytest backend/tests/test_real_mock.py backend/tests/test_metadata.py backend/tests/test_metadata_device_roundtrip.py backend/tests/test_analysis.py backend/tests/test_link_import.py -q -p no:cacheprovider -rs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Installed-smoke hang cleanup test
+        timeout-minutes: 5
+        run: ./packaging/smoke-install.hangtest.ps1
       - name: Install, smoke and uninstall both products
+        timeout-minutes: 20
         run: |
           $Version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           ./packaging/smoke-install.ps1 -Product bridge -Installer "dist_electron/bridge/Walkman-Bridge-Setup-$Version-x64.exe"
