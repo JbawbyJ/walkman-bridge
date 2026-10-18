@@ -41,7 +41,7 @@ def test_playlist_membership_rejects_stale_and_unknown_and_library_removal_prune
     assert changed['media_ids'] == ids[::-1]
     assert c.delete(url, headers={'If-Match': playlist['etag']}).status_code == 409
     with context.app.state.store.lease(ids[0]) as source:
-        assert c.delete('/api/queue/items/' + ids[0]).status_code == 200
+        assert c.delete('/api/media/' + ids[0]).status_code == 200
         assert context.app.state.store.path(source).exists()
         pruned = c.get(url).json()
         assert pruned['media_ids'] == [ids[1]]

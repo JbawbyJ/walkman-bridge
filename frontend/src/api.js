@@ -37,6 +37,7 @@ export const api = {
     return req('/media/import', { method: 'POST', body })
   },
   removeQueueItem: id => req(`/queue/items/${idPath(id)}`, { method: 'DELETE' }),
+  removeManagedMedia: id => req(`/media/${idPath(id)}`, { method: 'DELETE' }),
   orderQueue: ids => req('/queue/order', json('PATCH', { ids })),
   rescan: id => req(`/media/${idPath(id)}/rescan`, { method: 'POST' }),
   prepare: id => req(`/media/${idPath(id)}/prepare`, json('POST', { format: 'flac' })),

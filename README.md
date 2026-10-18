@@ -15,7 +15,7 @@ Import copies audio into the application's private managed cache; originals rema
 
 Supported source audio plays without a lossy re-encode. Codec compatibility can use a lossless FLAC derivative. Walkman transfer generates a separate 192 kbps, 44.1 kHz stereo MP3. Derivatives require their own clearance. Enhancement defaults off and changes playback only. Loudness matching uses measured EBU R128 levels; it does not reconstruct lost audio information.
 
-Queue order, track, position, volume, shuffle and repeat persist in SQLite; startup restores paused. Queue removal waits for playback/processing leases before deleting managed bytes. Limits are 500 MiB per file, 2 GiB/200 files per import, one active import batch, and a 10 GiB cache.
+Queue order, track, position, volume, shuffle and repeat persist in SQLite; startup restores paused. Removing a queue entry keeps its managed music and saved playlist memberships, including after restart. To free cache space, use the confirmed removal in Manage music; library deletion waits for playback/processing leases before deleting managed bytes. Limits are 500 MiB per file, 2 GiB/200 files per import, one active import batch, and a 10 GiB cache.
 
 ## Music management and layout (0.4.1)
 

@@ -17,7 +17,7 @@ const ready = (id, lufs = -9) => ({ id, status: 'ready', scan: { ok: true }, dur
 
 function mount(initialItems, session = {}, save = () => Promise.resolve({}), boundaries = {}) {
   const slots = [], graphs = [], prepared = [], leaseCalls = []
-  let cursor = 0, pending = [], player, items = initialItems, serverLease = null
+  let cursor = 0, pending = [], player, items = initialItems, queueItems = boundaries.queueItems, serverLease = null
   class Audio {
     constructor() {
       this.attrs = {}; this.dataset = {}; this.listeners = {}
@@ -58,6 +58,7 @@ function mount(initialItems, session = {}, save = () => Promise.resolve({}), bou
       async acquirePlaybackLease(id) { leaseCalls.push(`POST ${id}`); await boundaries.acquire?.(id); serverLease = id },
       async releasePlaybackLease(id) { leaseCalls.push(`DELETE ${id}`); await boundaries.release?.(id); if (serverLease === id) serverLease = null },
       removeQueueItem: id => boundaries.remove?.(id),
+      removeManagedMedia: id => boundaries.removeManaged?.(id),
     },
     nextTrackId, playable, restoreSession, dspSettings, Audio,
     createAudioGraph() {
@@ -69,9 +70,9 @@ function mount(initialItems, session = {}, save = () => Promise.resolve({}), bou
     setTimeout() { return 1 }, clearTimeout() {}, Date, Promise, Set, Number, Math,
   }
   vm.runInNewContext(source, context)
-  const render = (nextItems = items) => {
-    items = nextItems; cursor = 0; pending = []
-    player = context.usePlayer(items, 'player', id => prepared.push(id), session)
+  const render = (nextItems = items, nextQueue = queueItems) => {
+    items = nextItems; queueItems = nextQueue; cursor = 0; pending = []
+    player = context.usePlayer(items, 'player', id => prepared.push(id), session, queueItems)
     const effects = pending; pending = []; effects.forEach(effect => effect())
     return player
   }
@@ -97,6 +98,24 @@ test('saved playlist plays its own order and stops before unrelated library musi
   assert.equal(h.player.audio.current.paused, true)
   assert.equal(h.player.id, 'a')
   assert.equal(saved.at(-1).playlist_id, 'night')
+})
+
+test('queue removal leaves library track playable through its saved playlist', async () => {
+  const items = [ready('a'), ready('b')], calls = []
+  const h = mount(items, {}, undefined, {
+    remove: async id => calls.push(`queue ${id}`),
+    removeManaged: async id => calls.push(`library ${id}`),
+  })
+  await h.player.play('a'); h.render()
+  await h.player.removeFromQueue('a'); h.render(items, [items[1]])
+  assert.deepEqual(calls, ['queue a'])
+  await h.player.play(); await h.settle()
+  assert.equal(h.player.id, 'b', 'default playback must use the remaining queue')
+  await h.player.setPlaylist({ id: 'saved', name: 'Saved', media_ids: ['a'] }); await h.settle()
+  assert.equal(h.player.id, 'a', 'queue removal must not hide the saved playlist member')
+  await h.player.removeManagedMedia('a'); h.render([items[1]], [items[1]])
+  assert.deepEqual(calls, ['queue a', 'library a'])
+  assert.equal(h.player.audio.current.paused, true)
 })
 
 test('playlist session restores paused and repeat follows only saved members', async () => {

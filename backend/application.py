@@ -228,6 +228,7 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
     @app.get('/api/queue')
     async def queue():
         return await asyncio.to_thread(lambda: dict(items=[store.public(r) for r in store.queue()],
+            library_items=[store.public(r) for r in store.library()],
             playlists=store.playlists(), quota=dict(used_bytes=store.used_bytes(), limit_bytes=store.limit)))
 
     @app.get('/api/playback-state')
@@ -266,6 +267,15 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
             coordinator.finish(ticket)
 
     @app.delete('/api/queue/items/{media_id}')
+    async def remove_queue_item(media_id: str):
+        ticket = admit('queue')
+        try:
+            await asyncio.to_thread(store.remove_from_queue, media_id)
+            return {'ok': True}
+        finally:
+            coordinator.finish(ticket)
+
+    @app.delete('/api/media/{media_id}')
     async def remove_media(media_id: str):
         ticket = admit('queue')
         try:

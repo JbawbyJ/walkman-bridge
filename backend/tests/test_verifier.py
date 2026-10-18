@@ -174,14 +174,14 @@ def test_playback_lease_outlives_stream_and_stale_release_preserves_new_selectio
         assert context.client.post(route, json={'media_id': first}).status_code == 200
         # Completing an entire HTTP body must not release the selected-track lease.
         assert context.client.get(f'/api/media/{first}/stream').status_code == 200
-        assert context.client.delete(f'/api/queue/items/{first}').status_code == 200
+        assert context.client.delete(f'/api/media/{first}').status_code == 200
         assert first_path.exists()
         assert context.client.get(f'/api/media/{first}/stream').status_code == 200
 
         assert context.client.post(route, json={'media_id': second}).status_code == 200
         assert not first_path.exists()
         assert context.client.request('DELETE', route, json={'media_id': first}).status_code == 200
-        assert context.client.delete(f'/api/queue/items/{second}').status_code == 200
+        assert context.client.delete(f'/api/media/{second}').status_code == 200
         assert second_path.exists(), 'Stale release ended the newer selection lease'
         assert context.client.post('/api/shutdown/drain').json()['busy'] is True
         assert context.client.request('DELETE', route, json={'media_id': second}).status_code == 200
