@@ -185,23 +185,36 @@ async function stopPlayback() {
   await waitForPlaybackReady()
   if (!window || window.isDestroyed() || rendererGone) return
   if (!playbackReady) throw new Error('Renderer did not register playback stop')
-  // Execute only a constant script in the known local main frame. No user data is interpolated.
-  try { await window.webContents.executeJavaScript("window.dispatchEvent(new Event('walkman:stop-playback')); for (const audio of document.querySelectorAll('audio')) { audio.pause(); audio.removeAttribute('src'); audio.load(); }") }
-  catch (error) { if (!rendererGone && !window.isDestroyed()) throw error }
-  if (window.isDestroyed() || rendererGone) return
   const nonce = crypto.randomBytes(16).toString('hex')
   await new Promise((resolve, reject) => {
     const contents = window.webContents
+    let settled = false
     const cleanup = () => { clearTimeout(timer); ipcMain.removeListener('playback:stopped', done); ipcMain.removeListener('playback:stop-failed', failed); contents.removeListener('render-process-gone', gone); contents.removeListener('destroyed', gone) }
-    const gone = () => { cleanup(); resolve() }
-    const done = (event, value) => { if (validSender(event, window, origin) && value === nonce) { cleanup(); resolve() } }
-    const failed = (event, value) => { if (validSender(event, window, origin) && value === nonce) { cleanup(); reject(new Error('Playback state could not be saved')) } }
-    const timer = setTimeout(() => { cleanup(); reject(new Error('Renderer did not stop playback')) }, 10000)
+    const finish = error => {
+      if (settled) return
+      settled = true
+      cleanup()
+      if (error) reject(error)
+      else resolve()
+    }
+    const gone = () => finish()
+    const done = (event, value) => { if (validSender(event, window, origin) && value === nonce) finish() }
+    const failed = (event, value) => { if (validSender(event, window, origin) && value === nonce) finish(new Error('Playback state could not be saved')) }
+    // A renderer blocked in JavaScript cannot settle executeJavaScript either.
+    // Start the same stop deadline and death listeners before asking it to run.
+    const timer = setTimeout(() => finish(new Error('Renderer did not stop playback')), 10000)
     ipcMain.on('playback:stopped', done)
     ipcMain.on('playback:stop-failed', failed)
     contents.once('render-process-gone', gone)
     contents.once('destroyed', gone)
-    window.webContents.send('playback:stop', nonce)
+    void (async () => {
+      // Constant script in the known local main frame; no user data is interpolated.
+      try { await contents.executeJavaScript("window.dispatchEvent(new Event('walkman:stop-playback')); for (const audio of document.querySelectorAll('audio')) { audio.pause(); audio.removeAttribute('src'); audio.load(); }") }
+      catch (error) { if (!rendererGone && !window.isDestroyed()) { finish(error); return } }
+      if (settled) return
+      if (window.isDestroyed() || rendererGone) { finish(); return }
+      contents.send('playback:stop', nonce)
+    })().catch(finish)
   })
 }
 async function exitUnresponsiveRenderer(error) {

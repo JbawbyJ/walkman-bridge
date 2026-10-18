@@ -53,6 +53,7 @@ function harness(options = {}) {
       Object.assign(this.webContents, {
         mainFrame: { url: ORIGIN }, setWindowOpenHandler() {},
         async executeJavaScript(code) {
+          if (options.stopScriptGate && String(code).includes('walkman:stop-playback')) return options.stopScriptGate.promise
           if (!options.smoke) return
           const script = String(code)
           if (script.includes('hasClose')) return { product: 'bridge', hasClose: true, cookieHidden: true, origin: ORIGIN, title: 'Walkman Bridge' }
@@ -242,6 +243,51 @@ test('unresponsive renderer exits instead of deferring close forever', async () 
   assert.equal(h.state.dialogs.length, 0)
   assert.match(h.state.logs.join('\n'), /Close forced: Renderer did not stop playback/)
   assert.ok(h.state.requests.includes('/api/internal/playback/release'))
+})
+
+test('a pending stop script reaches the deadline and drains before backend termination', async () => {
+  const script = deferred(), idle = deferred()
+  let destroyedBeforeRelease = false
+  const h = harness({ stopScriptGate: script, immediateAckTimeout: true, fetch: async url => {
+    if (url.endsWith('/api/health')) return { ok: true, json: async () => ({ ok: true, product: 'bridge' }) }
+    if (url.endsWith('/api/internal/playback/release')) destroyedBeforeRelease = h.state.windows[0].isDestroyed()
+    if (url.endsWith('/api/engine-busy')) return idle.promise
+    return { ok: true, json: async () => ({ ok: true }) }
+  } })
+  await flush()
+  const closing = h.invoke('closeSafely()')
+  try {
+    assert.equal(await waitUntil(() => h.state.requests.includes('/api/engine-busy'), 200), true, 'pending executeJavaScript must not hide the shutdown deadline')
+    assert.equal(destroyedBeforeRelease, true)
+    assert.equal(h.state.kills, 0, 'unknown/busy work must remain alive')
+    idle.resolve({ ok: true, json: async () => ({ draining: true, busy: false }) })
+    await closing
+    assert.equal(h.state.kills, 1)
+    script.resolve()
+    await flush()
+    assert.equal(h.state.stopSends, 0, 'late script completion must not restart shutdown IPC')
+    assert.equal(h.invoke("ipcMain.listenerCount('playback:stopped') + ipcMain.listenerCount('playback:stop-failed')"), 0)
+  } finally {
+    script.resolve()
+    idle.resolve({ ok: true, json: async () => ({ draining: true, busy: false }) })
+    await closing
+  }
+})
+
+test('renderer loss during a pending stop script finishes without waiting for the script', async () => {
+  const script = deferred()
+  const h = harness({ stopScriptGate: script })
+  await flush()
+  const closing = h.invoke('closeSafely()')
+  await flush()
+  h.state.windows[0].webContents.emit('render-process-gone', {}, { reason: 'crashed' })
+  try {
+    assert.equal(await waitUntil(() => h.state.kills === 1, 200), true, 'confirmed renderer loss must settle the pending stop')
+    assert.equal(h.state.stopSends, 0)
+  } finally {
+    script.resolve()
+    await closing
+  }
 })
 
 test('playback stop waits until the renderer registers its handler', async () => {
