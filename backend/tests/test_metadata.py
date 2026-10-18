@@ -184,3 +184,38 @@ def test_real_multiline_tags_cannot_forge_artist_or_duration(tmp_path, real_ffmp
     assert analyzed['artist'] == 'Actual artist'
     assert analyzed['title'] == 'Hello\nartist: Forged\nDuration: 99:99:99.99'
     assert abs(analyzed['duration_seconds'] - 0.2) < 0.02
+
+
+@pytest.mark.parametrize(('extension', 'codec'), [('ogg', 'libvorbis'), ('opus', 'libopus'),
+                                                  ('mp3', 'libmp3lame'), ('m4a', 'aac'), ('flac', 'flac')])
+def test_real_unicode_tags_survive_import_and_transfer(tmp_path, real_ffmpeg, extension, codec):
+    source, output = tmp_path / f'opaque.{extension}', tmp_path / 'transfer.mp3'
+    tags = {'title': '\u591c\u306e\u6b4c', 'artist': '\u5742\u672c\u9f8d\u4e00',
+            'album': '\u65e5\u672c\u8a9e Album', 'album_artist': 'Various Artists',
+            'genre': 'Electronic', 'date': '2024-02-29', 'track': '3/12', 'disc': '2/3'}
+    options = [part for key, value in tags.items() for part in ('-metadata', f'{key}={value}')]
+    _ffmpeg(real_ffmpeg, '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.2',
+            '-c:a', codec, *options, source)
+    original = source.read_bytes()
+    normalized = normalize_metadata(analyze_cleared_audio(source), 'Misleading filename.' + extension)
+    assert {key: normalized.get(key) for key in tags} == tags
+    convert_managed(source, output, 'transfer', 1024 * 1024, metadata=normalized)
+    transferred = normalize_metadata(analyze_cleared_audio(output), 'transfer.mp3')
+    assert {key: transferred.get(key) for key in tags} == tags
+    assert source.read_bytes() == original
+
+
+def test_audio_stream_tags_fill_missing_globals_without_using_other_streams_or_chapters():
+    tags = parse_ffmetadata(';FFMETADATA1\ntitle=Global title\nartist=\n'
+                            '[STREAM]\ntitle=Audio title\nartist=Audio artist\nALBUMARTIST=Ensemble\n'
+                            'DISCNUMBER=2/3\n[STREAM]\nalbum=Cover title\n'
+                            '[CHAPTER]\ngenre=Chapter genre\n', include_audio_stream=True)
+    assert tags == {'title': 'Global title', 'artist': 'Audio artist',
+                    'album_artist': 'Ensemble', 'disc': '2/3'}
+
+
+def test_album_artist_and_disc_aliases_are_bounded_and_normalized():
+    tags = normalize_metadata({'ALBUMARTIST': ' Ensemble\n', 'DISCNUMBER': '02/03'}, 'song')
+    assert tags['album_artist'] == 'Ensemble'
+    assert tags['disc'] == '2/3'
+    assert 'disc' not in normalize_metadata({'disc': '2/1'}, 'song')

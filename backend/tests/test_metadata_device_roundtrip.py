@@ -226,7 +226,8 @@ def test_real_untagged_original_name_reaches_walkman(real_context, evidence):
         'clearance_order': context.checked_calls})
 
 
-def test_legacy_transfer_cache_is_regenerated_before_java(real_context, evidence):
+@pytest.mark.parametrize('old_policy', [None, 2])
+def test_legacy_transfer_cache_is_regenerated_before_java(real_context, evidence, old_policy):
     context = real_context
     content = _generate(context.ffmpeg, context.tmp / 'source.mp3')
     media_id, _ = _import(context, 'Recovered session.mp3', content)
@@ -237,8 +238,9 @@ def test_legacy_transfer_cache_is_regenerated_before_java(real_context, evidence
     previous_hash = hashlib.sha256(stale.read_bytes()).hexdigest()
     # Reproduce persisted pre-upgrade media and the already-cleared old derivative.
     record['artifacts']['transfer'] = {'name': stale.name, 'size_bytes': stale.stat().st_size,
-        'sha256': previous_hash, 'scan': context.scanner.scan_audio(stale).to_dict()}
-    store.update(media_id, artifacts=record['artifacts'], metadata_policy=None,
+        'sha256': previous_hash, 'scan': context.scanner.scan_audio(stale).to_dict(),
+        'metadata_policy': old_policy}
+    store.update(media_id, artifacts=record['artifacts'], metadata_policy=old_policy,
         analyzed=True, title='source', artist='', album='')
     before_conversions = context.checked_calls.count('real_conversion_after_clearance')
     track, transfer, oma = _transfer(context, media_id)
@@ -300,7 +302,8 @@ def test_link_boundary_provider_tags_reach_real_java(real_context, monkeypatch, 
     context = real_context
     content = _generate(context.ffmpeg, context.tmp / 'provider-audio.mp3')
     hints = {'title': 'Provider track', 'artist': 'Provider artist',
-             'album': 'Provider album', 'genre': 'Rock', 'year': 2023, 'track': 4}
+             'album': 'Provider album', 'album_artist': 'Provider ensemble',
+             'genre': 'Rock', 'year': 2023, 'track': 4, 'disc': 2}
 
     def download(url, folder, max_bytes, progress=None):
         assert url == 'https://soundcloud.com/test-artist/test-track'
@@ -321,13 +324,72 @@ def test_link_boundary_provider_tags_reach_real_java(real_context, monkeypatch, 
     media_id = job['files'][0]['media_id']
     assert job['files'][0]['downloaded_bytes'] == len(content)
     assert not list(context.app.state.store.root.glob('download-*'))
-    track, _, oma = _transfer(context, media_id)
+    track, transfer, oma = _transfer(context, media_id)
     for key in ('title', 'artist', 'album'):
         assert track[key] == hints[key]
     frames = _text_frames(oma)
     assert frames['TCON'] == ['Rock']
     assert frames['TYER'] == ['2023']
     assert 'OMG_TRACK\x004' in frames['TXXX']
+    record = context.app.state.store.get(media_id)
+    assert record['album_artist'] == 'Provider ensemble' and record['disc'] == '2'
+    mp3 = _text_frames(transfer)
+    assert mp3['TPE2'] == ['Provider ensemble'] and mp3['TPOS'] == ['2']
     evidence.append({'test': 'provider_metadata_api_real_conversion_java', 'passed': True,
         'network': 'Downloader boundary injected; no live provider download',
         'oma_frames': frames, 'clearance_order': context.checked_calls})
+
+
+@pytest.mark.parametrize(('extension', 'codec'), [('ogg', 'libvorbis'), ('opus', 'libopus')])
+@pytest.mark.parametrize('previous_import', [False, True])
+def test_stream_tags_reach_java_and_recover_previous_imports(real_context, evidence,
+                                                           extension, codec, previous_import):
+    context = real_context
+    source = context.tmp / ('tagged.' + extension)
+    tags = {'title': '\u591c\u306e\u6b4c', 'artist': '\u5742\u672c\u9f8d\u4e00',
+            'album': '\u65e5\u672c\u8a9e Album', 'album_artist': 'Various Artists',
+            'genre': 'Electronic', 'date': '2024-02-29', 'track': '7/12', 'disc': '2/3'}
+    options = [part for key, value in tags.items() for part in ('-metadata', f'{key}={value}')]
+    _run([context.ffmpeg, '-nostdin', '-v', 'error', '-y', '-f', 'lavfi',
+          '-i', 'sine=frequency=523:duration=0.3', '-c:a', codec, *options, str(source)])
+    content = source.read_bytes()
+    media_id, item = _import(context, 'Wrong filename.' + extension, content)
+    assert {key: item.get(key) for key in tags} == tags
+    store = context.app.state.store
+    if previous_import:
+        # Persist the state produced by policy 2, with a later manual artist edit.
+        edited = context.client.patch(f'/api/media/{media_id}/metadata', json={'artist': 'My artist'})
+        assert edited.status_code == 200, edited.text
+        record = store.get(media_id)
+        stale = store.path(record).parent / 'transfer.mp3'
+        _generate(context.ffmpeg, stale, {'title': 'Wrong filename', 'artist': 'My artist',
+                                        'album': 'Unknown album'})
+        record['artifacts']['transfer'] = {'name': stale.name, 'size_bytes': stale.stat().st_size,
+            'sha256': hashlib.sha256(stale.read_bytes()).hexdigest(),
+            'scan': context.scanner.scan_audio(stale).to_dict(), 'metadata_policy': 2,
+            'metadata_revision': record['metadata_revision']}
+        store.update(media_id, artifacts=record['artifacts'], metadata_policy=2,
+            title='Wrong filename', album='Unknown album', album_artist=None,
+            genre=None, date=None, year=None, track=None, disc=None)
+        tags['artist'] = 'My artist'
+    track, transfer, oma = _transfer(context, media_id)
+    record = store.get(media_id)
+    assert {key: record.get(key) for key in tags} == tags
+    assert store.path(record).read_bytes() == content == source.read_bytes()
+    mp3, device_tags = _text_frames(transfer), _text_frames(oma)
+    for frame, key in [('TIT2', 'title'), ('TPE1', 'artist'), ('TALB', 'album'), ('TCON', 'genre')]:
+        assert mp3[frame] == device_tags[frame] == [tags[key]]
+    assert mp3['TPE2'] == ['Various Artists']
+    assert mp3['TPOS'] == ['2/3']
+    assert mp3['TRCK'] == ['7/12']
+    assert device_tags['TYER'] == ['2024']
+    assert 'OMG_TRACK\x007' in device_tags['TXXX']
+    for key in ('title', 'artist', 'album'):
+        assert track[key] == tags[key]
+    database = (context.mount / 'OMGAUDIO' / '04CNTINF.DAT').read_bytes()
+    for key in ('title', 'artist', 'album', 'genre'):
+        assert tags[key].encode('utf-16-be') in database
+    evidence.append({'test': 'audio_stream_metadata_end_to_end', 'extension': extension,
+        'previous_import': previous_import, 'passed': True, 'managed_tags': tags,
+        'mp3_frames': mp3, 'oma_frames': device_tags, 'source_unchanged': True,
+        'database_utf16_tags_verified': True, 'clearance_order': context.checked_calls})

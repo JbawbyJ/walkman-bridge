@@ -14,7 +14,9 @@ import unicodedata
 
 TAG_LIMIT = 512
 METADATA_LIMIT = 256 * 1024
-TRANSFER_TAGS = ('title', 'artist', 'album', 'genre', 'date', 'year', 'track')
+TRANSFER_TAGS = ('title', 'artist', 'album', 'album_artist', 'genre', 'date', 'year', 'track', 'disc')
+TAG_ALIASES = {'albumartist': 'album_artist', 'album artist': 'album_artist',
+               'tracknumber': 'track', 'discnumber': 'disc'}
 
 
 def _text(value) -> str:
@@ -42,34 +44,40 @@ def _valid_date(value) -> str | None:
 def normalize_metadata(tags: Mapping | None, original_name: str) -> dict:
     """Keep useful bounded tags and use honest fallbacks for missing details."""
     fields = {str(key).casefold(): value for key, value in (tags or {}).items()}
+    for alias, canonical in TAG_ALIASES.items():
+        if canonical not in fields and alias in fields:
+            fields[canonical] = fields[alias]
     name = PurePosixPath(str(original_name).replace('\\', '/')).stem
     result = {
         'title': _text(fields.get('title')) or _text(name) or 'Untitled track',
         'artist': _text(fields.get('artist')) or 'Unknown artist',
         'album': _text(fields.get('album')) or 'Unknown album',
     }
-    genre = _text(fields.get('genre'))
-    if genre:
-        result['genre'] = genre
+    for key in ('genre', 'album_artist'):
+        value = _text(fields.get(key))
+        if value:
+            result[key] = value
     recorded = _valid_date(fields.get('date')) or _valid_date(fields.get('year'))
     if recorded:
         result['date'], result['year'] = recorded, int(recorded[:4])
-    track = _text(fields.get('track', fields.get('tracknumber')))
-    matched = re.fullmatch(r'([0-9]{1,4})(?:\s*/\s*([0-9]{1,4}))?', track)
-    if matched:
-        number = int(matched[1])
-        total = int(matched[2]) if matched[2] is not None else None
-        if number > 0 and (total is None or total >= number):
-            result['track'] = str(number) + (f'/{total}' if total is not None else '')
+    for key in ('track', 'disc'):
+        matched = re.fullmatch(r'([0-9]{1,4})(?:\s*/\s*([0-9]{1,4}))?', _text(fields.get(key)))
+        if matched:
+            number = int(matched[1])
+            total = int(matched[2]) if matched[2] is not None else None
+            if number > 0 and (total is None or total >= number):
+                result[key] = str(number) + (f'/{total}' if total is not None else '')
     return result
 
 
-def parse_ffmetadata(text: str) -> dict:
-    """Parse only global tags from FFmpeg's escaped FFMETADATA1 format.
+def parse_ffmetadata(text: str, *, include_audio_stream: bool = False) -> dict:
+    """Parse bounded global tags and optionally the explicitly mapped audio stream.
 
     Diagnostics cannot be parsed reliably as tags (a title can contain a newline
     or a fake field label). This parser consumes a separate bounded output pipe.
-    Stream/chapter tags must not replace the recording's global title or artist.
+    With include_audio_stream, the caller must map only the first audio stream
+    into this output. Its tags fill missing globals (Vorbis/Opus); chapters and
+    subsequent streams are ignored. Cover-image tags cannot become song tags.
     """
     if len(text.encode('utf-8')) > METADATA_LIMIT:
         raise ValueError('Audio metadata exceeds the processing limit')
@@ -92,21 +100,30 @@ def parse_ffmetadata(text: str) -> dict:
     def unescape(value):
         return re.sub(r'\\(.)', r'\1', value, flags=re.DOTALL)
 
-    result = {}
+    result, audio = {}, {}
+    section, seen_stream = result, False
     for line in lines:
         if line.startswith('['):
-            break
+            if not include_audio_stream:
+                break
+            section = audio if line == '[STREAM]' and not seen_stream else None
+            if line == '[STREAM]':
+                seen_stream = True
+            continue
+        if section is None:
+            continue
         if not line or line.startswith((';', '#')):
             continue
         escaped = False
         for index, char in enumerate(line):
             if char == '=' and not escaped:
                 key = unescape(line[:index]).casefold()
-                if key in TRANSFER_TAGS or key == 'tracknumber':
-                    result.setdefault(key, unescape(line[index + 1:]))
+                key = TAG_ALIASES.get(key, key)
+                if key in TRANSFER_TAGS:
+                    section.setdefault(key, unescape(line[index + 1:]))
                 break
             if escaped:
                 escaped = False
             elif char == '\\':
                 escaped = True
-    return result
+    return {**audio, **{key: value for key, value in result.items() if value.strip()}}

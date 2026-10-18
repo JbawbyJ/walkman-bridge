@@ -9,7 +9,7 @@ from transcode import convert_managed, analyze_cleared_audio, extract_cleared_ar
 from metadata import normalize_metadata, TRANSFER_TAGS
 from scan_bridge import ELEVATION_WAIT_SECONDS
 
-METADATA_POLICY = 2
+METADATA_POLICY = 3
 
 
 class MediaService:
