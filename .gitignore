@@ -10,6 +10,7 @@ backend/vendor/*.jar
 # Node / frontend build
 node_modules/
 frontend/dist/
+frontend/test-output/
 dist_electron/
 
 # Runtime work dirs

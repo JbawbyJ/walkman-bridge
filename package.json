@@ -11,6 +11,7 @@
     "electron:dev": "electron .",
     "electron:smoke": "electron . --smoke",
     "test:electron": "node --test electron/*.test.cjs",
+    "test:zoom-matrix": "npm --prefix frontend run build && node --test scripts/zoom-matrix.test.cjs",
     "test:frontend": "node --test frontend/src/*.test.js frontend/tests/*.test.mjs",
     "test:packaging": "node --test packaging/*.test.cjs",
     "dist": "powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-products.ps1 -Product all",
