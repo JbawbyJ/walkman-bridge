@@ -52,7 +52,10 @@ function Get-SmokeRootExitTime {
     if (-not $Process) { return $null }
     try {
         $Process.Refresh()
-        if (-not $Process.HasExited -or -not (Test-SmokeRootIdentity $Process.StartTime $SmokeStart)) { return $null }
+        # HasExited may observe TerminateProcess's exit code before termination
+        # finishes and GetProcessTimes publishes an exit time. Only the retained
+        # handle's signal establishes a completed lifetime; never reopen the PID.
+        if (-not $Process.WaitForExit(0) -or -not (Test-SmokeRootIdentity $Process.StartTime $SmokeStart)) { return $null }
         $exited = ConvertTo-SmokeInstant $Process.ExitTime
         if ($exited -and $exited -ge (ConvertTo-SmokeInstant $SmokeStart)) { return $exited }
     } catch { }
@@ -187,7 +190,9 @@ function Test-SmokeTreeClear {
     param($Process, [string]$OwnedPath, $SmokeStart)
     if ($Process) { try { $Process.Refresh() } catch { } }
     $rootId = if ($Process) { [int]$Process.Id } else { 0 }
-    if ($Process -and -not $Process.HasExited) { return $false }
+    # A zero-time wait preserves the caller's grace/settle deadline and leaves
+    # asynchronous termination pending instead of rejecting its unfinished time.
+    if ($Process -and -not $Process.WaitForExit(0)) { return $false }
     if (-not $SmokeStart) { $SmokeStart = $script:SmokeStart }
     $rootExit = Get-SmokeRootExitTime -Process $Process -SmokeStart $SmokeStart
     if ($Process -and -not $rootExit) { throw 'Cannot verify the exited smoke root lifetime.' }

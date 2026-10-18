@@ -41,9 +41,33 @@ function Assert-Ids($Rows, [int[]]$Expected, [string]$Label) {
     if ($actual -ne $wanted) { throw "${Label}: expected [$wanted], got [$actual]" }
 }
 function TrackedRoot([bool]$Exited = $true) {
-    $tracked = [pscustomobject]@{ Id = 32100; HasExited = $Exited; StartTime = $started; ExitTime = $started.AddSeconds(5) }
+    $tracked = [pscustomobject]@{ Id = 32100; HasExited = $Exited; Signaled = $Exited; StartTime = $started; ExitTime = $started.AddSeconds(5) }
     $tracked | Add-Member -MemberType ScriptMethod -Name Refresh -Value {}
+    $tracked | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+        param([int]$Milliseconds)
+        if ($Milliseconds -ne 0) { throw 'Exit probe must not extend the shutdown deadline' }
+        return $this.Signaled
+    }
     return $tracked
+}
+
+# TerminateProcess can publish an exit code before signaling the process handle.
+# .NET HasExited then returns true while GetProcessTimes still reports a zero
+# FILETIME. This must remain pending, not throw or certify a cleared tree.
+$terminating = TrackedRoot
+$terminating.Signaled = $false
+$terminating.ExitTime = [datetime]::FromFileTimeUtc(0)
+if (Test-SmokeTreeClear -Process $terminating -OwnedPath $ownedPath -SmokeStart $started) {
+    throw 'An unsignaled terminating root was treated as a cleared tree'
+}
+# Even a populated timestamp is not a completed lifetime until the handle signals.
+$terminating.ExitTime = $started.AddSeconds(5)
+if (Get-SmokeRootExitTime -Process $terminating -SmokeStart $started) {
+    throw 'An unsignaled terminating root supplied a lifetime witness'
+}
+$terminating.Signaled = $true
+if (-not (Test-SmokeTreeClear -Process $terminating -OwnedPath $ownedPath -SmokeStart $started)) {
+    throw 'A signaled original root without descendants did not clear'
 }
 
 # The launch PID now belongs to a different tree. Only the independently
@@ -83,7 +107,7 @@ $script:Snapshot = @(
 Assert-Ids @(Get-SmokeProcesses -RootProcessId 32100 -OwnedPath $ownedPath -SmokeStart $started -RootProcess (TrackedRoot)) @(32101,32102) 'Exited root must retain children born during its verified lifetime'
 Assert-Ids @(Get-SmokeProcesses -RootProcessId 32100 -OwnedPath $ownedPath -SmokeStart $started) @() 'Absent root without a lifetime witness must not admit children'
 $script:RootDuringSnapshot = TrackedRoot $false
-$script:SnapshotHook = { $script:RootDuringSnapshot.HasExited = $true }
+$script:SnapshotHook = { $script:RootDuringSnapshot.HasExited = $true; $script:RootDuringSnapshot.Signaled = $true }
 try {
     Assert-Ids @(Get-SmokeProcesses -RootProcessId 32100 -OwnedPath $ownedPath -SmokeStart $started -RootProcess $script:RootDuringSnapshot) @(32101,32102) 'Root exit during the CIM query must retain its children'
 } finally { $script:SnapshotHook = $null }
