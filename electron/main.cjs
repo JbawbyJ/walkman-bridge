@@ -249,7 +249,18 @@ async function closeSafely() {
       // Only ACK or confirmed renderer loss can release the native playback lease.
       await request('POST', '/api/internal/playback/release')
     }, request,
-      onWaiting: state => { if (window && !window.isDestroyed()) window.webContents.send('app:draining', state) } })
+      onWaiting: state => {
+        // A destroyed window cannot take the in-app draining event. The toast
+        // is the notice, including the retry after an unknown drain status.
+        if (window && !window.isDestroyed()) {
+          try { window.webContents.send('app:draining', state); return }
+          catch (error) { log(`Drain status during close: ${error.message}`) }
+        }
+        if (deviceWriteFinishing) return
+        deviceWriteFinishing = true
+        showDrainNotice()
+      } })
+    endDrainNotice()
     broker?.stop()
     await revokeSession()
     if (backendLost) return
@@ -258,6 +269,7 @@ async function closeSafely() {
     window?.destroy()
     app.quit()
   } catch (error) {
+    endDrainNotice()
     if (backendLost) return
     if (smoke) {
       log(`Close deferred: ${error.message}`)

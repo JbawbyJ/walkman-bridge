@@ -27,7 +27,7 @@ function harness(options = {}) {
   const backend = new EventEmitter()
   backend.stdout = new EventEmitter(); backend.stderr = new EventEmitter()
   backend.exitCode = null; backend.killed = false
-  const state = { windows: [], dialogs: [], notices: [], requests: [], logs: [], brokerStops: 0, brokerStarts: 0, spawns: 0, quits: 0, exits: 0, exitCode: undefined, stopSends: 0, kills: 0, cookiesRemoved: 0, cookie: null }
+  const state = { windows: [], dialogs: [], notices: [], requests: [], sends: [], logs: [], brokerStops: 0, brokerStarts: 0, spawns: 0, quits: 0, exits: 0, exitCode: undefined, stopSends: 0, kills: 0, restores: 0, focuses: 0, cookiesRemoved: 0, cookie: null }
   backend.kill = () => { state.kills++; backend.killed = true; backend.exitCode = 0; backend.emit('exit', 0) }
   const ipcMain = new EventEmitter()
   ipcMain.handle = () => {}
@@ -44,11 +44,11 @@ function harness(options = {}) {
     constructor(options) { this.options = options; this.shown = false; this.closed = false; state.notices.push(this) }
     show() { this.shown = true }
     close() { this.closed = true }
-    static isSupported() { return true }
+    static isSupported() { return options.noticeSupported !== false }
   }
   class Window extends EventEmitter {
     constructor(windowOptions) {
-      super(); this.destroyed = false; this.options = windowOptions; state.windows.push(this)
+      super(); this.destroyed = false; this.minimized = false; this.options = windowOptions; state.windows.push(this)
       this.webContents = new EventEmitter()
       Object.assign(this.webContents, {
         mainFrame: { url: ORIGIN }, setWindowOpenHandler() {},
@@ -59,6 +59,7 @@ function harness(options = {}) {
           if (script.includes('scanner/pending')) return 403
         }, stop() { state.playbackStopped = true },
         send: (channel, nonce) => {
+          state.sends.push(channel)
           if (channel !== 'playback:stop') return
           state.stopSends++
           if (!options.noStopAck) queueMicrotask(() => ipcMain.emit(options.stopFailed ? 'playback:stop-failed' : 'playback:stopped', { sender: this.webContents, senderFrame: this.webContents.mainFrame }, nonce))
@@ -66,6 +67,9 @@ function harness(options = {}) {
       })
     }
     isDestroyed() { return this.destroyed }
+    isMinimized() { return this.minimized }
+    restore() { this.minimized = false; state.restores++ }
+    focus() { state.focuses++ }
     async loadURL() {
       if (options.holdPlaybackReady) return
       queueMicrotask(() => ipcMain.emit('playback:ready', { sender: this.webContents, senderFrame: this.webContents.mainFrame }))
@@ -364,6 +368,94 @@ test('second instance during a forced-close drain re-shows the notice without a 
   assert.equal(h.state.windows.length, 1)
   assert.equal(h.state.spawns, 1)
   assert.equal(h.state.brokerStarts, 1)
+})
+
+test('unknown shutdown status clears the drain notice and retry uses the normal close path', async () => {
+  const dialogGate = deferred()
+  let phase = 'busy'
+  const h = harness({ noStopAck: true, immediateAckTimeout: true, dialogGate, fetch: async url => {
+    const pathname = new URL(url).pathname
+    if (pathname === '/api/health') return { ok: true, json: async () => ({ ok: true, product: 'bridge' }) }
+    if (pathname === '/api/engine-busy') {
+      if (phase === 'unknown') return { ok: true, json: async () => ({}) }
+      if (phase === 'retry-busy') return { ok: true, json: async () => ({ draining: true, busy: true }) }
+      if (phase === 'idle') return { ok: true, json: async () => ({ draining: true, busy: false }) }
+      return { ok: true, json: async () => ({ draining: true, busy: true }) }
+    }
+    return { ok: true, json: async () => ({ draining: true, busy: false }) }
+  } })
+  await flush()
+  const closing = h.invoke('closeSafely()')
+  assert.equal(await waitUntil(() => h.state.notices.some(notice => notice.shown && !notice.closed)), true)
+  phase = 'unknown'
+  assert.equal(await waitUntil(() => h.state.dialogs.length === 1, 2500), true)
+  assert.equal(h.state.notices.length, 1)
+  assert.equal(h.state.notices[0].closed, true)
+  assert.equal(h.state.dialogs[0].buttons.length, 1)
+  assert.equal(h.state.dialogs[0].buttons[0], 'Retry shutdown')
+  assert.equal(h.state.kills, 0)
+  assert.equal(h.state.quits, 0)
+  phase = 'retry-busy'
+  dialogGate.resolve()
+  await closing
+  assert.equal(await waitUntil(() => h.state.notices.length >= 2 && h.state.notices[1].shown && !h.state.notices[1].closed), true)
+  assert.equal(h.state.notices[1].options.body, DRAIN_NOTICE)
+  assert.equal(h.state.sends.includes('app:draining'), false)
+  assert.equal(h.state.windows[0].isDestroyed(), true)
+  h.secondInstance()
+  assert.equal(h.state.notices.length, 3)
+  assert.equal(h.state.notices[1].closed, true)
+  assert.equal(h.state.notices[2].shown, true)
+  assert.equal(h.state.notices[2].options.body, DRAIN_NOTICE)
+  assert.equal(h.state.windows.length, 1)
+  assert.equal(h.state.spawns, 1)
+  assert.equal(h.state.brokerStarts, 1)
+  assert.equal(h.state.kills, 0)
+  phase = 'idle'
+  assert.equal(await waitUntil(() => h.state.kills === 1 && h.state.quits > 0, 2500), true)
+  assert.ok(h.state.notices.every(notice => notice.closed))
+  assert.equal(h.state.requests.filter(route => route === '/api/shutdown/drain').length, 2)
+  assert.equal(h.state.dialogs.length, 1)
+  assert.equal(h.state.sends.includes('app:draining'), false)
+})
+
+test('unsupported notifications skip the drain notice quietly', async () => {
+  let busy = true
+  const h = harness({ noStopAck: true, immediateAckTimeout: true, noticeSupported: false, fetch: async url => {
+    const pathname = new URL(url).pathname
+    if (pathname === '/api/health') return { ok: true, json: async () => ({ ok: true, product: 'bridge' }) }
+    if (pathname === '/api/engine-busy') { const stillBusy = busy; return { ok: true, json: async () => ({ draining: true, busy: stillBusy }) } }
+    return { ok: true, json: async () => ({ draining: true, busy: false }) }
+  } })
+  await flush()
+  const closing = h.invoke('closeSafely()')
+  assert.equal(await waitUntil(() => h.state.requests.includes('/api/engine-busy') && h.state.windows[0].isDestroyed()), true)
+  assert.equal(h.state.notices.length, 0)
+  assert.equal(h.state.dialogs.length, 0)
+  assert.doesNotMatch(h.state.logs.join('\n'), /Drain notice/)
+  busy = false
+  await closing
+  assert.equal(h.state.notices.length, 0)
+  assert.equal(h.state.dialogs.length, 0)
+  assert.equal(h.state.kills, 1)
+  assert.ok(h.state.quits > 0)
+  assert.doesNotMatch(h.state.logs.join('\n'), /Drain notice/)
+})
+
+test('second instance with a window restores and focuses it without a drain notice', async () => {
+  const h = harness()
+  await flush()
+  const win = h.state.windows[0]
+  win.minimized = true
+  h.secondInstance()
+  assert.equal(win.minimized, false)
+  assert.equal(h.state.restores, 1)
+  assert.equal(h.state.focuses, 1)
+  assert.equal(h.state.notices.length, 0)
+  assert.equal(h.state.windows.length, 1)
+  assert.equal(h.state.spawns, 1)
+  assert.equal(win.isDestroyed(), false)
+  assert.equal(h.state.dialogs.length, 0)
 })
 
 test('reload clears playback ready so stop waits for the new registration', async () => {
