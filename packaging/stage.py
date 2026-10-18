@@ -129,6 +129,9 @@ def checked(command, **kwargs):
 
 def verify_engine_contract(java: Path, jar: Path):
     """Reject a stale JAR using only a new disposable device fixture."""
+    def require(condition):
+        if not condition:
+            raise ValueError('Invalid recovery contract')
     with tempfile.TemporaryDirectory(prefix='engine-contract-') as temporary:
         mount = Path(temporary) / 'device'
         (mount / 'OMGAUDIO').mkdir(parents=True)
@@ -139,20 +142,20 @@ def verify_engine_contract(java: Path, jar: Path):
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             try:
                 events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
-                assert all(isinstance(event, dict) for event in events)
+                require(all(isinstance(event, dict) for event in events))
                 if command == 'playlist-repair':
-                    assert result.returncode != 0
-                    assert any(e.get('event') == 'fatal' and e.get('code') == 'PLAYLIST_LIBRARY_NOT_LOADED' for e in events)
-                    assert not any(e.get('event') == 'done' for e in events)
+                    require(result.returncode != 0)
+                    require(any(e.get('event') == 'fatal' and e.get('code') == 'PLAYLIST_LIBRARY_NOT_LOADED' for e in events))
+                    require(not any(e.get('event') == 'done' for e in events))
                 else:
-                    assert result.returncode == 0 and events[-1].get('event') == 'done'
+                    require(result.returncode == 0 and events[-1].get('event') == 'done')
                     journal = next(e for e in events if e.get('event') == 'playlistJournal')
-                    assert journal.get('state') == 'none'
-                    assert re.fullmatch(r'[0-9a-f]{64}', journal.get('library_fingerprint', ''))
-                    assert journal.get('files') == []
+                    require(journal.get('state') == 'none')
+                    require(re.fullmatch(r'[0-9a-f]{64}', journal.get('library_fingerprint', '')))
+                    require(journal.get('files') == [])
                     if not options:
-                        assert journal.get('outcome') == 'none'
-            except (AssertionError, ValueError, StopIteration, IndexError, TypeError) as exc:
+                        require(journal.get('outcome') == 'none')
+            except (ValueError, StopIteration, IndexError, TypeError) as exc:
                 raise ValueError(f'Packaged engine lacks the required recovery contract: {command}') from exc
 
 

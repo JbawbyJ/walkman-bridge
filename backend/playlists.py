@@ -313,13 +313,11 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
 
         def write():
             with coordinator.device_session(ticket) as mount:
-                # UI recovery confirmation is bound to the inspected journal
-                # and physical volume. Legacy API callers may omit If-Match.
-                expected = request.headers.get('if-match')
-                if expected:
-                    journal = device_api.inspect_playlist_journal(mount)
-                    if not journal.get('guarded') or journal_etag(volume, journal) != expected:
-                        raise HTTPException(409, 'Device or recovery journal changed, or engine needs updating; inspect again')
+                # Every recovery confirmation is bound to the inspected journal
+                # and physical volume, rechecked while holding the device session.
+                journal = device_api.inspect_playlist_journal(mount)
+                if journal.get('guarded') is not True or journal_etag(volume, journal) != expected:
+                    raise HTTPException(409, 'Device or recovery journal changed, or engine needs updating; inspect again')
                 if action == 'repair':
                     # Always list. A stale non-empty cache must not skip the empty-library refusal.
                     rows = device_api.list_tracks(mount)
@@ -338,6 +336,7 @@ def register_native_routes(app, device_api, identity, admit, coordinator, jobs, 
             job.set_status(JobStatus.DONE, 'Playlist ' + action + ' finished')
             return result
         try:
+            expected = expected_etag(request)
             job = jobs.create(job_id, 1, kind='playlist_' + action)
             job.set_files([dict(file_id=job_id, name='Playlist ' + action, volume_id=volume.volume_id, state='queued')])
             result = await asyncio.to_thread(write)

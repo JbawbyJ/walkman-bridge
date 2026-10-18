@@ -52,7 +52,8 @@ def register_reconciliation_routes(app, device_api, identity, admit, coordinator
         return {'volume_id': volume.volume_id, 'journal': journal, 'tracks': list(tracks),
                 'playlists': list(playlists), 'warnings': warnings, 'jobs': pending,
                 'inventory_error': inventory_error,
-                'can_acknowledge': journal_clear and not warnings and inventory_error is None}
+                'can_acknowledge': journal_clear and journal.get('guarded') is True
+                                   and not warnings and inventory_error is None}
 
     async def inspect_or_acknowledge(response=None, request=None, body=None):
         expected = request.headers.get('if-match') if request else None

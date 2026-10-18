@@ -32,10 +32,10 @@
   },
   "jsymphonic": {
     "repository": "JbawbyJ/jsymphonic",
-    "commit": "628d5b7e481d223ba8b110dce5801d5351e3c323",
-    "source_archive": "sources/jsymphonic-nightops-0.4.0-src.zip",
-    "sha256": "424c7878ae1adda012e5e7aed195b48c84c8a585d9f36d59182e069a1f00e569",
-    "source_revision": "nightops-0.4.0",
-    "source_description": "Release snapshot including local changes on the recorded base commit; archive SHA-256 identifies the complete source."
+    "commit": "453c69e5a0146821ddcafd0a0ee9ebbd25322dbb",
+    "source_archive": "sources/jsymphonic-453c69e5a014-src.zip",
+    "sha256": "abb614ba8fe2de7b870710094e16735b25afab903735a6b16fe247ec3da97db5",
+    "source_revision": "453c69e5a0146821ddcafd0a0ee9ebbd25322dbb",
+    "source_description": "Exact tracked source from the immutable recovery-hardening commit; archive SHA-256 identifies the complete source."
   }
 }

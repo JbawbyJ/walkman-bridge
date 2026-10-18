@@ -12,7 +12,7 @@ ROUTE = '/api/device/reconciliation'
 
 
 def uncertain(ctx):
-    ctx.api.inspect_playlist_journal = lambda mount: {'state': 'none', 'exists': False, 'covers': {'files': []}}
+    ctx.api.inspect_playlist_journal = lambda mount: {'state': 'none', 'exists': False, 'covers': {'files': []}, 'guarded': True, 'library_fingerprint': 'a' * 64}
     ctx.api.list_playlists = lambda mount: []
     def interrupted(*args):
         raise JSymphonicError('Interrupted write', needs_reconcile=True)
@@ -77,6 +77,7 @@ def test_requires_explicit_acknowledgement_and_fresh_snapshot(context):
     {'state': 'committed', 'exists': True, 'covers': {'files': ['01TREE22.DAT']}},
     {'state': None, 'exists': None, 'covers': None},
     {'state': 'none', 'exists': False, 'covers': {'files': []}, 'warnings': [{'code': 'DEVICE_PROBE_PENDING'}]},
+    {'state': 'none', 'exists': False, 'covers': {'files': []}, 'guarded': False},
 ])
 def test_pending_or_unknown_journal_cannot_unlock(context, journal):
     media_id, job_id = uncertain(context)

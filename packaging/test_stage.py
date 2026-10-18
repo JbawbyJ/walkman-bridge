@@ -2,6 +2,8 @@ import importlib.util
 import hashlib
 import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -15,6 +17,24 @@ spec.loader.exec_module(stage)
 
 
 class StagingSafetyTests(unittest.TestCase):
+    def test_optimized_python_still_rejects_stale_engine(self):
+        code = f'''
+import importlib.util
+from pathlib import Path
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location('stage', {str(stage.PACKAGING / 'stage.py')!r})
+stage = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(stage)
+stage.subprocess.run = lambda *a, **k: SimpleNamespace(returncode=0, stdout='{{"event":"playlistJournal","state":"none","files":[]}}\\n{{"event":"done"}}\\n')
+try:
+    stage.verify_engine_contract(Path('java.exe'), Path('old.jar'))
+except ValueError:
+    raise SystemExit(0)
+raise SystemExit('Stale engine accepted under optimization')
+'''
+        result = subprocess.run([sys.executable, '-O', '-c', code], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_stale_jar_cannot_be_staged_even_with_a_done_event(self):
         old = SimpleNamespace(returncode=0, stdout='{"event":"playlistJournal","state":"none","files":[]}\n{"event":"done"}\n')
         with patch.object(stage.subprocess, 'run', return_value=old):

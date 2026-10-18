@@ -12,7 +12,7 @@ test('inspection never writes; acknowledgement requires explicit review and uses
     Object.defineProperty(globalThis, key, { value, configurable: true, writable: true })
   }
   const original = { ...api }, calls = []
-  api.inspectRecoveryJournal = async () => ({ state: 'none', etag: 'journal-etag' })
+  api.inspectRecoveryJournal = async () => ({ state: 'none', guarded: true, etag: 'journal-etag' })
   api.inspectDeviceState = async () => ({ etag: 'snapshot-etag', can_acknowledge: true,
     tracks: [{ id: '1', title: 'Checked track' }], playlists: [], warnings: [],
     jobs: [{ job_id: 'unknown-job', same_device: true, files: [{ name: 'Interrupted file', state: 'unknown' }] }] })

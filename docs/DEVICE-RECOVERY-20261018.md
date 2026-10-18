@@ -20,6 +20,10 @@ retries a transfer automatically.
 - Recovery and repair remain separate explicit device-writing actions. Opening
   the panel or inspecting state never invokes them. A failed action discards the
   panel's confirmation state; the owner must inspect again.
+- Recovery and repair require `If-Match` from a fresh inspection (428 when
+  missing). Both mutations and acknowledgement reject an older engine without
+  fingerprint support. Changed journal bytes, Sony database table bytes or volume
+  identity invalidate the confirmation even if visible tracks look unchanged.
 
 Legacy jobs without a recorded volume remain blocked. There is deliberately no
 blanket "clear all" or automatic retry. Recovery does not substitute for a backup.
@@ -49,6 +53,37 @@ shared-media uncertainty, legacy jobs and UI confirmation/no-retry behavior.
 Parser and format regressions failed before their fixes. The 201-item queue was
 created through two authenticated imports, then reordered successfully; missing
 and duplicated IDs were still rejected.
+
+The runtime lock pins JSymphonic commit
+`453c69e5a0146821ddcafd0a0ee9ebbd25322dbb` from
+[JSymphonic PR #7](https://github.com/JbawbyJ/jsymphonic/pull/7).
+The source archive SHA-256 is
+`abb614ba8fe2de7b870710094e16735b25afab903735a6b16fe247ec3da97db5`.
+An offline clean package build from the extracted archive produced the test JAR
+`556cf46b7453620ae391dd04a983a687df35cf9b5eadd9d5df934d40afdc0997`.
+The archive build skipped tests; the engine commit separately completed 132 tests
+with zero failures/errors and four optional Sony-fixture skips. Bridge's real
+Java/FFmpeg integration selection passed 20 tests on disposable libraries; the
+recovery API case passed again after mandatory confirmation was enabled.
+
+Staging invokes the candidate JAR against a new empty temporary mount and rejects
+missing recovery fingerprints, invalid recovery completion or successful repair
+of an unloaded library. These checks remain active under optimized Python.
+Current frozen-artifact verification pins the independently checked local JAR
+above and validates the exact source ZIP, safe unique archive paths and license
+parity. It no longer assumes a sibling engine checkout. The historical 0.4.0
+verifier retains its original binary pin. A future rebuilt JAR needs its own
+binary review evidence; this does not claim reproducible JAR timestamps.
+Fingerprints detect changed snapshots; they do not authenticate an attacker who
+can rewrite an entire device or make arbitrary external writers atomic.
+
+The full backend/packaging run completed with 461 passes, 15 skips, seven expected
+failures and one existing unexpected pass. The final source-verifier selection
+passed 23 additional tests; the complete frontend selection passed 75 tests and
+the final recovery UI selection and production build passed. Independent manual
+AppSec checks covered 33 negative/rollback cases. Dedicated hosted review tools
+were unavailable; these were scoped manual and executable checks, not a claim of
+completed hosted review or full penetration testing.
 
 All device work in this task targets disposable fixtures. No physical Walkman,
 real Defender scan, alternate-account UAC prompt, signing or release publication
