@@ -1,7 +1,6 @@
 'use strict'
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
-const frames = 'new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))'
 
 async function waitForViewport(win, width, height, scale, {
   timeoutMs = 3000,
@@ -30,8 +29,8 @@ async function waitForViewport(win, width, height, scale, {
   })
   const poll = async () => {
     while (!stopped) {
-      await win.webContents.executeJavaScript(frames, true)
-      if (stopped) break
+      // Sample directly. An animation-frame barrier can keep this poll stuck
+      // on an old measurement even after resize/zoom has changed the viewport.
       appliedZoom = win.webContents.getZoomFactor()
       const measured = await win.webContents.executeJavaScript('[innerWidth, innerHeight]', true)
       if (stopped) break

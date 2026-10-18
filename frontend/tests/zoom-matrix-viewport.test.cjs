@@ -31,6 +31,29 @@ test('waits for delayed CSS viewport even when getZoomFactor already reports the
   assert.deepEqual(fixture.observed[0], [320, 280])
 })
 
+for (const availableFrames of [0, 1]) {
+  test(`hidden renderer can converge when animation frames stall after ${availableFrames} callbacks`, async () => {
+    const fixture = renderer(ms => ms < 50 ? [450, 350] : [900, 700])
+    const directEvaluation = fixture.win.webContents.executeJavaScript
+    let frames = 0
+    fixture.win.webContents.executeJavaScript = async script => {
+      // A hidden window may continue evaluating JavaScript and updating its
+      // viewport while animation-frame promises remain pending indefinitely.
+      if (script.includes('requestAnimationFrame')) {
+        if (++frames > availableFrames) return new Promise(() => {})
+        return
+      }
+      return directEvaluation(script)
+    }
+    const result = await waitForViewport(fixture.win, 900, 700, 1,
+      { ...fixture.options, timeoutMs: 125 })
+    assert.equal(result.converged, true)
+    assert.deepEqual(result.viewport, [900, 700])
+    assert.ok(result.elapsedMs >= 50 && result.elapsedMs < 125)
+    assert.deepEqual(fixture.observed[0], [450, 350])
+  })
+}
+
 test('a viewport that never converges times out with the last measured dimensions', async () => {
   const fixture = renderer(() => [320, 280])
   const result = await waitForViewport(fixture.win, 640, 560, 1, { ...fixture.options, timeoutMs: 125 })
