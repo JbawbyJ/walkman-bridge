@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,6 +12,25 @@ spec.loader.exec_module(stage)
 
 
 class StagingSafetyTests(unittest.TestCase):
+    def test_player_requires_deno_notices_and_excludes_device_reconciliation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ('product.json', 'python/python.exe', 'python/python313.dll', 'python/python313.zip',
+                         'python/Lib/site-packages/fastapi/__init__.py', 'ffmpeg/ffmpeg.exe',
+                         'scanner-helper/RedLotus.ScanHelper.exe', 'deno/deno.exe', 'backend/main.py',
+                         'backend/boot.py', 'frontend/dist/index.html', 'frontend/dist/fonts/test.woff2',
+                         'THIRD-PARTY-NOTICES.md'):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'fixture')
+            with self.assertRaisesRegex(FileNotFoundError, 'notices/deno'):
+                stage.validate_layout(root, 'player')
+            shutil.copytree(stage.PACKAGING / 'notices/deno', root / 'notices/deno')
+            stage.validate_layout(root, 'player')
+            (root / 'backend/reconciliation.py').write_text('device-only')
+            with self.assertRaisesRegex(ValueError, 'device/JSymphonic'):
+                stage.validate_layout(root, 'player')
+
     def test_archive_cannot_escape_destination(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -30,7 +30,7 @@ HISTORICAL_INSTALLERS = {
 # Independently reviewed native-playlist engine; update only with new engine
 # review evidence, independently of the desktop product's version/branding.
 REVIEWED_ENGINE_SHA256 = 'cbab7deae5baed02b799f43a454095e5b8b8d00a26151cc0c8649c2cccbcfc72'
-DEVICE_MODULES = {'device.py', 'jsymphonic.py'}
+DEVICE_MODULES = {'device.py', 'jsymphonic.py', 'reconciliation.py'}
 BUILDER_RESOURCE_FILES = {'runtime-manifest.json', 'app.asar', 'elevate.exe'}
 
 NODE_INSPECTION = r'''

@@ -67,15 +67,18 @@ export const api = {
   updateDevicePlaylist: (id, changes, etag) => req(`/device/playlists/${idPath(id)}`, { ...json('PATCH', changes), headers: { 'Content-Type': 'application/json', 'If-Match': etag } }),
   deleteDevicePlaylist: (id, etag) => req(`/device/playlists/${idPath(id)}`, { method: 'DELETE', headers: { 'If-Match': etag } }),
   inspectPlaylistJournal: () => req('/device/playlist-recovery/inspect'),
-  recoverPlaylistJournal: () => req('/device/playlist-recovery/recover', { method: 'POST' }),
-  repairPlaylists: () => req('/device/playlist-recovery/repair', { method: 'POST' }),
+  inspectRecoveryJournal: async () => { const result = await req('/device/playlist-recovery/inspect', {}, true); return { ...result.items, etag: result.etag } },
+  recoverPlaylistJournal: etag => req('/device/playlist-recovery/recover', { method: 'POST', ...(etag ? { headers: { 'If-Match': etag } } : {}) }),
+  repairPlaylists: etag => req('/device/playlist-recovery/repair', { method: 'POST', ...(etag ? { headers: { 'If-Match': etag } } : {}) }),
+  inspectDeviceState: async () => { const result = await req('/device/reconciliation', {}, true); return { ...result.items, etag: result.etag } },
+  acknowledgeDeviceState: (job_id, etag) => req('/device/reconciliation', { ...json('POST', { job_id, acknowledge: true }), headers: { 'Content-Type': 'application/json', 'If-Match': etag } }),
   mediaUrl: (id, revision = '') => `${BASE}/media/${idPath(id)}/stream${revision ? `?revision=${encodeURIComponent(revision)}` : ''}`,
 }
 
 // Action ids match frontend/src/help/playlistRecovery.js (Builder C).
 // Paths are relative to `/api`. inspect_recover is inspect, then recover.
 // PLAYLIST_JOURNAL_PENDING and DEVICE_ROLLBACK_FAILED both use that flow.
-// free_slots deletes a Sony playlist through the existing playlist-delete route.
+// reuse_playlist edits an existing Sony playlist; deletion never frees a lifetime slot.
 // reconnect_retry has no endpoint: reconnect the Walkman, then call repairPlaylists again.
 // close_and_retry has no endpoint: show fatal_path, then the owner retries the original action.
 // clear_read_only_retry has no endpoint: show fatal_path, the owner clears the read-only flag, then retries.
@@ -95,8 +98,8 @@ export const RECOVERY_ACTIONS = {
   repair: [
     { id: 'repair', method: 'POST', path: '/device/playlist-recovery/repair', call: 'repairPlaylists' },
   ],
-  free_slots: [
-    { id: 'deleteDevicePlaylist', method: 'DELETE', path: '/device/playlists/{id}', call: 'deleteDevicePlaylist' },
+  reuse_playlist: [
+    { id: 'updateDevicePlaylist', method: 'PATCH', path: '/device/playlists/{id}', call: 'updateDevicePlaylist' },
   ],
   reconnect_retry: {
     fatal_code: 'PLAYLIST_LIBRARY_NOT_LOADED',

@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PACKAGING = ROOT / "packaging"
 BUILD = PACKAGING / "build" / "redlotus"
 CACHE = PACKAGING / ".cache" / "nightops"
-DEVICE_MODULES = {"device.py", "jsymphonic.py"}
+DEVICE_MODULES = {"device.py", "jsymphonic.py", "reconciliation.py"}
 
 
 def sha256(path: Path) -> str:
@@ -250,6 +250,9 @@ def validate_layout(root: Path, product: str):
                 "python/python313.zip", "python/Lib/site-packages/fastapi/__init__.py",
                 "ffmpeg/ffmpeg.exe", "scanner-helper/RedLotus.ScanHelper.exe", "deno/deno.exe",
                 "backend/main.py", "backend/boot.py", "frontend/dist/index.html", "THIRD-PARTY-NOTICES.md"]
+    required += [f"notices/deno/{name}" for name in (
+        "LICENSE.md", "LICENSE-NODE-TYPES.txt", "LICENSE-RUSTY-V8.txt", "LICENSE-TYPESCRIPT.txt",
+        "LICENSE-UNDICI.txt", "LICENSE-V8.txt", "LICENSE-WEBGPU.md", "PROVENANCE.json", "README.md")]
     if product == "bridge":
         lock = json.loads((PACKAGING / "runtime-lock.json").read_text(encoding="utf-8"))
         required += ["jre/bin/java.exe", "backend/vendor/jsymphonic.jar",

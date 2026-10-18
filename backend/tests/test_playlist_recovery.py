@@ -1,7 +1,7 @@
 """Playlist recovery endpoints driven by the fake shim (SHIM_CMD_PREFIX).
 
 Present `state` / `outcome` values are passed through from `playlistJournal`.
-Missing and unknown values stay null. Message text is never a substitute.
+Missing and unknown summaries fail closed. Message text is never a substitute.
 Repair summary ids are JSON numbers and come back as strings. A final `done`
 event is required.
 """
@@ -34,7 +34,7 @@ CODES = (
 RECOVERY_BY_CODE = {
     'PLAYLIST_REF_MISSING': 'repair',
     'PLAYLIST_JOURNAL_PENDING': 'inspect_recover',
-    'PLAYLIST_SLOTS_EXHAUSTED': 'free_slots',
+    'PLAYLIST_SLOTS_EXHAUSTED': 'reuse_playlist',
     'PLAYLIST_LIBRARY_NOT_LOADED': 'reconnect_retry',
     'DEVICE_ROLLBACK_FAILED': 'inspect_recover',
     'DEVICE_FILE_LOCKED': 'close_and_retry',
@@ -58,10 +58,7 @@ def bind_script(context, monkeypatch, events, exit_code=0):
 
 @pytest.mark.parametrize('scenario, state, exists', [
     ('playlist_inspect_committed', 'committed', True),
-    ('playlist_inspect_uncommitted', 'uncommitted', True),
     ('playlist_inspect_none', 'none', False),
-    ('playlist_inspect_missing', None, None),
-    ('playlist_inspect_unknown', None, None),
 ])
 def test_inspect_state_comes_only_from_the_state_field(context, monkeypatch, scenario, state, exists):
     use_fake(monkeypatch, context, scenario)
@@ -83,9 +80,10 @@ def test_inspect_covers_come_from_journal_files(context, monkeypatch):
 
 
 @pytest.mark.parametrize('scenario', ['playlist_inspect_missing', 'playlist_inspect_uncommitted', 'playlist_inspect_unknown'])
-def test_inspect_without_a_string_file_list_has_null_covers(context, monkeypatch, scenario):
+def test_inspect_without_valid_summary_is_rejected(context, monkeypatch, scenario):
     use_fake(monkeypatch, context, scenario)
-    assert context.client.get(INSPECT).json()['covers'] is None
+    assert context.client.get(INSPECT).status_code == 409
+    assert context.app.state.jobs.latest() is None
 
 
 def test_inspect_none_passes_an_empty_file_list(context, monkeypatch):
@@ -110,8 +108,6 @@ def test_step_state_does_not_hide_a_journal_state(monkeypatch):
     ('playlist_recover_rolled_forward', 'rolled_forward'),
     ('playlist_recover_discarded', 'discarded'),
     ('playlist_recover_none', 'none'),
-    ('playlist_recover_missing', None),
-    ('playlist_recover_unknown', None),
 ])
 def test_recover_outcome_comes_only_from_the_outcome_field(context, monkeypatch, scenario, outcome):
     use_fake(monkeypatch, context, scenario)
@@ -142,13 +138,18 @@ def test_repair_normalizes_numeric_summary_ids(context, monkeypatch):
     assert body['pruned_count'] > len(body['pruned_track_ids'])
 
 
-def test_repair_missing_count_stays_unknown(context, monkeypatch):
-    use_fake(monkeypatch, context, 'playlist_repair_missing')
-    body = context.client.post(REPAIR).json()
-    assert body['ok'] is True
-    assert body['pruned_count'] is None
-    assert body['pruned_track_ids'] is None
-    assert body['playlist_ids'] is None
+@pytest.mark.parametrize('scenario, route', [
+    ('playlist_repair_missing', REPAIR),
+    ('playlist_recover_missing', RECOVER),
+    ('playlist_recover_unknown', RECOVER),
+])
+def test_incomplete_mutation_summary_preserves_unknown_outcome(context, monkeypatch, scenario, route):
+    use_fake(monkeypatch, context, scenario)
+    response = context.client.post(route)
+    assert response.status_code == 409, response.text
+    job = context.app.state.jobs.latest()
+    assert job.needs_reconcile
+    assert job.files[0]['state'] == 'unknown'
 
 
 def test_repair_empty_mount_fatal_is_library_not_loaded(context, monkeypatch):
@@ -332,6 +333,8 @@ def test_commands_use_device_flag_and_inspect_is_the_read_switch(monkeypatch, tm
     code = (
         'import json,sys,pathlib; '
         f'pathlib.Path({str(record)!r}).write_text(json.dumps(sys.argv[1:])); '
+        'print(json.dumps({"event":"playlistJournal","state":"none","files":[],"outcome":"none"}), flush=True); '
+        'print(json.dumps({"event":"playlistRepair","prunedCount":0,"prunedTrackIds":[],"playlistIds":[]}), flush=True); '
         'print(json.dumps({"event":"done"}), flush=True)'
     )
     monkeypatch.setattr(jsymphonic, 'SHIM_CMD_PREFIX', [sys.executable, '-c', code])

@@ -335,9 +335,13 @@ class MediaService:
                         raise MediaError('Verify device state before another transfer of this track')
                     stack.enter_context(locked_read(path, self.store.root))
                     self.clear(media_id, 'transfer', job)
-                job.set_phase('device_writing')
-                for media_id, _ in ready:
-                    job.update_file(media_id, state='transferring', detail='Writing to Walkman')
+                admitted = {media_id for media_id, _ in ready}
+                rows = job.to_dict()['files']
+                for row in rows:
+                    row['volume_id'] = ticket.device.volume_id
+                    if row['file_id'] in admitted:
+                        row.update(state='transferring', detail='Writing to Walkman')
+                job.set_files(rows, phase='device_writing')
                 writing = True
                 result = self.device_api.add_tracks(mount, [p for _, p in ready],
                     lambda event: job.log(str(event.get('message') or event.get('event') or 'Device progress')))

@@ -213,6 +213,51 @@ class JobStore:
             return {row['media_id'] for job in self._jobs.values() if job.needs_reconcile
                     for row in job.files if row.get('media_id')}
 
+    def pending_reconciliation(self) -> list[dict]:
+        with self._lock:
+            return [job.to_dict() for job in self._jobs.values() if job.needs_reconcile]
+
+    def acknowledge_device_state(self, job_id, evidence, media_store) -> None:
+        """Commit local acknowledgement and media gates in the same database.
+
+        Keep original outcomes/status. The original transfer is not being
+        declared successful, and other uncertain jobs retain their media gate.
+        Lock order is jobs then media; no device I/O occurs under these locks.
+        """
+        with self._lock, media_store._lock:
+            job = self._jobs.get(job_id)
+            if not job or not job.needs_reconcile or job.status in {JobStatus.PENDING, JobStatus.RUNNING}:
+                raise ValueError('Operation no longer needs acknowledgement')
+            if not job.files or any(row.get('volume_id') != evidence['volume_id'] for row in job.files):
+                raise ValueError('Operation belongs to a different or unknown device')
+            if self._conn is None:
+                raise ValueError('Job store is closed')
+            # Both stores use the application's nightops.sqlite. Refuse a
+            # differently configured store instead of updating the wrong DB.
+            media_db = media_store._db.execute('PRAGMA database_list').fetchone()[2]
+            if Path(media_db).resolve() != self._db_path.resolve():
+                raise ValueError('Media and job stores do not share a database')
+            rows, old_message, old_log = deepcopy(job.files), job.message, deque(job._log, maxlen=200)
+            try:
+                with self._conn:
+                    job.needs_reconcile = False
+                    for row in job.files:
+                        row['reconciliation'] = deepcopy(evidence)
+                    job.message = 'Device inspected by owner; original outcome remains recorded. No automatic retry.'
+                    job._log.append(f"[{time.strftime('%H:%M:%S')}] {job.message}")
+                    self._upsert(job, commit=False)
+                    other_uncertain = self.uncertain_media_ids()
+                    for media_id in {row.get('media_id') for row in job.files} - {None}:
+                        saved = self._conn.execute('SELECT record FROM media WHERE id=?', (media_id,)).fetchone()
+                        if saved is not None:
+                            record = json.loads(saved[0])
+                            record['needs_reconcile'] = media_id in other_uncertain
+                            self._conn.execute('UPDATE media SET record=? WHERE id=?', (json.dumps(record), media_id))
+            except BaseException:
+                job.needs_reconcile = True
+                job.files, job.message, job._log = rows, old_message, old_log
+                raise
+
     def close(self) -> None:
         with self._lock:
             if self._conn is not None:

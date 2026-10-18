@@ -30,7 +30,9 @@ import scan
 VERSION = '0.4.1'
 
 class OrderBody(BaseModel):
-    ids: list[str] = Field(max_length=200)
+    # Import batches are capped, but the persistent queue spans many batches.
+    # Boundary bounds JSON bytes; MediaStore requires an exact permutation.
+    ids: list[str]
 
 class TransferBody(BaseModel):
     media_ids: list[str] = Field(min_length=1, max_length=200)
@@ -422,6 +424,8 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
 
     register_local_routes(app, store, admit, coordinator)
     if product == 'bridge':
+        from reconciliation import register_reconciliation_routes
+        register_reconciliation_routes(app, device_api, identity, admit, coordinator, jobs, store)
         register_native_routes(app, device_api, identity, admit, coordinator, jobs, cache)
         register_device_routes(app, device_api, identity, admit, coordinator, jobs, data_dir, cache,
                                import_files, schedule, store, service)
@@ -511,7 +515,7 @@ def register_device_routes(app, device_api, identity, admit, coordinator, jobs, 
         job_id = uuid.uuid4().hex
         ticket = admit('delete', volume, job_id)
         job = jobs.create(job_id, 1, kind='delete')
-        job.set_files([dict(file_id=track_id, name=track_id, state='queued')])
+        job.set_files([dict(file_id=track_id, name=track_id, volume_id=volume.volume_id, state='queued')])
         def remove():
             with coordinator.device_session(ticket) as mount:
                 rows = device_api.list_tracks(mount)

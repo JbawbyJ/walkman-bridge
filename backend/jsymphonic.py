@@ -176,7 +176,7 @@ _RECOVERY_ACTIONS = {
     FatalCode.PLAYLIST_JOURNAL_PENDING.value: "inspect_recover",
     FatalCode.DEVICE_ROLLBACK_FAILED.value: "inspect_recover",
     FatalCode.PLAYLIST_REF_MISSING.value: "repair",
-    FatalCode.PLAYLIST_SLOTS_EXHAUSTED.value: "free_slots",
+    FatalCode.PLAYLIST_SLOTS_EXHAUSTED.value: "reuse_playlist",
     FatalCode.PLAYLIST_LIBRARY_NOT_LOADED.value: "reconnect_retry",
     FatalCode.DEVICE_FILE_LOCKED.value: "close_and_retry",
     FatalCode.DEVICE_FILE_READ_ONLY.value: "clear_read_only_retry",
@@ -624,15 +624,16 @@ def inspect_playlist_journal(mount: Path) -> dict:
     """Read-only `playlist-recover --device <mount> --inspect`.
 
     `state` is read only from the `playlistJournal` event (jsymphonic #4
-    @ 5763643). Inspect does not emit `outcome`. A missing or unknown
-    `state` is null. `exists` follows `state`.
+    @ 5763643). Missing or unknown summaries fail closed.
     """
     events = _run(["playlist-recover", "--device", str(mount), "--inspect"], INFO_TIMEOUT)
     _require_terminal(events, "done", mutating=False)
     journal = _last_event(events, "playlistJournal")
     state = _enum_field(journal, "state", _JOURNAL_STATES)
-    exists = None if state is None else state != "none"
-    return _with_probe_warnings({"exists": exists, "state": state, "covers": _journal_covers(journal)}, events)
+    covers = _journal_covers(journal)
+    if state is None or covers is None or (state == 'none' and covers['files']):
+        raise JSymphonicError('Shim did not return a valid journal inspection')
+    return _with_probe_warnings({"exists": state != 'none', "state": state, "covers": covers}, events)
 
 
 def recover_playlist_journal(mount: Path) -> dict:
@@ -644,6 +645,8 @@ def recover_playlist_journal(mount: Path) -> dict:
     events = _run(["playlist-recover", "--device", str(mount)], DEL_TIMEOUT)
     _require_terminal(events, "done", mutating=True)
     outcome = _enum_field(_last_event(events, "playlistJournal"), "outcome", _RECOVER_OUTCOMES)
+    if outcome is None:
+        raise JSymphonicError('Shim did not return a known recovery outcome', needs_reconcile=True)
     return {"outcome": outcome}
 
 
@@ -660,8 +663,12 @@ def repair_playlists(mount: Path) -> dict:
     _require_terminal(events, "done", mutating=True)
     summary = _last_event(events, "playlistRepair") or {}
     count = summary.get("prunedCount") if summary else None
+    tracks = _summary_ids(summary.get('prunedTrackIds'))
+    playlists = _summary_ids(summary.get('playlistIds'))
+    if type(count) is not int or count < 0 or tracks is None or playlists is None:
+        raise JSymphonicError('Shim did not return a valid repair summary', needs_reconcile=True)
     return {
-        "pruned_count": count if type(count) is int and count >= 0 else None,
-        "pruned_track_ids": _summary_ids(summary.get("prunedTrackIds")) if "prunedTrackIds" in summary else None,
-        "playlist_ids": _summary_ids(summary.get("playlistIds")) if "playlistIds" in summary else None,
+        "pruned_count": count,
+        "pruned_track_ids": tracks,
+        "playlist_ids": playlists,
     }

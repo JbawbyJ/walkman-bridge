@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import { backupFailureMessage, backupSavedMessage, backupSuccessPath } from './backup.js'
 import { moveTrack, playable, transferable, timeLabel, processingBusy } from './playback.js'
-import { resolvePlaylistCode, surfaceError } from './playlistFailure.js'
+import { surfaceWorkspaceError } from './playlistFailure.js'
 import { usePlayer } from './usePlayer.js'
 import { Brand, Equalizer, Icon, IconButton, ListeningView, NowPlaying, Queue, spokenTime, Transport, Volume } from './components/PlayerPanels.jsx'
 import { DevicePanel, JobPanel, StagingPanel } from './components/BridgePanels.jsx'
 import LinkImportDialog from './components/LinkImportDialog.jsx'
 import MusicManager from './components/MusicManager.jsx'
+import DeviceRecoveryPanel from './components/DeviceRecoveryPanel.jsx'
 
 const terminal = job => ['done', 'partial', 'failed', 'interrupted'].includes(job?.status)
 const readPreference = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback } }
@@ -56,7 +57,7 @@ function Workspace({ product, version, session }) {
   const clearError = () => { setError(null); setErrorFatal(null) }
   const showError = (message, fatal = null) => { setError(message); setErrorFatal(fatal ?? null) }
   const failedJob = currentJob && ['failed', 'interrupted'].includes(currentJob.status) ? currentJob : null
-  const surface = surfaceError({ error, pollError, notice, fatalCode: resolvePlaylistCode(errorFatal, pollFatal, failedJob), view: isBridge ? bridgeView : 'listening' })
+  const surface = surfaceWorkspaceError({ error, errorFatal, pollError, pollFatal, notice, failedJob, view: isBridge ? bridgeView : 'listening' })
   const dismissNotice = () => { clearError(); setNotice(null) }
 
   const addJob = (job_id, kind) => setJobs(previous => [{ job_id, kind, status: 'pending', phase: 'queued', progress: 0, files: [], message: 'Operation admitted' }, ...previous.filter(job => job.job_id !== job_id)].slice(0, 12))
@@ -214,7 +215,13 @@ function Workspace({ product, version, session }) {
       {isBridge ? <>
         {bridgeView === 'listening' && <ListeningView player={player} available={available} mode={visualMode} onMode={changeVisual} showEq={showEq} onToggleEq={() => changeWing('eq', !showEq)} queueProps={queueProps} loading={!ready} />}
         {bridgeView !== 'listening' && device.connected && !backupAck && <div className="backup-warning"><Icon name="usb" size={18} /><span><strong>Protect the music already on your Walkman.</strong> Create a full backup before your first transfer.</span><button type="button" disabled={busy} onClick={backup}>Back up now</button><button type="button" onClick={() => { setBackupAck(true); storePreference('nightops:backup-ack', true) }}>I already have a backup</button></div>}
-        {bridgeView === 'device' && <DevicePanel device={device} tracks={tracks} etag={etag} busy={busy} onBackup={backup} backupBusy={backupBusy} onDelete={setDeleteTrack} loading={!ready} failure={surface.alert} onDismissFailure={dismissFailure} />}
+        {bridgeView === 'device' && <>
+          <DevicePanel device={device} tracks={tracks} etag={etag} busy={busy} onBackup={backup} backupBusy={backupBusy} onDelete={setDeleteTrack} loading={!ready} failure={surface.alert} onDismissFailure={dismissFailure} />
+          <DeviceRecoveryPanel connected={device.connected} busy={busy} onBusy={setPending} onChanged={async result => {
+            if (result?.job_id) { const job = await api.job(result.job_id); setJobs(previous => [job, ...previous.filter(row => row.job_id !== job.job_id)].slice(0, 12)) }
+            await refresh()
+          }} />
+        </>}
         {bridgeView === 'transfer' && <StagingPanel items={items} selection={selection} onSelection={setSelection} onTransfer={transfer} onRescan={rescan} onImport={queueProps.onImport} onImportLink={queueProps.onImportLink} busy={busy} connected={device.connected} loading={!ready} failure={surface.alert} onDismissFailure={dismissFailure} />}
       </> : <>
         {showQueue && <div className="player-wing queue-wing"><Queue {...queueProps} /></div>}

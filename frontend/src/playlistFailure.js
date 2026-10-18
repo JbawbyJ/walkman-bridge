@@ -14,7 +14,7 @@ export const PLAYLIST_FAILURES = {
   },
   PLAYLIST_SLOTS_EXHAUSTED: {
     title: 'No playlist slots left',
-    message: 'This Walkman has no playlist slots left. Remove a playlist from the device before creating another.',
+    message: 'This Walkman has no playlist slots left. Edit or reuse an existing playlist. Deleting a playlist does not free its lifetime slot.',
   },
 }
 
@@ -43,6 +43,13 @@ export function resolvePlaylistCode(...candidates) {
     if (fatalCode) return fatalCode
   }
   return null
+}
+
+// The fatal must belong to the message being displayed. A previous failed job
+// cannot replace a newer, unrelated error (including an uncoded import error).
+export function surfaceWorkspaceError({ error, errorFatal, pollError, pollFatal, notice, failedJob, view }) {
+  const candidate = error ? errorFatal : pollError ? pollFatal : notice ? null : failedJob
+  return surfaceError({ error, pollError, notice, view, fatalCode: resolvePlaylistCode(candidate) })
 }
 
 // Device views replace the generic strip with an in-view alert. Everywhere
