@@ -23,7 +23,7 @@ the fix by reading it.
 | --- | --- | --- |
 | `PLAYLIST_JOURNAL_PENDING` | A previous playlist save was cut off. An unfinished record is still on the Walkman. | Inspect, read the result, then recover. |
 | `PLAYLIST_REF_MISSING` | A playlist still names songs that are no longer on the Walkman. | Run playlist repair. |
-| `PLAYLIST_SLOTS_EXHAUSTED` | The Walkman's playlist table is full (2048 slots). | Delete or combine playlists. |
+| `PLAYLIST_SLOTS_EXHAUSTED` | The Walkman's playlist table has used all 2048 lifetime slots. Deletion does not reclaim them. | Edit or rename an existing Sony playlist to reuse it. |
 | `PLAYLIST_LIBRARY_NOT_LOADED` | The Walkman's music list did not load, or a song file on the device could not be read, so repair stopped without changing anything. | Reconnect the Walkman, wait for the library to load, then try repair again. If it keeps happening, keep your backup and ask for help. |
 | `DEVICE_FILE_LOCKED` | Another program has a file on the Walkman open. Walkman Bridge stopped and nothing was changed. | Close that program and try the change again. If this happened while recovering an interrupted save, the save was already committed and only needs finishing, so close the program and run Recover again. |
 | `DEVICE_ROLLBACK_FAILED` | The save failed and could not be fully undone. The unfinished record is still on the Walkman. | Stop making changes, keep the Walkman connected, and run Inspect first. |
@@ -61,7 +61,7 @@ note does not delete your songs.
 ## Back up the Walkman first
 
 Make a full backup and confirm it completed before you recover, repair, or
-delete playlists to free slots. Walkman Bridge keeps a backup only after the
+edit playlists. Walkman Bridge keeps a backup only after the
 copy has been checked. If a backup is interrupted, the app shows **Verify
 device state** and does not try that write again on its own.
 
@@ -172,22 +172,23 @@ The save failed, and Walkman Bridge could not undo it completely. The unfinished
 2. Make a full backup and confirm it completed.
 3. Run Inspect first, and read the result, then recover, using the steps under **Inspect, then recover**.
 
-## Free a full playlist table
+## When lifetime playlist slots are exhausted
 
 Use these steps when the code is `PLAYLIST_SLOTS_EXHAUSTED`.
 
-The Walkman stores playlists in a table of 2048 slots. When every slot is in
-use, another playlist cannot be saved. This is a full table. Free space on the
-disk is a separate question.
+The Walkman stores playlists in a table of 2048 lifetime slots. Creating a
+playlist appends a record; deleting that playlist leaves its record behind.
+Once all 2048 records have been used, a new playlist cannot be created, even
+if some or all playlists were deleted. Free disk space is a separate question.
 
 1. Open **Manage music**, then the **Sony playlists** tab.
-2. Delete playlists you no longer need, or move their songs into fewer
-   playlists and then delete the ones you emptied. Deleting a playlist asks
-   you to confirm. The songs stay on the Walkman. The confirmation tells you
-   the music files will remain.
-3. Save again after a slot is free.
+2. Choose an existing Sony playlist. Edit its name and song membership to
+   reuse that same playlist ID, then save the changes.
+3. If no playlists remain, keep your backup and ask for help. There is no
+   in-app operation that reclaims deleted playlist slots.
 
-The fix is freeing a slot with the playlist tools already in **Manage music**.
+Do not delete playlists to make room: deleting or combining them does not
+free slots, and the remaining playlist IDs are the ones you can still reuse.
 Inspect, recover, and repair do not add slots.
 
 ## A general failure

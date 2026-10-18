@@ -29,7 +29,6 @@ test('playlist recovery help defines the fatal codes and GENERIC', () => {
   }
   assert.equal(PLAYLIST_RECOVERY_HELP.PLAYLIST_REF_MISSING.actionId, 'repair')
   assert.equal(PLAYLIST_RECOVERY_HELP.PLAYLIST_JOURNAL_PENDING.actionId, 'inspect_recover')
-  assert.equal(PLAYLIST_RECOVERY_HELP.PLAYLIST_SLOTS_EXHAUSTED.actionId, 'free_slots')
   assert.equal(PLAYLIST_RECOVERY_HELP.PLAYLIST_LIBRARY_NOT_LOADED.actionId, 'reconnect_retry')
   assert.equal(PLAYLIST_RECOVERY_HELP.DEVICE_FILE_LOCKED.actionId, 'close_and_retry')
   assert.equal(PLAYLIST_RECOVERY_HELP.DEVICE_FILE_LOCKED.explanation.includes('{path}'), false)
@@ -45,6 +44,10 @@ test('playlist recovery help defines the fatal codes and GENERIC', () => {
   assert.match(PLAYLIST_RECOVERY_HELP.DEVICE_PROBE_PENDING.explanation, /Nothing is broken/)
   assert.equal(PLAYLIST_RECOVERY_HELP.DEVICE_PROBE_PENDING.action.includes('puts it back'), false)
   assert.equal(PLAYLIST_RECOVERY_HELP.GENERIC.actionId, null)
+})
+
+test('slot exhaustion selects reuse of an existing playlist', () => {
+  assert.equal(formatPlaylistRecovery('PLAYLIST_SLOTS_EXHAUSTED').actionId, 'reuse_playlist')
 })
 
 test('unknown or missing codes use the GENERIC fallback', () => {

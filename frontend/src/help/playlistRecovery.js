@@ -28,9 +28,9 @@ export const PLAYLIST_RECOVERY_HELP = {
   },
   PLAYLIST_SLOTS_EXHAUSTED: {
     title: 'The Walkman playlist table is full',
-    explanation: 'The device playlist table has used all 2048 slots, so another playlist cannot be saved.',
-    action: 'Delete playlists you no longer need, or combine them, until a slot is free.',
-    actionId: 'free_slots',
+    explanation: 'The device playlist table has used all 2048 lifetime slots, so a new playlist cannot be created. Deleting a playlist does not reclaim its slot.',
+    action: 'Edit or rename an existing Sony playlist and change its songs to reuse that playlist. If no playlists remain, keep your backup and ask for help.',
+    actionId: 'reuse_playlist',
   },
   PLAYLIST_LIBRARY_NOT_LOADED: {
     title: 'The Walkman music list did not load',
