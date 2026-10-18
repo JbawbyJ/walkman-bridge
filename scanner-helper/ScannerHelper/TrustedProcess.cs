@@ -31,6 +31,12 @@ public static class TrustedProcess
         foreach (var name in start.Environment.Keys.ToArray())
             if (IsInjectionVariable(name)) start.Environment.Remove(name);
         start.Environment["PATH"] = SystemDirectory;
+        start.Environment["SystemRoot"] = Directory.GetParent(SystemDirectory)!.FullName;
+        start.Environment["WINDIR"] = Directory.GetParent(SystemDirectory)!.FullName;
+        start.Environment["SystemDrive"] = Path.GetPathRoot(SystemDirectory)!.TrimEnd(Path.DirectorySeparatorChar);
+        start.Environment["ProgramFiles"] = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        start.Environment["ProgramW6432"] = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        start.Environment["ProgramData"] = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
         start.Environment["PSModulePath"] = Path.Combine(SystemDirectory, "WindowsPowerShell", "v1.0", "Modules");
         start.Environment["DOTNET_EnableDiagnostics"] = "0";
         start.Environment["CORECLR_ENABLE_PROFILING"] = "0";

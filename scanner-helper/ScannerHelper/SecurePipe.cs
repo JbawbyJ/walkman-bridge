@@ -3,25 +3,57 @@ using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace NightOps.ScannerHelper;
 
 public static class SecurePipe
 {
-    public static NamedPipeServerStream Create(string fullPipeName)
+    public static NamedPipeServerStream Create(string fullPipeName, SecurityIdentifier clientUser)
     {
         const string prefix = "\\\\.\\pipe\\NightOps.Scanner.";
         if (!fullPipeName.StartsWith(prefix, StringComparison.Ordinal) || fullPipeName.Length > 240)
             throw new SecurityException("invalid scanner pipe name");
         var pipeName = fullPipeName[9..];
-        var user = WindowsIdentity.GetCurrent().User ?? throw new SecurityException("current Windows user has no SID");
+        var security = CreateSecurity(clientUser);
+        return NamedPipeServerStreamAcl.Create(pipeName, PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 64 * 1024, 64 * 1024, security);
+    }
+
+    public static PipeSecurity CreateSecurity(SecurityIdentifier clientUser)
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        var user = identity.User ?? throw new SecurityException("current Windows user has no SID");
         var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
         var security = new PipeSecurity();
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         security.AddAccessRule(new PipeAccessRule(user, PipeAccessRights.ReadWrite, AccessControlType.Allow));
+        security.AddAccessRule(new PipeAccessRule(clientUser, PipeAccessRights.ReadWrite, AccessControlType.Allow));
         security.AddAccessRule(new PipeAccessRule(administrators, PipeAccessRights.FullControl, AccessControlType.Allow));
-        return NamedPipeServerStreamAcl.Create(pipeName, PipeDirection.InOut, 1,
-            PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 64 * 1024, 64 * 1024, security);
+        return security;
+    }
+
+    public static SafeProcessHandle OpenClient(int expectedPid)
+    {
+        if (expectedPid <= 0) throw new SecurityException("invalid scanner client process");
+        var handle = OpenProcess(0x1000, false, expectedPid); // PROCESS_QUERY_LIMITED_INFORMATION
+        if (handle.IsInvalid) { handle.Dispose(); throw new SecurityException("scanner client process unavailable"); }
+        return handle;
+    }
+
+    public static SecurityIdentifier ClientUser(SafeProcessHandle process)
+    {
+        if (!OpenProcessToken(process, 0x0008, out var token)) // TOKEN_QUERY
+            throw new SecurityException("scanner client token unavailable");
+        using (token)
+        using (var identity = new WindowsIdentity(token.DangerousGetHandle()))
+            return identity.User ?? throw new SecurityException("scanner client has no SID");
+    }
+
+    public static SecurityIdentifier ClientUser(int expectedPid)
+    {
+        using var process = OpenClient(expectedPid);
+        return ClientUser(process);
     }
 
     public static void VerifyClientProcess(NamedPipeServerStream pipe, int expectedPid)
@@ -30,6 +62,13 @@ public static class SecurePipe
             || actual != (uint)expectedPid)
             throw new SecurityException("unexpected scanner pipe client process");
     }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(uint desiredAccess, bool inheritHandle, int processId);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool OpenProcessToken(SafeProcessHandle process, uint desiredAccess, out SafeAccessTokenHandle token);
 
     public static void VerifyServerProcess(NamedPipeClientStream pipe, int expectedPid)
     {

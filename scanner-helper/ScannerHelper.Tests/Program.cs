@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Security;
 using System.Diagnostics;
 using System.IO.Pipes;
@@ -14,15 +16,18 @@ Run("clean result requires signature status", TestCleanRequiresStatus);
 Run("clean result rejects disabled or passive Defender", TestDisabledDefender);
 Run("trusted PowerShell and sanitized child environment", TestTrustedProcess);
 Run("batch limits and duplicate identities reject", TestBatchLimits);
+Run("pipe ACL grants original client SID without broadening users", TestClientAcl);
+Run("scanner rejects arbitrary executable path", TestScannerPath);
+Run("scanner discovery ignores launch environment", TestScannerDiscovery);
 await RunAsync("wrong pipe server PID receives zero secret bytes", TestWrongServerPid);
-await RunAsync("one-shot named pipe binds process and harmless Defender result", TestOneShotHelper);
+await RunAsync("one-shot named pipe binds process and rejects mismatched media before scan", TestOneShotHelper);
 
 if (failures.Count > 0)
 {
     Console.Error.WriteLine(string.Join(Environment.NewLine, failures));
     return 1;
 }
-Console.WriteLine("ScannerHelper.Tests: 9 passed");
+Console.WriteLine("ScannerHelper.Tests: 12 passed");
 return 0;
 
 void Run(string name, Action test)
@@ -84,16 +89,56 @@ void TestBatchLimits()
     Protocol.ValidateBatch(new ScanBatch([request, request with { RequestId = "second" }]), Environment.ProcessId);
 }
 
+void TestClientAcl()
+{
+    var caller = new SecurityIdentifier("S-1-5-21-100-200-300-1001");
+    var policy = SecurePipe.CreateSecurity(caller);
+    var rules = policy.GetAccessRules(true, false, typeof(SecurityIdentifier)).Cast<PipeAccessRule>().ToArray();
+    Assert(rules.Any(rule => rule.IdentityReference.Equals(caller)
+        && rule.AccessControlType == AccessControlType.Allow
+        && (rule.PipeAccessRights & PipeAccessRights.ReadWrite) == PipeAccessRights.ReadWrite), "original caller needs pipe read/write");
+    Assert(!rules.Any(rule => rule.IdentityReference.Value is "S-1-1-0" or "S-1-5-11" or "S-1-5-32-545"), "no broad user ACL is permitted");
+    using var current = WindowsIdentity.GetCurrent();
+    Assert(SecurePipe.ClientUser(Environment.ProcessId).Equals(current.User!), "client SID must come from Windows token");
+    AssertThrows<SecurityException>(() => SecurePipe.ClientUser(-1));
+}
+
+void TestScannerPath()
+{
+    using var fixture = Fixture.Create();
+    AssertThrows<SecurityException>(() => DefenderScanner.OpenTrustedScanner(fixture.Path));
+}
+
+void TestScannerDiscovery()
+{
+    var before = DefenderScanner.LocateDefender();
+    if (before != null)
+    {
+        using var scanner = DefenderScanner.OpenTrustedScanner(before);
+        Assert(scanner.Path.Equals(before, StringComparison.OrdinalIgnoreCase), "opened scanner must retain the exact OS path");
+    }
+    var names = new[] { "ProgramFiles", "ProgramW6432", "ProgramData", "SystemRoot", "WINDIR", "PATH" };
+    var saved = names.ToDictionary(name => name, Environment.GetEnvironmentVariable);
+    try
+    {
+        foreach (var name in names) Environment.SetEnvironmentVariable(name, "C:\\untrusted-scanner-fixture");
+        Assert(DefenderScanner.LocateDefender() == before, "scanner discovery must ignore caller environment");
+    }
+    finally { foreach (var item in saved) Environment.SetEnvironmentVariable(item.Key, item.Value); }
+}
+
 async Task TestWrongServerPid()
 {
     var name = $"\\\\.\\pipe\\NightOps.Scanner.{Guid.NewGuid():N}";
-    await using var server = SecurePipe.Create(name);
+    await using var server = SecurePipe.Create(name, SecurePipe.ClientUser(Environment.ProcessId));
     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
     var accepted = server.WaitForConnectionAsync(timeout.Token);
     await using (var client = new NamedPipeClientStream(".", name[9..], PipeDirection.InOut, PipeOptions.Asynchronous))
     {
         await client.ConnectAsync(timeout.Token);
         await accepted;
+        SecurePipe.VerifyClientProcess(server, Environment.ProcessId);
+        AssertThrows<SecurityException>(() => SecurePipe.VerifyClientProcess(server, Environment.ProcessId + 100000));
         var rejected = false;
         try { await SecurePipe.WriteAuthenticatedAsync(client, Environment.ProcessId + 100000, "SECRET_NONCE_MUST_NOT_LEAVE_CLIENT", timeout.Token); }
         catch (SecurityException) { rejected = true; }
@@ -136,7 +181,8 @@ async Task TestOneShotHelper()
         start.ArgumentList.Add(argument);
     using var process = Process.Start(start) ?? throw new Exception("could not start helper");
     var original = fixture.Request();
-    var request = original with { ExpectedHelperPid = process.Id };
+    // Deliberately mismatched content proves the native exchange without running Defender.
+    var request = original with { ExpectedHelperPid = process.Id, Sha256 = new string('0', 64) };
     await using var client = new NamedPipeClientStream(".", fullPipe[9..], PipeDirection.InOut, PipeOptions.Asynchronous);
     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
     await client.ConnectAsync(timeout.Token);
@@ -149,7 +195,7 @@ async Task TestOneShotHelper()
     var result = results.Results[0];
     Assert(result.RequestId == request.RequestId && result.Nonce == request.Nonce, "result identity mismatch");
     Assert(result.HelperPid == process.Id && result.Sha256 == request.Sha256 && result.SizeBytes == request.SizeBytes, "result process/content mismatch");
-    Assert(result.Ok ? result.State == "CLEAN" && result.DefenderState == "clean" && result.ExitCode == 0 : result.State != "CLEAN", "result did not fail closed");
+    Assert(!result.Ok && result.State != "CLEAN" && result.ExitCode == -1, "invalid media must fail before scanner invocation");
     await process.WaitForExitAsync(timeout.Token);
 }
 

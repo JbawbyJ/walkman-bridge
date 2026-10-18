@@ -12,7 +12,10 @@ static async Task<int> MainAsync(string[] args)
         var options = HelperOptions.Parse(args);
         TrustedProcess.SanitizeCurrentEnvironment();
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(30));
-        await using var pipe = SecurePipe.Create(options.PipeName);
+        // Keep the original caller's process object alive so its PID cannot be
+        // recycled while UAC uses a different administrator's credentials.
+        using var clientProcess = SecurePipe.OpenClient(options.ExpectedClientPid);
+        await using var pipe = SecurePipe.Create(options.PipeName, SecurePipe.ClientUser(clientProcess));
         await pipe.WaitForConnectionAsync(timeout.Token);
         SecurePipe.VerifyClientProcess(pipe, options.ExpectedClientPid);
         var raw = await SecurePipe.ReadLineAsync(pipe, NativeExchange.MaximumMessageBytes, timeout.Token);
