@@ -1,7 +1,8 @@
 # Exercises the installed-smoke hang path without an installer.
 # A hung parent and its child must be killed, diagnostics must redact paths,
 # the cleanup result must fail, and an older unrelated sleeper must survive.
-# A second case exits the parent and leaves the child under the run directory.
+# A second case exits the parent and leaves an external PowerShell child running.
+# Its original parent's retained handle/lifetime must prove ownership.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'smoke-install.ps1')
 if ($ShutdownGraceSeconds -ne 45) { throw "Installed smoke grace is $ShutdownGraceSeconds, expected 45" }
@@ -111,7 +112,11 @@ if (-not $pwsh) { $pwsh = (Get-Command powershell.exe -ErrorAction Stop).Source 
 function Start-HangProcess([string[]]$ArgumentList) {
     $start = @{ FilePath = $pwsh; ArgumentList = $ArgumentList; PassThru = $true }
     if ($IsWindows) { $start.WindowStyle = 'Hidden' }
-    Start-Process @start
+    $process = Start-Process @start
+    # Match the installed-smoke launcher: retain the original process object
+    # through exit so its creation/exit times cannot come from a reused PID.
+    $null = $process.Handle
+    return $process
 }
 $Run = Join-Path $Repo ("packaging\build\hang-selftest\" + [guid]::NewGuid().ToString('N'))
 $scratch = Join-Path ([IO.Path]::GetTempPath()) ("smoke-unrelated-" + [guid]::NewGuid().ToString('N'))
@@ -217,6 +222,10 @@ Set-Content -LiteralPath "$lingerPidFile" -Value `$child.Id
     } while ($true)
     $lingerId = [int]$lingerText
     try { $lingerStart = (Get-Process -Id $lingerId -ErrorAction Stop).StartTime.ToUniversalTime() } catch { $lingerStart = $null }
+    $rootExit = Get-SmokeRootExitTime -Process $exitParent -SmokeStart $lingerSmokeStart
+    if (-not $rootExit -or $lingerStart -lt $lingerSmokeStart -or $lingerStart -gt $rootExit) {
+        throw 'Lingering child was not born within the retained parent lifetime'
+    }
     $Log = Join-Path $Run 'linger.log'
     @("log $Repo", "log $env:USERPROFILE") | Set-Content -LiteralPath $Log -Encoding utf8
     $script:DiagnosticsWritten = $false
@@ -245,24 +254,33 @@ Set-Content -LiteralPath "$lingerPidFile" -Value `$child.Id
     Write-Host "Linger cleanup test passed: parent $($exitParent.Id) exited, killed child $lingerId, left unrelated $($unrelated.Id) running."
 } finally {
     foreach ($proc in @($parent, $exitParent, $unrelated)) {
-        if ($proc) { try { $proc.Refresh(); if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } } catch { } }
+        if ($proc) {
+            try { $proc.Refresh(); if (-not $proc.HasExited) { $proc.Kill() } } catch { }
+            finally { $proc.Dispose() }
+        }
     }
     foreach ($tracked in @(
         @{ Id = $childId; Start = $childStart },
         @{ Id = $lingerId; Start = $lingerStart }
     )) {
         if (-not $tracked.Id) { continue }
-        $live = Get-Process -Id $tracked.Id -ErrorAction SilentlyContinue
-        if (-not $live) { continue }
-        $liveStart = $null
-        try { $liveStart = $live.StartTime.ToUniversalTime() } catch { }
-        if ($tracked.Start -and $liveStart -and ($tracked.Start.Ticks -ne $liveStart.Ticks)) {
-            Write-Host "Skip pid=$($tracked.Id); PID reused (recorded start $($tracked.Start.ToString('o')), current start $($liveStart.ToString('o')))"
-            continue
-        }
-        Stop-Process -Id $tracked.Id -Force -ErrorAction SilentlyContinue
+        if (-not $tracked.Start) { continue }
+        $handle = $null
+        try {
+            $handle = Open-SmokeProcessHandle -ProcessId $tracked.Id
+            if ($tracked.Start.Ticks -ne $handle.CreationTimeUtc.Ticks) { continue }
+            $handle.Terminate()
+        } catch { }
+        finally { if ($null -ne $handle) { $handle.Dispose() } }
     }
     foreach ($dir in @($Run, $scratch)) {
-        if ($dir -and (Test-Path -LiteralPath $dir)) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($dir -and (Test-Path -LiteralPath $dir)) {
+            $resolved = [IO.Path]::GetFullPath($dir)
+            $expectedParent = if ($dir -eq $Run) { Join-Path $Repo 'packaging\build\hang-selftest' } else { [IO.Path]::GetTempPath() }
+            if ([IO.Path]::GetDirectoryName($resolved).TrimEnd('\') -ne [IO.Path]::GetFullPath($expectedParent).TrimEnd('\')) {
+                throw 'Refusing to remove a hang fixture outside its expected parent directory'
+            }
+            Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }

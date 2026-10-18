@@ -55,3 +55,35 @@ fixture. The new cleanup regressions mock termination; no user process or
 physical Walkman was touched. Real installer cleanup and Windows PowerShell 5.1
 runtime behavior remain unverified. This follow-up requires independent review
 because its author performed the earlier review.
+
+## Follow-up: children surviving the original parent
+
+The existing Windows hang test reproduced a regression at `0e7c1a15`: after
+the parent exited, its external PowerShell child was treated as a clear tree
+and remained running. The new mock initially failed with expected child IDs
+`32101,32102` and an empty discovery result.
+
+Discovery now reads the retained launch Process object's verified creation and
+exit times after taking the CIM snapshot. When the original root is absent,
+a direct child's creation time must fall within that original lifetime.
+Further descendant edges require live snapshot parents and creation ordering;
+missing intermediate parents do not imply ownership. A visibly reused or
+unverifiable root is still rejected, as are children born before launch or
+after the original exit. Missing exit identity cannot report a clear tree.
+The final creation-time check and termination still use the same native handle.
+The contained-executable fallback and command-line-spoof rejection are unchanged.
+
+The fixture retains its launch handles, checks that the lingering child was
+born within its parent's lifetime, and uses identity-bound cleanup. It starts
+only disposable hidden PowerShell sleepers; no installer, device, or UAC flow
+is exercised. Its cleanup directories are checked against their expected
+parents before recursive deletion.
+
+Fresh validation on 2026-10-18:
+
+- `node --test packaging/smoke-ownership.test.cjs`: 2 passed, 0 failed.
+- `npm run test:packaging`: 12 passed, 0 failed, 0 skipped.
+- `pwsh -NoProfile -File packaging/smoke-install.hangtest.ps1`: passed redaction,
+  live-parent tree cleanup, and exited-parent lingering-child cleanup; the
+  unrelated sleeper survived both cases. The initial sandboxed attempt could
+  not query CIM; the authorized retry used only these disposable fixtures.

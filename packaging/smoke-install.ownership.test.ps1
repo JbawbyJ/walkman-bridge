@@ -6,6 +6,7 @@ $ErrorActionPreference = 'Stop'
 $started = [datetime]'2026-10-18T12:00:00Z'
 $ownedPath = 'C:\smoke-test-owned-run'
 $script:Snapshot = @()
+$script:SnapshotHook = $null
 $script:Stopped = [System.Collections.Generic.List[int]]::new()
 function Get-CimInstance {
     param($ClassName, $Filter, $ErrorAction)
@@ -14,6 +15,7 @@ function Get-CimInstance {
         if ($Filter -notmatch '^ProcessId=(\d+)$') { throw "Unexpected filter: $Filter" }
         return @($script:Snapshot | Where-Object { [int]$_.ProcessId -eq [int]$Matches[1] })
     }
+    if ($script:SnapshotHook) { & $script:SnapshotHook }
     return $script:Snapshot
 }
 function Stop-Process {
@@ -39,7 +41,7 @@ function Assert-Ids($Rows, [int[]]$Expected, [string]$Label) {
     if ($actual -ne $wanted) { throw "${Label}: expected [$wanted], got [$actual]" }
 }
 function TrackedRoot([bool]$Exited = $true) {
-    $tracked = [pscustomobject]@{ Id = 32100; HasExited = $Exited; StartTime = $started }
+    $tracked = [pscustomobject]@{ Id = 32100; HasExited = $Exited; StartTime = $started; ExitTime = $started.AddSeconds(5) }
     $tracked | Add-Member -MemberType ScriptMethod -Name Refresh -Value {}
     return $tracked
 }
@@ -68,6 +70,46 @@ $script:Snapshot = @(
     (ProcessRow 32101 32100 $started.AddSeconds(1))
 )
 Assert-Ids @(Get-SmokeProcesses -RootProcessId 32100 -OwnedPath $ownedPath -SmokeStart $started) @(32100,32101) 'Original root and child remain discoverable'
+
+# The retained launch process supplies its original lifetime after CIM no
+# longer lists it. External helpers born in that lifetime remain owned; older
+# children and children of a later occupant of that parent PID do not.
+$script:Snapshot = @(
+    (ProcessRow 32101 32100 $started.AddSeconds(1)),
+    (ProcessRow 32102 32101 $started.AddSeconds(2)),
+    (ProcessRow 32103 32100 $started.AddSeconds(-1)),
+    (ProcessRow 32104 32100 $started.AddSeconds(6))
+)
+Assert-Ids @(Get-SmokeProcesses -RootProcessId 32100 -OwnedPath $ownedPath -SmokeStart $started -RootProcess (TrackedRoot)) @(32101,32102) 'Exited root must retain children born during its verified lifetime'
+Assert-Ids @(Get-SmokeProcesses -RootProcessId 32100 -OwnedPath $ownedPath -SmokeStart $started) @() 'Absent root without a lifetime witness must not admit children'
+$script:RootDuringSnapshot = TrackedRoot $false
+$script:SnapshotHook = { $script:RootDuringSnapshot.HasExited = $true }
+try {
+    Assert-Ids @(Get-SmokeProcesses -RootProcessId 32100 -OwnedPath $ownedPath -SmokeStart $started -RootProcess $script:RootDuringSnapshot) @(32101,32102) 'Root exit during the CIM query must retain its children'
+} finally { $script:SnapshotHook = $null }
+if (Test-SmokeTreeClear -Process (TrackedRoot) -OwnedPath $ownedPath -SmokeStart $started) {
+    throw 'Exited root with a living external child was treated as a clear tree'
+}
+$script:Stopped.Clear()
+$retained = @(Get-SmokeProcesses -RootProcessId 32100 -OwnedPath $ownedPath -SmokeStart $started -RootProcess (TrackedRoot))
+Stop-SmokeLeftovers -Processes $retained -Process (TrackedRoot) -SmokeStart $started
+if (($script:Stopped -join ',') -ne '32102,32101') { throw 'Retained descendants were not terminated leaf-first' }
+$wrongRoot = TrackedRoot
+$wrongRoot.StartTime = $started.AddSeconds(60)
+if (Get-SmokeRootExitTime -Process $wrongRoot -SmokeStart $started) { throw 'Replacement process supplied a root lifetime witness' }
+$rejected = $false
+try { Test-SmokeTreeClear -Process $wrongRoot -OwnedPath $ownedPath -SmokeStart $started | Out-Null }
+catch { $rejected = $true }
+if (-not $rejected) { throw 'Unknown exited root lifetime was treated as a clear tree' }
+$liveRoot = TrackedRoot $false
+if (Get-SmokeRootExitTime -Process $liveRoot -SmokeStart $started) { throw 'A live root supplied an exit-time witness' }
+$invalidLifetime = TrackedRoot
+$invalidLifetime.ExitTime = $started.AddSeconds(-1)
+Assert-Ids @(Get-SmokeProcesses -RootProcessId 32100 -OwnedPath $ownedPath -SmokeStart $started -RootProcess $invalidLifetime) @() 'Exit before launch cannot authenticate descendants'
+
+# An exit-time witness must never override a visibly reused root PID.
+$script:Snapshot = @((ProcessRow 32100 1 $started.AddSeconds(60)), (ProcessRow 32101 32100 $started.AddSeconds(61)))
+Assert-Ids @(Get-SmokeProcesses -RootProcessId 32100 -OwnedPath $ownedPath -SmokeStart $started -RootProcess (TrackedRoot)) @() 'Reused live root still rejects traversal'
 
 # Missing timestamps cannot authenticate the root or justify killing a PID.
 $script:Snapshot = @((ProcessRow 32100 1 $null), (ProcessRow 32101 32100 $started.AddSeconds(1)))

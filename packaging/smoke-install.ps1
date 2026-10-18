@@ -45,6 +45,19 @@ function Test-SmokeRootIdentity($LiveStart, $SmokeStart) {
     # occupant must never become the root of an allegedly owned process tree.
     return [Math]::Abs(($live - $smoke).TotalMilliseconds) -le 1
 }
+function Get-SmokeRootExitTime {
+    param($Process, $SmokeStart)
+    # The launch Process keeps its original handle open through cleanup. Read
+    # that object, never reopen a departed root by its numeric PID.
+    if (-not $Process) { return $null }
+    try {
+        $Process.Refresh()
+        if (-not $Process.HasExited -or -not (Test-SmokeRootIdentity $Process.StartTime $SmokeStart)) { return $null }
+        $exited = ConvertTo-SmokeInstant $Process.ExitTime
+        if ($exited -and $exited -ge (ConvertTo-SmokeInstant $SmokeStart)) { return $exited }
+    } catch { }
+    return $null
+}
 function Copy-OwnedProcess($Item) {
     [pscustomobject]@{
         Name = [string]$Item.Name
@@ -93,7 +106,7 @@ function Hide-SmokePath([string]$Text) {
     return $Text
 }
 function Get-SmokeProcesses {
-    param([int]$RootProcessId, [string]$OwnedPath, $SmokeStart)
+    param([int]$RootProcessId, [string]$OwnedPath, $SmokeStart, $RootProcess)
     $smokeStart = ConvertTo-SmokeInstant $SmokeStart
     if ($RootProcessId -gt 0 -and -not $smokeStart) { throw 'Cannot verify smoke root identity: launch time is missing.' }
     try { $snapshot = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop) }
@@ -106,6 +119,13 @@ function Get-SmokeProcesses {
         $parentKey = [string][int]$item.ParentProcessId
         if (-not $childrenOf.ContainsKey($parentKey)) { $childrenOf[$parentKey] = [System.Collections.Generic.List[object]]::new() }
         [void]$childrenOf[$parentKey].Add($item)
+    }
+    # Read the retained launch object after taking the snapshot: the parent
+    # can exit while CIM is being queried, before discovery sees its children.
+    $rootExit = $null
+    if ($RootProcess) {
+        if ([int]$RootProcess.Id -ne $RootProcessId) { throw 'Smoke root process does not match the requested PID.' }
+        $rootExit = Get-SmokeRootExitTime -Process $RootProcess -SmokeStart $smokeStart
     }
     $found = [System.Collections.Generic.List[object]]::new()
     $seen = @{}
@@ -125,10 +145,18 @@ function Get-SmokeProcesses {
                 $parentKey = [string][int]$copied.ParentProcessId
                 $parentStart = $null
                 if ($byId.ContainsKey($parentKey)) { $parentStart = ConvertTo-SmokeInstant $byId[$parentKey].CreationDate }
+                elseif ([int]$copied.ParentProcessId -eq $RootProcessId -and $rootExit) { $parentStart = $smokeStart }
                 # A reused PID is older than its supposed parent. Real children start with or after the parent.
                 if (-not $parentStart -or -not $copied.CreationDate -or ($copied.CreationDate -lt $parentStart)) { $keep = $false }
+                # A child born after the original root exited belongs to a
+                # later occupant of that PID, even if that occupant also exited.
+                if ([int]$copied.ParentProcessId -eq $RootProcessId -and $rootExit -and $copied.CreationDate -gt $rootExit) { $keep = $false }
             }
             if ($keep) { [void]$found.Add($copied) }
+        } elseif ([int]$current -eq $RootProcessId -and $rootExit) {
+            # CIM no longer lists the original root. Its retained handle's
+            # lifetime still authenticates direct children, then their trees.
+            $keep = $true
         }
         if ($keep -and $childrenOf.ContainsKey($current)) {
             foreach ($child in $childrenOf[$current]) { $pending.Enqueue([string][int]$child.ProcessId) }
@@ -161,7 +189,9 @@ function Test-SmokeTreeClear {
     $rootId = if ($Process) { [int]$Process.Id } else { 0 }
     if ($Process -and -not $Process.HasExited) { return $false }
     if (-not $SmokeStart) { $SmokeStart = $script:SmokeStart }
-    $extras = @(Get-SmokeProcesses -RootProcessId $rootId -OwnedPath $OwnedPath -SmokeStart $SmokeStart | Where-Object { [int]$_.ProcessId -ne $rootId })
+    $rootExit = Get-SmokeRootExitTime -Process $Process -SmokeStart $SmokeStart
+    if ($Process -and -not $rootExit) { throw 'Cannot verify the exited smoke root lifetime.' }
+    $extras = @(Get-SmokeProcesses -RootProcessId $rootId -OwnedPath $OwnedPath -SmokeStart $SmokeStart -RootProcess $Process | Where-Object { [int]$_.ProcessId -ne $rootId })
     return ($extras.Count -eq 0)
 }
 function Wait-SmokeShutdown {
@@ -280,7 +310,7 @@ function Publish-SmokeHang {
     param($Process, $SmokeStart)
     if (-not $SmokeStart) { $SmokeStart = $script:SmokeStart }
     $rootId = if ($Process) { [int]$Process.Id } else { 0 }
-    $remaining = @(Get-SmokeProcesses -RootProcessId $rootId -OwnedPath $Run -SmokeStart $SmokeStart)
+    $remaining = @(Get-SmokeProcesses -RootProcessId $rootId -OwnedPath $Run -SmokeStart $SmokeStart -RootProcess $Process)
     if (-not $script:DiagnosticsWritten) {
         Write-SmokeDiagnostics -Processes $remaining -LogPath $Log -Process $Process
         $script:DiagnosticsWritten = $true
