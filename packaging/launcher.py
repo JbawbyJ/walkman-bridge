@@ -28,7 +28,7 @@ import sys
 import threading
 from pathlib import Path
 
-APP_NAME = "Walkman Bridge"
+APP_NAME = "Red Lotus - Sony Walkman Dashboard"
 
 # One sink for everything a windowed exe would otherwise lose: the logging
 # module, uvicorn's stdout logging, and stray prints all share this handle so
@@ -177,7 +177,7 @@ def main() -> int:
     thread.start()
 
     if not wait_for_server(port):
-        fail("The Walkman Bridge server did not start.\n\nSee: " + str(log_path()))
+        fail("The Red Lotus dashboard server did not start.\n\nSee: " + str(log_path()))
         return 1
     logging.info("server up at %s", url)
 

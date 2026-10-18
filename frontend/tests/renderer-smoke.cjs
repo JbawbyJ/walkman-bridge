@@ -33,6 +33,7 @@ const server = http.createServer(async (req, res) => {
   const json = data => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(data)) }
   if (url.pathname.startsWith('/api')) {
     calls.push(`${req.method} ${url.pathname}`)
+    if (url.pathname === '/api/preferences') return json({ theme: 'light' })
     if (url.pathname === '/api/health') return json({ ok: true, version: '0.4.1', product })
     if (url.pathname === '/api/playback-state') {
       if (req.method === 'PATCH') { let data = ''; for await (const chunk of req) data += chunk; saved = JSON.parse(data) }
@@ -91,7 +92,7 @@ async function windowFor(mode) {
   progress('loaded ' + mode)
   progress(await win.webContents.executeJavaScript(`JSON.stringify({audio:typeof window.__audio,body:document.body.innerText.slice(0,200)})`))
   await until(win, `document.querySelector('.nightops-app') && window.__audio?.some(a=>a.readyState>=1)`)
-  assert.equal(await win.webContents.executeJavaScript('document.title'), mode === 'player' ? 'Red Lotus Player' : 'Walkman Bridge')
+  assert.equal(await win.webContents.executeJavaScript('document.title'), mode === 'player' ? 'Red Lotus Player' : 'Red Lotus - Sony Walkman Dashboard')
   assert.equal(await win.webContents.executeJavaScript(`/night\\s+ops/i.test(document.body.innerText)`), false, 'Legacy branding must not appear in the rendered UI')
   progress('hydrated ' + mode)
   return win

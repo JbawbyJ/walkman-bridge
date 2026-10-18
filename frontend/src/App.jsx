@@ -9,6 +9,7 @@ import { DevicePanel, JobPanel, StagingPanel } from './components/BridgePanels.j
 import LinkImportDialog from './components/LinkImportDialog.jsx'
 import MusicManager from './components/MusicManager.jsx'
 import DeviceRecoveryPanel from './components/DeviceRecoveryPanel.jsx'
+import AppearanceSettings from './components/AppearanceSettings.jsx'
 
 const terminal = job => ['done', 'partial', 'failed', 'interrupted'].includes(job?.status)
 const readPreference = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback } }
@@ -18,22 +19,45 @@ export default function App() {
   const [health, setHealth] = useState(null)
   const [session, setSession] = useState(null)
   const [error, setError] = useState(null)
+  const [theme, setTheme] = useState('light')
+  const [appearanceError, setAppearanceError] = useState(null)
+  const [savingAppearance, setSavingAppearance] = useState(false)
+  const appearanceSaving = useRef(false)
+  useEffect(() => { document.documentElement.dataset.theme = theme }, [theme])
+  const changeTheme = async value => {
+    if (appearanceSaving.current) return
+    appearanceSaving.current = true
+    setSavingAppearance(true)
+    try {
+      const saved = await api.savePreferences(value)
+      setTheme(saved.theme)
+      setAppearanceError(null)
+    } catch (e) { setAppearanceError(`Appearance could not be saved. ${e.message}`) }
+    finally { appearanceSaving.current = false; setSavingAppearance(false) }
+  }
   useEffect(() => {
     let alive = true, timer
     const connect = async () => {
-      try { const [result, saved] = await Promise.all([api.health(), api.playbackState()]); if (alive) { setHealth(result); setSession(saved); setError(null) } }
+      try {
+        const [result, saved, preferences] = await Promise.all([api.health(), api.playbackState(), api.preferences().catch(e => ({ error: e.message }))])
+        if (alive) {
+          setHealth(result); setSession(saved); setError(null)
+          setTheme(preferences.theme === 'dark' ? 'dark' : 'light')
+          setAppearanceError(preferences.error ? `Saved appearance could not be loaded. ${preferences.error}` : null)
+        }
+      }
       catch (e) { if (alive) { setError(e.message); timer = setTimeout(connect, 3000) } }
     }
     connect()
     return () => { alive = false; clearTimeout(timer) }
   }, [])
   const product = window.walkmanBridge?.product || health?.product
-  useEffect(() => { document.title = product === 'player' ? 'Red Lotus Player' : 'Walkman Bridge' }, [product])
+  useEffect(() => { document.title = product === 'player' ? 'Red Lotus Player' : 'Red Lotus - Sony Walkman Dashboard' }, [product])
   if (!health || !['bridge', 'player'].includes(product)) return <div className="startup"><Brand product={product || 'bridge'} /><div><Icon name="disc" size={42} /><h1>Waking the audio system.</h1><p role="status">{error || 'Connecting to your local media service…'}</p></div></div>
-  return <Workspace key={product} product={product} version={health.version} session={session} />
+  return <Workspace key={product} product={product} version={health.version} session={session} appearance={{ theme, onChange: changeTheme, saving: savingAppearance, error: appearanceError }} />
 }
 
-function Workspace({ product, version, session }) {
+function Workspace({ product, version, session, appearance }) {
   const [items, setItems] = useState([]), [quota, setQuota] = useState(null)
   const [queueItems, setQueueItems] = useState([])
   const [device, setDevice] = useState({ connected: false }), [tracks, setTracks] = useState([]), [etag, setEtag] = useState(null)
@@ -215,13 +239,14 @@ function Workspace({ product, version, session }) {
     <input ref={fileInput} aria-label="Choose audio files" type="file" multiple accept="audio/*,.mp3,.flac,.wav,.m4a,.aac,.ogg,.opus" hidden onChange={e => { importFiles(e.target.files); e.target.value = '' }} />
     {surface.strip && <div className={`notice-strip ${surface.errorStyle ? 'error' : ''}`} role={surface.role}><span>{surface.strip}</span><button type="button" aria-label="Dismiss notification" onClick={dismissNotice}>{pollError && !error && !notice ? 'Reconnecting…' : '×'}</button></div>}
     {operations.draining && <div className="notice-strip" role="status">Finishing admitted operations before closing… Playback has stopped.</div>}
-    {isBridge && <nav className="workspace-tabs" aria-label="Bridge views">{[['listening', 'Listening'], ['device', 'Walkman'], ['transfer', 'Transfer']].map(([view, label]) => <button type="button" key={view} className={bridgeView === view ? 'active' : ''} aria-pressed={bridgeView === view} aria-label={view === 'transfer' && selection.size > 0 ? `Transfer, ${selection.size} files selected` : undefined} onClick={() => setBridgeView(view)}>{label}{view === 'transfer' && selection.size > 0 && <span>{selection.size}</span>}</button>)}<span className={device.connected ? 'connection connected' : 'connection'} role="status" aria-live="polite"><i />{device.connected ? device.model || 'CONNECTED' : 'NO DEVICE'}</span></nav>}
-    {!isBridge && <nav className="player-wing-controls" aria-label="Player panels"><button type="button" className={showQueue ? 'active' : ''} aria-pressed={showQueue} onClick={() => changeWing('queue', !showQueue)}>Playback queue</button><span>CRAFTED FOR THE LISTENING HOURS</span><button type="button" className={showEq ? 'active' : ''} aria-pressed={showEq} onClick={() => changeWing('eq', !showEq)}>Equalizer</button></nav>}
-    <main ref={workspace} id="workspace" tabIndex={-1} aria-label={isBridge ? { listening: 'Listening', device: 'Walkman', transfer: 'Transfer' }[bridgeView] : 'Player'} className={isBridge ? `bridge-workspace view-${bridgeView}` : `player-workspace ${showQueue ? 'has-queue' : ''} ${showEq ? 'has-eq' : ''}`}>
+    <div className="workspace-shell">
+    {isBridge && <nav className="workspace-tabs" aria-label="Bridge views">{[['listening', 'Listening', 'disc'], ['device', 'Walkman', 'usb'], ['transfer', 'Transfer', 'up'], ['settings', 'Settings', 'settings']].map(([view, label, icon]) => <button type="button" key={view} className={bridgeView === view ? 'active' : ''} aria-pressed={bridgeView === view} aria-label={view === 'transfer' && selection.size > 0 ? `Transfer, ${selection.size} files selected` : undefined} onClick={() => setBridgeView(view)}><Icon name={icon} size={17} />{label}{view === 'transfer' && selection.size > 0 && <span>{selection.size}</span>}</button>)}<span className={device.connected ? 'connection connected' : 'connection'} role="status" aria-live="polite"><i />{device.connected ? device.model || 'CONNECTED' : 'NO DEVICE'}</span></nav>}
+    {!isBridge && <nav className="player-wing-controls" aria-label="Player panels"><button type="button" className={showQueue ? 'active' : ''} aria-pressed={showQueue} onClick={() => changeWing('queue', !showQueue)}>Playback queue</button><button type="button" className={showEq ? 'active' : ''} aria-pressed={showEq} onClick={() => changeWing('eq', !showEq)}>Equalizer</button><button type="button" aria-pressed={bridgeView === 'settings'} onClick={() => setBridgeView(bridgeView === 'settings' ? 'listening' : 'settings')}>Settings</button></nav>}
+    <main ref={workspace} id="workspace" tabIndex={-1} aria-label={isBridge ? { listening: 'Listening', device: 'Walkman', transfer: 'Transfer', settings: 'Settings' }[bridgeView] : 'Player'} className={isBridge ? `bridge-workspace view-${bridgeView}` : `player-workspace ${showQueue ? 'has-queue' : ''} ${showEq ? 'has-eq' : ''}`}>
       {(currentJob || jobError) && <div className="workspace-operation"><JobPanel job={currentJob} pollingError={jobError} /></div>}
       {isBridge ? <>
         {bridgeView === 'listening' && <ListeningView player={player} available={available} mode={visualMode} onMode={changeVisual} showEq={showEq} onToggleEq={() => changeWing('eq', !showEq)} queueProps={queueProps} loading={!ready} />}
-        {bridgeView !== 'listening' && device.connected && !backupAck && <div className="backup-warning"><Icon name="usb" size={18} /><span><strong>Protect the music already on your Walkman.</strong> Create a full backup before your first transfer.</span><button type="button" disabled={busy} onClick={backup}>Back up now</button><button type="button" onClick={() => { setBackupAck(true); storePreference('nightops:backup-ack', true) }}>I already have a backup</button></div>}
+        {['device', 'transfer'].includes(bridgeView) && device.connected && !backupAck && <div className="backup-warning"><Icon name="usb" size={18} /><span><strong>Protect the music already on your Walkman.</strong> Create a full backup before your first transfer.</span><button type="button" disabled={busy} onClick={backup}>Back up now</button><button type="button" onClick={() => { setBackupAck(true); storePreference('nightops:backup-ack', true) }}>I already have a backup</button></div>}
         {bridgeView === 'device' && <>
           <DevicePanel device={device} tracks={tracks} etag={etag} busy={busy} onBackup={backup} backupBusy={backupBusy} onDelete={setDeleteTrack} loading={!ready} failure={surface.alert} onDismissFailure={dismissFailure} />
           <DeviceRecoveryPanel connected={device.connected} busy={busy} onBusy={setPending} onChanged={async result => {
@@ -229,13 +254,15 @@ function Workspace({ product, version, session }) {
             await refresh()
           }} />
         </>}
+        {bridgeView === 'settings' && <AppearanceSettings {...appearance} />}
         {bridgeView === 'transfer' && <StagingPanel items={items} selection={selection} onSelection={setSelection} onTransfer={transfer} onRescan={rescan} onImport={queueProps.onImport} onImportLink={queueProps.onImportLink} busy={busy} connected={device.connected} loading={!ready} failure={surface.alert} onDismissFailure={dismissFailure} />}
-      </> : <>
+      </> : bridgeView === 'settings' ? <AppearanceSettings {...appearance} /> : <>
         {showQueue && <div className="player-wing queue-wing"><Queue {...queueProps} /></div>}
         <NowPlaying player={player} available={available} retro mode={visualMode} onMode={changeVisual} />
         {showEq && <div className="player-wing eq-wing"><Equalizer player={player} /></div>}
       </>}
     </main>
+    </div>
     <footer className={isBridge ? 'persistent-transport' : 'player-statusbar'}>
       {isBridge ? <div className="footer-track"><Icon name="disc" size={24} /><div><strong>{player.item?.title || player.item?.name || 'No track selected'}</strong><small>{player.item?.artist || 'Red Lotus'}</small></div></div> : <span className="library-count"><i className="status-light" />{items.filter(playable).length} CLEARED TRACKS</span>}
       <Transport player={player} available={available} compact />

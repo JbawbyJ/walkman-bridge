@@ -19,14 +19,14 @@ $Products = foreach ($Key in @('bridge', 'player')) {
     if (-not $Definition) { throw "Current product configuration lacks $Key" }
     $File = $Definition.artifactName.Replace('${version}', $Version).Replace('${arch}', 'x64').Replace('${ext}', 'exe')
     $Executable = $Definition.executableName + '.exe'
-    foreach ($Leaf in @($File, $Executable, $Definition.productName)) {
+    foreach ($Leaf in @($File, $Executable, $Definition.productName, $Definition.dataDirectoryName)) {
         if ([string]::IsNullOrWhiteSpace($Leaf) -or $Leaf -match '[\\/:<>"|?*\x00-\x1f]' -or $Leaf -in @('.', '..') -or $Leaf.Contains('${')) { throw 'Product configuration contains an unsafe or unresolved file name' }
     }
     $Source = Join-Path $Repo ('dist_electron\' + $Key + '\' + $File)
     $Hash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($Hash -cne $ExpectedHashes[$Key]) { throw "Final $Key installer hash mismatch" }
     [ordered]@{ product = $Key; version = $Version; file = $File; executable = $Executable;
-        data_name = $Definition.productName; sha256 = $Hash; source = $Source }
+        data_name = $Definition.dataDirectoryName; sha256 = $Hash; source = $Source }
 }
 # Only allocate evidence after both explicitly selected artifacts have passed.
 $RunRoot = Join-Path $Repo ('packaging\build\windows-sandbox\' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))

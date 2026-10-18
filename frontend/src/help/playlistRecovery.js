@@ -40,7 +40,7 @@ export const PLAYLIST_RECOVERY_HELP = {
   },
   DEVICE_FILE_LOCKED: {
     title: 'A file on the Walkman is open',
-    explanation: 'Another program (for example Explorer, a media player, or antivirus) has a file on the Walkman open. Walkman Bridge stopped and nothing was changed.',
+    explanation: 'Another program (for example Explorer, a media player, or antivirus) has a file on the Walkman open. The dashboard stopped and nothing was changed.',
     action: 'Close that program and try the change again.',
     actionId: 'close_and_retry',
   },
@@ -52,7 +52,7 @@ export const PLAYLIST_RECOVERY_HELP = {
   },
   DEVICE_FILE_READ_ONLY: {
     title: 'The Walkman file or storage is read-only',
-    explanation: 'The file, or the Walkman\'s storage, is read-only or write-protected, so Walkman Bridge stopped before changing anything.',
+    explanation: 'The file, or the Walkman\'s storage, is read-only or write-protected, so the dashboard stopped before changing anything.',
     action: 'Clear the file\'s Read-only setting (right-click it, choose Properties, untick Read-only), or turn off write protection on the device or card, then try again.',
     actionId: 'clear_read_only_retry',
   },
@@ -64,14 +64,14 @@ export const PLAYLIST_RECOVERY_HELP = {
   },
   DEVICE_PROBE_CONFLICT: {
     title: 'Two copies of a file differ',
-    explanation: 'The renamed copy holds the original file. The file at the normal location appeared afterward from something else, so Walkman Bridge won\'t change anything. Until this is resolved, saving changes and Recover won\'t run, but browsing still works.',
+    explanation: 'The renamed copy holds the original file. The file at the normal location appeared afterward from something else, so the dashboard won\'t change anything. Until this is resolved, saving changes and Recover won\'t run, but browsing still works.',
     action: 'Don\'t delete either file. Compare both with your backup and keep the one that matches. If your backup doesn\'t have this file, or neither copy matches, keep both and ask for help.',
     actionId: 'manual_help',
   },
   DEVICE_PROBE_PENDING: {
     title: 'A safety check left a renamed copy',
     explanation: 'Nothing is broken. An earlier safety check left a renamed copy of a file on the Walkman. What happens next depends on the files.',
-    action: 'On the next save or Recover, Walkman Bridge tidies it up automatically. If the original file is missing, the copy is renamed back. If the original is there and identical, the extra copy is removed. Only if the two copies differ will that save stop with a conflict.',
+    action: 'On the next save or Recover, the dashboard tidies it up automatically. If the original file is missing, the copy is renamed back. If the original is there and identical, the extra copy is removed. Only if the two copies differ will that save stop with a conflict.',
     actionId: 'inspect_recover',
   },
   GENERIC: {

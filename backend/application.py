@@ -46,6 +46,9 @@ class LinkImportBody(BaseModel):
 class PlaybackLeaseBody(BaseModel):
     media_id: str
 
+class PreferencesBody(BaseModel):
+    theme: Literal['light', 'dark']
+
 class PlaybackBody(BaseModel):
     media_id: str | None = None
     playlist_id: str | None = None
@@ -154,7 +157,7 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
         coordinator.begin_drain()
         await asyncio.to_thread(coordinator.wait_drained)
         jobs.close()
-    app = FastAPI(title='Red Lotus Player' if product == 'player' else 'Walkman Bridge', version=VERSION, lifespan=lifespan)
+    app = FastAPI(title='Red Lotus Player' if product == 'player' else 'Red Lotus - Sony Walkman Dashboard', version=VERSION, lifespan=lifespan)
     app.state.store, app.state.jobs, app.state.service = store, jobs, service
     app.state.coordinator, app.state.elevation = coordinator, elevation
     app.add_middleware(Boundary, token=token or os.environ.get('NIGHTOPS_TOKEN') or secrets.token_urlsafe(48),
@@ -234,6 +237,14 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
     @app.get('/api/playback-state')
     async def playback_state():
         return await asyncio.to_thread(store.playback_state)
+
+    @app.get('/api/preferences')
+    async def preferences():
+        return await asyncio.to_thread(store.preferences)
+
+    @app.patch('/api/preferences')
+    async def save_preferences(body: PreferencesBody):
+        return await asyncio.to_thread(store.preferences, body.theme)
 
     @app.patch('/api/playback-state')
     async def save_playback(body: PlaybackBody):

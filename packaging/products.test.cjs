@@ -6,7 +6,8 @@ const { createConfig } = require('./products.cjs');
 test('product identities and staging roots cannot overlap', () => {
   const bridge = createConfig('bridge');
   const player = createConfig('player');
-  assert.equal(bridge.productName, 'Walkman Bridge');
+  assert.equal(bridge.productName, 'Red Lotus - Sony Walkman Dashboard');
+  assert.equal(require('./products.cjs').products.bridge.dataDirectoryName, 'Walkman Bridge');
   assert.equal(player.productName, 'Red Lotus Player');
   for (const field of ['appId', 'executableName', 'artifactName']) assert.notEqual(bridge[field], player[field]);
   assert.notEqual(bridge.extraMetadata.name, player.extraMetadata.name);

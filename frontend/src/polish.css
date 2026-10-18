@@ -1,0 +1,318 @@
+/* Presentation layer shared by Bridge and Player. Responsive layout and
+   interaction contracts remain in nightops.css and retro.css. */
+@font-face { font-family: 'Red Lotus Display'; src: url('/fonts/brand-orbitron.woff2') format('woff2'); font-style: normal; font-weight: 400 900; font-display: swap; }
+@font-face { font-family: 'Red Lotus Sans'; src: url('/fonts/brand-ibm-plex-sans.woff2') format('woff2'); font-style: normal; font-weight: 100 900; font-display: swap; }
+@font-face { font-family: 'Red Lotus Sans'; src: url('/fonts/brand-ibm-plex-sans-italic.woff2') format('woff2'); font-style: italic; font-weight: 100 900; font-display: swap; }
+@font-face { font-family: 'Red Lotus Mono'; src: url('/fonts/brand-ibm-plex-mono.woff2') format('woff2'); font-style: normal; font-weight: 400 700; font-display: swap; }
+:root {
+  color-scheme: light;
+  --polish-page: #f7f7f7;
+  --polish-surface: #ffffff;
+  --polish-raised: #eeeeee;
+  --polish-text: #171010;
+  --polish-muted: #555555;
+  --polish-accent: #a52d1d;
+  --polish-accent-ink: #ffffff;
+  --polish-button: #b93221;
+  --polish-hover: #a52d1d;
+  --polish-boundary: #777070;
+  --polish-line: #dcdcdc;
+  --polish-selected: #f4e5e1;
+  --polish-warning: #fff4da;
+  --polish-warning-text: #654800;
+  --polish-warning-line: #947532;
+  --polish-error: #fae7e2;
+  --polish-error-text: #982317;
+  --polish-error-line: #b34f41;
+  --night-page: var(--polish-page);
+  --night-panel: var(--polish-surface);
+  --night-line: var(--polish-line);
+  --night-ink: var(--polish-text);
+  --night-muted: var(--polish-muted);
+  --night-amber: var(--polish-accent);
+  --night-font-micro: 11px;
+  --night-font-caption: 12px;
+  --night-font-body: 14px;
+  --night-radius-control: 2px;
+  --night-radius-panel: 4px;
+  --font-display: 'Red Lotus Display', 'Orbitron', sans-serif;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --polish-page: #160505;
+  --polish-surface: #211010;
+  --polish-raised: #2a1413;
+  --polish-text: #f1edeb;
+  --polish-muted: #b8aaa5;
+  --polish-accent: #f07760;
+  --polish-accent-ink: #ffffff;
+  --polish-button: #b93221;
+  --polish-hover: #a52d1d;
+  --polish-boundary: #96857c;
+  --polish-line: #452521;
+  --polish-selected: #3d1e19;
+  --polish-warning: #302a20;
+  --polish-warning-text: #e8d4ab;
+  --polish-warning-line: #a98d60;
+  --polish-error: #382126;
+  --polish-error-text: #ffd9dc;
+  --polish-error-line: #c58189;
+}
+html, body, #root, .startup { background: var(--polish-page); color: var(--polish-text); }
+.startup .brand-mark img { filter: none; }
+.startup .app-titlebar { background: var(--polish-page); border-color: var(--polish-line); box-shadow: none; }
+.startup .brand-mark strong { color: var(--polish-accent); }
+.startup .brand-mark span, .startup .edition, .startup .edition small, .startup p { color: var(--polish-muted); }
+.startup>div { color: var(--polish-text); }
+.startup>div>svg { color: var(--polish-accent); }
+
+/* One quiet shell: product identity, navigation, content, persistent playback. */
+.nightops-app, .nightops-app.player-composition {
+  border: 1px solid var(--polish-line);
+  border-radius: 0;
+  background: var(--polish-page);
+  color: var(--polish-text);
+  font: 14px/1.5 'Red Lotus Sans', 'IBM Plex Sans', sans-serif;
+}
+.nightops-app .app-titlebar {
+  min-height: 58px;
+  margin: 0;
+  padding: 10px 20px;
+  border: 0;
+  border-bottom: 1px solid var(--polish-line);
+  border-radius: 0;
+  background: var(--polish-page);
+}
+.nightops-app .brand-mark { gap: 10px; }
+.nightops-app .brand-mark img { width: 30px; height: 30px; filter: none; opacity: 1; }
+.nightops-app .brand-mark strong { font: italic 600 15px/1.3 'Red Lotus Display', 'Orbitron', sans-serif; letter-spacing: .04em; color: var(--polish-accent); }
+.nightops-app .brand-mark span { font: 11px/1.4 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; letter-spacing: .02em; margin-top: 2px; color: var(--polish-muted); }
+.nightops-app .edition { font: 11px 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; letter-spacing: 0; color: var(--polish-muted); }
+.nightops-app .edition small { margin: 0; font: inherit; color: inherit; }
+.nightops-app .window-controls button { border-color: transparent; background: transparent; box-shadow: none; color: var(--polish-muted); }
+.nightops-app .window-controls button:hover { background: var(--polish-raised); color: var(--polish-text); }
+.nightops-app .window-controls button:last-child:hover { background: var(--polish-error); color: var(--polish-error-text); }
+.nightops-app .workspace-tabs { padding: 0 20px; gap: 24px; background: var(--polish-page); border-color: var(--polish-line); }
+.nightops-app .workspace-tabs button { padding: 12px 0; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; font: 500 13px 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; color: var(--polish-muted); }
+.nightops-app .workspace-tabs button:hover { color: var(--polish-text); }
+.nightops-app .workspace-tabs button.active { color: var(--polish-accent); border-bottom-color: var(--polish-accent); }
+.nightops-app .workspace-tabs button span { color: inherit; }
+.nightops-app .workspace-tabs button { display: flex; align-items: center; gap: 10px; }
+.nightops-app .workspace-tabs button>svg { flex: none; color: var(--polish-accent); }
+.workspace-shell { display: flex; flex-direction: column; min-width: 0; min-height: 0; flex: 1; overflow: hidden; }
+
+.nightops-app .connection { font: 11px 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; color: var(--polish-muted); }
+.nightops-app .connection.connected { color: var(--polish-accent); }
+.nightops-app .connection.connected i, .nightops-app .status-light { background: var(--polish-accent); box-shadow: none; }
+
+/* Shared controls and type. Keep explicit focus and native range semantics. */
+.nightops-app :is(button, input, select, summary, a, [role="slider"]):focus-visible { outline: 2px solid var(--polish-accent); outline-offset: 3px; }
+.nightops-app input:not([type=range]):not([type=checkbox]), .nightops-app select {
+  background: var(--polish-page); color: var(--polish-text); border: 1px solid var(--polish-boundary); border-radius: 2px;
+  font-family: 'Red Lotus Sans', 'IBM Plex Sans', sans-serif;
+}
+.nightops-app input::placeholder { color: var(--polish-muted); }
+.nightops-app :is(input[type=range], input[type=checkbox], progress) { accent-color: var(--polish-accent); }
+.nightops-app input[type=range]::-webkit-slider-runnable-track { background: var(--polish-boundary); }
+.nightops-app .button, .nightops-app .music-manager button, .nightops-app .player-wing-controls button, .nightops-app .backup-warning button {
+  border: 1px solid var(--polish-boundary); border-radius: 2px; background: var(--polish-raised); color: var(--polish-text);
+  font: 500 12px/1.4 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; letter-spacing: 0; text-transform: none; box-shadow: none;
+}
+.nightops-app .button:hover:not(:disabled), .nightops-app .music-manager button:hover:not(:disabled), .nightops-app .player-wing-controls button:hover {
+  background: var(--polish-raised); border-color: var(--polish-accent); color: var(--polish-text);
+}
+.nightops-app .button.primary, .nightops-app .music-manager button.primary {
+  background: var(--polish-button); color: var(--polish-accent-ink); border-color: var(--polish-accent); box-shadow: none;
+}
+.nightops-app .button.primary:hover:not(:disabled), .nightops-app .music-manager button.primary:hover:not(:disabled) { background: var(--polish-hover); color: var(--polish-accent-ink); }
+.nightops-app .button.danger { background: var(--polish-error); border-color: var(--polish-error-line); color: var(--polish-error-text); }
+.nightops-app .text-button { color: var(--polish-accent); font: 500 12px/1.5 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; }
+.nightops-app .text-button:hover:not(:disabled) { color: var(--polish-accent); }
+.nightops-app .icon-button { color: var(--polish-muted); box-shadow: none; }
+.nightops-app .icon-button:hover:not(:disabled) { background: var(--polish-raised); border-color: var(--polish-boundary); color: var(--polish-text); }
+.nightops-app .icon-button.active { color: var(--polish-accent); }
+.nightops-app .panel, .nightops-app .player-wing .panel { background: var(--polish-surface); border: 1px solid var(--polish-line); border-radius: 4px; box-shadow: none; }
+.nightops-app .section-heading { background: transparent; border-color: var(--polish-line); min-height: 44px; }
+.nightops-app .section-heading :is(h1,h2,h3), .nightops-app .staging-heading h2 { font: 600 14px/1.4 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; text-transform: none; letter-spacing: 0; color: var(--polish-text); }
+.nightops-app .micro, .nightops-app .panel-note { font-family: 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; letter-spacing: 0; color: var(--polish-muted); }
+.nightops-app .amber { color: var(--polish-accent); }
+.nightops-app .panel-note { border-color: var(--polish-line); line-height: 1.5; }
+
+/* Music takes the space formerly occupied by the decorative chassis. */
+.nightops-app .retro-deck { margin-top: 0; padding: 20px; border: 1px solid var(--polish-line); border-radius: 4px; background: var(--polish-surface); box-shadow: none; }
+.nightops-app .retro-deck::before, .nightops-app .retro-deck::after { content: none; }
+.nightops-app .retro-deck .audio-display { margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.nightops-app .display-topline { color: var(--polish-muted); font: 11px 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; letter-spacing: .03em; }
+.nightops-app .display-topline i.lit { background: var(--polish-accent); box-shadow: none; }
+.nightops-app .retro-deck .track-display { gap: 20px; min-height: 112px; margin: 20px 0 16px; }
+.nightops-app .retro-deck .record-art { width: 112px; border-radius: 2px; }
+.nightops-app .record-art, .nightops-app .cover-art-thumb { background: var(--polish-raised); border: 1px solid var(--polish-line); box-shadow: none; }
+.nightops-app .cover-art.is-fallback img.cover-media.cover-fallback { filter: none; opacity: .85; }
+.nightops-app .cover-art-deck.is-fallback img.cover-media.cover-fallback { inset: 0; margin: auto; width: 46%; height: 46%; }
+.nightops-app .cover-art-deck.is-fallback span { display: none; }
+.nightops-app .retro-deck .track-copy h1 { color: var(--polish-text); font: 600 clamp(20px,2vw,28px)/1.2 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; text-shadow: none; margin-bottom: 8px; }
+.nightops-app .retro-deck .track-copy p { color: var(--polish-text); font: 14px/1.5 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; }
+.nightops-app .retro-deck .track-copy small, .nightops-app .retro-deck .track-copy .track-details { color: var(--polish-muted); font: 12px/1.5 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; }
+.nightops-app .retro-deck .visualizer { height: 58px; margin-top: 12px; }
+.nightops-app .visualizer-caption { color: var(--polish-muted); font: 10px 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; letter-spacing: .02em; }
+.nightops-app .visualizer-caption button { color: var(--polish-accent); }
+.nightops-app .seek-row time { color: var(--polish-muted); font-size: 11px; }
+.nightops-app .retro-deck .deck-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; padding: 16px 0 0; border-top: 1px solid var(--polish-line); }
+.nightops-app .retro-deck .transport { gap: 8px; }
+.nightops-app .retro-deck .transport .icon-button { width: 36px; height: 36px; border: 1px solid transparent; border-radius: 2px; background: transparent; color: var(--polish-muted); box-shadow: none; }
+.nightops-app .retro-deck .transport .icon-button:hover:not(:disabled) { background: var(--polish-raised); border-color: var(--polish-boundary); color: var(--polish-text); }
+.nightops-app .retro-deck .transport .icon-button.active { color: var(--polish-accent); background: var(--polish-raised); }
+.nightops-app .transport .play-button, .nightops-app .retro-deck .transport .play-button { width: 48px; height: 48px; border: 0; border-radius: 50%; background: var(--polish-button); color: var(--polish-accent-ink); box-shadow: none; }
+.nightops-app .retro-deck .transport .play-button:hover:not(:disabled) { background: var(--polish-hover); color: var(--polish-accent-ink); }
+.nightops-app .retro-deck .transport .play-button::before { content: none; }
+.nightops-app .retro-deck .rotary-volume { display: grid; grid-template-columns: 36px 1fr; gap: 4px 10px; width: 150px; margin: 0; }
+.nightops-app .retro-deck .volume-dial { grid-row: 1 / 3; width: 36px; height: 36px; border: 1px solid var(--polish-boundary); background: var(--polish-raised); box-shadow: none; }
+.nightops-app .volume-dial::after { content: none; }
+.nightops-app .volume-dial i { inset: 3px; }
+.nightops-app .volume-dial i::before { width: 2px; height: 8px; left: calc(50% - 1px); top: 0; background: var(--polish-accent); box-shadow: none; }
+.nightops-app .volume-label, .nightops-app .retro-deck .volume-label { color: var(--polish-muted); font: 11px 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; margin: 0; justify-content: flex-start; }
+.nightops-app .retro-deck .rotary-volume>input { height: 18px; }
+.nightops-app .retro-deck .stop-button { width: auto; margin: 0; }
+.nightops-app .bridge-eq-toggle { gap: 8px; flex-wrap: wrap; }
+.nightops-app .listening-player { gap: 16px; }
+.nightops-app .player-wing { padding-top: 0; }
+
+/* Lists use alignment and a single selected accent rather than nested cards. */
+.nightops-app :is(.queue-row,.device-track,.staged-file,.manager-file-row,.manager-members li,.eq-options,.transfer-footer,.manager-footer,.manager-tabs,.job-files>div) { border-color: var(--polish-line); }
+.nightops-app .queue-row.selected { background: var(--polish-selected); border-left-color: var(--polish-accent); }
+.nightops-app .track-select strong, .nightops-app .staged-file strong { color: var(--polish-text); }
+.nightops-app :is(.track-select small,.queue-meta,.track-number,.device-track small,.device-track time,.staged-file small,.device-copy p,.device-copy small,.manager-help,.manager-heading p,.manager-file-row small,.manager-members small,.manager-playlist-layout aside small,.manager-empty) { color: var(--polish-muted); font-size: 12px; }
+.nightops-app .track-select:disabled strong { color: var(--polish-muted); }
+.nightops-app .queue-row-menu summary { color: var(--polish-muted); }
+.nightops-app .queue-row-menu summary:hover { background: var(--polish-raised); border-color: var(--polish-boundary); }
+.nightops-app .device-copy h2, .nightops-app .manager-heading h2 { color: var(--polish-text); }
+.nightops-app .device-track>svg { color: var(--polish-muted); }
+.nightops-app .device-illustration { background: var(--polish-raised); border: 1px solid var(--polish-boundary); box-shadow: none; color: var(--polish-muted); }
+.nightops-app .device-screen, .nightops-app .device-illustration.online .device-screen { background: var(--polish-page); border-color: var(--polish-line); box-shadow: none; }
+.nightops-app .device-screen small { color: var(--polish-muted); }
+.nightops-app .device-screen img { filter: none; opacity: 1; }
+.nightops-app .device-wheel { border: 1px solid var(--polish-boundary); background: var(--polish-page); }
+.nightops-app .storage-meter { background: var(--polish-raised); box-shadow: inset 0 0 0 1px var(--polish-boundary); }
+.nightops-app .storage-meter i { background: var(--polish-accent); }
+.nightops-app .eq-bands { background: none; }
+.nightops-app .eq-bands label, .nightops-app .eq-bands output, .nightops-app .toggle { color: var(--polish-muted); }
+.nightops-app .eq-bands label { font-size: 10px; }
+.nightops-app .view-state, .nightops-app .view-state p { color: var(--polish-muted); }
+.nightops-app .view-state strong { color: var(--polish-text); }
+.nightops-app .view-state svg { color: var(--polish-muted); }
+.nightops-app .transfer-footer { background: var(--polish-surface); }
+.nightops-app .transfer-footer>div, .nightops-app .transfer-footer>small { color: var(--polish-muted); font-family: 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; }
+.nightops-app .transfer-footer .button { text-transform: none; letter-spacing: 0; }
+
+/* Feedback retains meaningful warning/error colors; ordinary status is quiet. */
+.nightops-app .job-panel, .nightops-app .scan-idle { background: var(--polish-surface); border-color: var(--polish-line); border-radius: 2px; }
+.nightops-app .workspace-operation .job-panel { padding: 8px 14px; }
+.nightops-app .job-title, .nightops-app .scan-idle strong { color: var(--polish-text); font-size: 12px; }
+.nightops-app :is(.job-panel>p,.job-files small,.diagnostics,.diagnostics pre,.scan-idle p) { color: var(--polish-muted); font-size: 12px; }
+.nightops-app .job-panel>p { margin: 4px 0; }
+.nightops-app .job-details summary { color: var(--polish-muted); font: 11px/1.5 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; padding: 2px 0; }
+.nightops-app .job-panel progress::-webkit-progress-bar { background: var(--polish-raised); }
+.nightops-app .job-panel progress::-webkit-progress-value { background: var(--polish-accent); }
+.nightops-app .scan-seal { color: var(--polish-accent); border-color: var(--polish-accent); }
+.nightops-app .status { font-family: 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; }
+.nightops-app .status { color: var(--polish-muted); }
+.nightops-app .status:is(.state-blocked,.state-failed) { color: var(--polish-error-text); }
+.nightops-app .status:is(.state-blocked,.state-failed) i { background: var(--polish-error-text); }
+.nightops-app .status:is(.state-scanning,.state-awaiting_permission,.state-transcoding,.state-needs_scan,.state-unknown,.state-interrupted) { color: var(--polish-warning-text); }
+.nightops-app .status:is(.state-scanning,.state-awaiting_permission,.state-needs_scan) i { background: var(--polish-warning-text); }
+.nightops-app .scan-reason { color: var(--polish-error-text); }
+.nightops-app .eq-bands.bypassed { opacity: 1; }
+.nightops-app .status.state-ready, .nightops-app .status.state-transferred { color: var(--polish-accent); }
+.nightops-app .status.state-ready i, .nightops-app .status.state-transferred i { background: var(--polish-accent); }
+.nightops-app .backup-warning, .nightops-app .notice-strip { background: var(--polish-warning); color: var(--polish-warning-text); border-color: var(--polish-warning-line); }
+.nightops-app .backup-warning { padding: 10px 14px; }
+.nightops-app .notice-strip.error, .nightops-app .view-state-error, .nightops-app .manager-error { background: var(--polish-error); color: var(--polish-error-text); border-color: var(--polish-error-line); }
+.nightops-app .view-state-error :is(strong,p,svg), .nightops-app .view-state-dismiss { color: var(--polish-error-text); }
+.nightops-app .view-state-dismiss { border-color: var(--polish-error-line); }
+.nightops-app .job-panel .reconcile-warning { background: var(--polish-warning); color: var(--polish-warning-text); }
+
+.nightops-app .persistent-transport, .nightops-app .player-statusbar { background: var(--polish-surface); border-color: var(--polish-line); box-shadow: none; margin: 0; border-radius: 0; color: var(--polish-muted); }
+.nightops-app .footer-track>svg { color: var(--polish-muted); }
+.nightops-app .footer-track strong { color: var(--polish-text); font-size: 13px; }
+.nightops-app .footer-track small, .nightops-app .persistent-transport>time { color: var(--polish-muted); font-size: 11px; }
+.nightops-app .player-wing-controls>span { color: var(--polish-muted); }
+.nightops-app .player-wing-controls button.active, .nightops-app .music-manager button[aria-pressed=true] { color: var(--polish-accent); background: var(--polish-raised); border-color: var(--polish-accent); box-shadow: none; }
+.nightops-app .music-manager, .nightops-app .link-import-dialog, .nightops-app .delete-dialog { background: var(--polish-surface); color: var(--polish-text); border: 1px solid var(--polish-boundary); border-radius: 4px; }
+.nightops-app :is(.music-manager,.link-import-dialog,.delete-dialog)::backdrop { background: #09090bdb; }
+.nightops-app .dialog-heading h2, .nightops-app .delete-dialog h2 { font: 600 18px 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; color: var(--polish-text); }
+.nightops-app .link-import-dialog p, .nightops-app .link-import-dialog small { color: var(--polish-muted); }
+.nightops-app .manager-editor { background: var(--polish-page); border-color: var(--polish-line); }
+.nightops-app .manager-add-tracks summary { color: var(--polish-accent); }
+.nightops-app .manager-notice { background: var(--polish-selected); color: var(--polish-text); }
+.nightops-app .manager-confirm { background: var(--polish-warning); }
+.nightops-app .skip-link:focus { color: var(--polish-accent-ink); background: var(--polish-accent); }
+.nightops-app .drop-overlay { background: var(--polish-surface); border-color: var(--polish-accent); color: var(--polish-accent); }
+.nightops-app .drop-overlay strong { font-family: 'Red Lotus Sans', 'IBM Plex Sans', sans-serif; }
+.nightops-app .drop-overlay span { color: var(--polish-text); }
+
+@media(max-width:700px) {
+  .nightops-app .app-titlebar { min-height: 52px; padding: 8px 12px; }
+  .nightops-app .workspace-tabs { gap: 20px; padding-inline: 12px; }
+  .nightops-app .workspace-tabs button { padding-block: 10px; }
+  .nightops-app .retro-deck { padding: 16px; }
+  .nightops-app .retro-deck .track-display { gap: 14px; }
+  .nightops-app .retro-deck .record-art { width: 88px; }
+  .nightops-app .retro-deck .deck-controls { justify-content: center; }
+}
+@media(max-width:420px) {
+  .nightops-app .app-titlebar { padding: 6px 8px; min-height: 48px; }
+  .nightops-app .brand-mark { gap: 6px; }
+  .nightops-app .brand-mark img { width: 24px; height: 24px; }
+  .nightops-app .brand-mark strong { font-size: 11px; }
+  .nightops-app .brand-mark span { font-size: 9px; }
+  .nightops-app .workspace-tabs { gap: 16px; }
+  .nightops-app .workspace-tabs button { font-size: 12px; padding-block: 8px; }
+  .nightops-app .retro-deck { padding: 12px; }
+  .nightops-app .retro-deck .record-art { width: 64px; }
+  .nightops-app .retro-deck .track-copy h1 { font-size: 20px; }
+  .nightops-app .retro-deck .track-copy p { font-size: 13px; }
+  .nightops-app .retro-deck .track-display { gap: 12px; }
+  .nightops-app .retro-deck .transport { gap: 6px; }
+  .nightops-app .retro-deck .transport .icon-button { width: 30px; min-width: 30px; }
+  .nightops-app .retro-deck .transport .play-button { width: 44px; height: 44px; }
+  .nightops-app .micro { white-space: normal; }
+}
+
+/* Short windows should show the player actions before requiring a scroll. */
+@media(max-height:700px) {
+  .nightops-app .retro-deck { padding: 12px; }
+  .nightops-app .retro-deck .track-display { min-height: 80px; margin-block: 12px; }
+  .nightops-app .retro-deck .record-art { width: 80px; }
+  .nightops-app .retro-deck .visualizer { height: 40px; margin-top: 8px; }
+  .nightops-app .retro-deck .deck-controls { margin-top: 12px; padding-top: 12px; }
+}
+@media(max-height:700px) and (max-width:420px) {
+  .nightops-app .retro-deck .record-art { width: 64px; }
+}
+
+/* Appearance remains inside the scrollable workspace; transport stays mounted. */
+.nightops-app .appearance-settings { width: 100%; max-width: 760px; padding: 24px; align-self: start; grid-column: 1 / -1; }
+.appearance-settings h1 { font: 600 20px/1.4 'Red Lotus Display', sans-serif; margin: 0 0 24px; }
+.appearance-settings fieldset { border: 0; padding: 0; min-width: 0; }
+.appearance-settings legend { font-size: 16px; font-weight: 600; padding: 0; }
+.appearance-settings p { color: var(--polish-muted); margin: 8px 0 18px; }
+.appearance-settings .theme-choice { display: flex; align-items: center; gap: 14px; padding: 18px; margin-top: 12px; border: 1px solid var(--polish-boundary); border-radius: 4px; cursor: pointer; }
+.appearance-settings .theme-choice.selected { background: var(--polish-selected); border-color: var(--polish-accent); }
+.appearance-settings .theme-choice input { appearance: auto; width: 18px; height: 18px; flex: none; accent-color: var(--polish-accent); }
+.appearance-settings .theme-choice span { display: grid; gap: 4px; min-width: 0; }
+.appearance-settings .theme-choice small { color: var(--polish-muted); font-size: 13px; }
+.appearance-settings [role=alert] p { color: var(--polish-error-text); }
+.nightops-app .workspace-tabs { flex-wrap: wrap; gap: 12px 24px; flex-shrink: 0; }
+.nightops-app .workspace-tabs button { white-space: nowrap; }
+.nightops-app .brand-mark { min-width: 0; }
+.nightops-app .brand-mark span { white-space: normal; font-size: 11px; }
+.nightops-app .micro, .nightops-app time { font-family: 'Red Lotus Mono', 'IBM Plex Mono', monospace; }
+@media(max-width:420px) {
+  .nightops-app .workspace-tabs { gap: 8px; padding-inline: 8px; }
+  .nightops-app .workspace-tabs button { gap: 4px; font-size: 11px; }
+  .nightops-app .workspace-tabs button>svg { display: none; }
+  .nightops-app .brand-mark span { font-size: 11px; }
+  .nightops-app .brand-mark strong { font-size: 12px; }
+  .nightops-app .appearance-settings { padding: 14px; }
+  .appearance-settings .theme-choice { padding: 12px; }
+}

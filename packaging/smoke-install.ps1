@@ -4,7 +4,7 @@ param(
     [Parameter()][string]$Installer
 )
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$Name = if ($Product -eq 'bridge') { 'Walkman Bridge' } else { 'Red Lotus Player' }
+$Name = if ($Product -eq 'bridge') { 'Red Lotus - Sony Walkman Dashboard' } else { 'Red Lotus Player' }
 $Executable = if ($Product -eq 'bridge') { 'Walkman Bridge.exe' } else { 'Red Lotus Player.exe' }
 $DataName = if ($Product -eq 'bridge') { 'Walkman Bridge' } else { 'Red Lotus Player' }
 $LegacyName = 'Walkman Bridge ' + [char]0x2014 + ' Night Ops'
@@ -19,7 +19,7 @@ $SmokeShortPathOverride = $null
 function Registrations {
     $RegistryRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
     if (-not (Test-Path -LiteralPath $RegistryRoot -ErrorAction Stop)) { return @() }
-    @(Get-ChildItem -LiteralPath $RegistryRoot -ErrorAction Stop | Get-ItemProperty -ErrorAction Stop | Where-Object { $_.DisplayName -eq $Name -or ($Product -eq 'bridge' -and $_.DisplayName -eq $LegacyName) })
+    @(Get-ChildItem -LiteralPath $RegistryRoot -ErrorAction Stop | Get-ItemProperty -ErrorAction Stop | Where-Object { $_.DisplayName -eq $Name -or ($Product -eq 'bridge' -and $_.DisplayName -in @($LegacyName, $DataName)) })
 }
 function ConvertTo-SmokeInstant($Value) {
     if ($null -eq $Value -or $Value -eq '') { return $null }
@@ -338,9 +338,9 @@ if (-not $Product -or -not $Installer) { throw 'Product and Installer are requir
 $Installer = (Resolve-Path -LiteralPath $Installer).Path
 $Existing = @(Registrations)
 if ($Existing) { throw "An existing $Name installation is registered; installer smoke will not replace it." }
-if (Get-Process -Name $Name,'Walkman Bridge Night Ops' -ErrorAction SilentlyContinue) { throw 'A user product is running.' }
+if (Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($Executable)),'Walkman Bridge Night Ops' -ErrorAction SilentlyContinue) { throw 'A user product is running.' }
 foreach ($Directory in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))) {
-    foreach ($ShortcutName in @($Name,$LegacyName)) {
+    foreach ($ShortcutName in @($Name,$DataName,$LegacyName)) {
         if (Test-Path -LiteralPath (Join-Path $Directory ($ShortcutName + '.lnk'))) { throw 'An existing user shortcut is present; smoke testing refuses to replace it.' }
     }
 }

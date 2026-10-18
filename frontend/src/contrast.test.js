@@ -16,6 +16,21 @@ function contrast(foreground, background) {
   return (hi + 0.05) / (lo + 0.05)
 }
 
+test('polish palette text and interactive accents meet AA on every neutral surface', () => {
+  const css = fs.readFileSync(new URL('./polish.css', import.meta.url), 'utf8')
+  for (const block of css.match(/:root(?:\[data-theme="dark"\])? \{[^}]+\}/g)) {
+  const tokens = Object.fromEntries([...block.matchAll(/--polish-([\w-]+):\s*(#[\da-f]{6})\s*;/gi)].map(([, name, hex]) => [name, hex]))
+  for (const surface of ['page', 'surface', 'raised']) {
+    for (const foreground of ['text', 'muted', 'accent']) {
+      assert.ok(tokens[foreground] && tokens[surface], `missing ${foreground}/${surface} token`)
+      assert.ok(contrast(tokens[foreground], tokens[surface]) >= 4.5, `${foreground} on ${surface}`)
+    }
+  }
+  assert.ok(contrast(tokens['accent-ink'], tokens.button) >= 4.5, 'primary button text')
+  assert.ok(contrast(tokens.boundary, tokens.surface) >= 3, 'input and meter boundaries')
+  }
+})
+
 test('Listening, Walkman, and Transfer text colors meet WCAG AA on their surfaces', () => {
   const pairs = [
     ['#f0e5d5', '#100c0e', 4.5],

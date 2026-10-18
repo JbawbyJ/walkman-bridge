@@ -58,6 +58,7 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify(value))
   }
   if (url.pathname.startsWith('/api/')) {
+    if (url.pathname === '/api/preferences') return json({ theme: 'light' })
     if (url.pathname === '/api/health') return json({ ok: true, product, version: '0.4.1' })
     if (url.pathname === '/api/playback-state') return json({ media_id: null, position_seconds: 0, volume: 0.4, repeat: 'off', shuffle: false })
     if (url.pathname === '/api/queue') return json({ items, quota: { used_bytes: 12345678 * items.length, limit_bytes: 10 * 1024 ** 3 } })
@@ -179,7 +180,7 @@ async function dialogCheck(win) {
 function cellOk(mode, summary, dialog) {
   const reasons = []
   if (summary.legacyBranding) reasons.push('legacy Night Ops branding is visible')
-  if (summary.title !== (mode === 'player' ? 'Red Lotus Player' : 'Walkman Bridge')) reasons.push(`title ${summary.title}`)
+  if (summary.title !== (mode === 'player' ? 'Red Lotus Player' : 'Red Lotus - Sony Walkman Dashboard')) reasons.push(`title ${summary.title}`)
   if (!summary.retroControls) reasons.push('retro deck controls missing')
   if (summary.horizontal.length) reasons.push(`horizontal overflow ${JSON.stringify(summary.horizontal)}`)
   if (summary.unreachable.length) reasons.push(`unreachable controls ${JSON.stringify(summary.unreachable)}`)

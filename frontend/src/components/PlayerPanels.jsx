@@ -15,6 +15,7 @@ export function spokenTime(seconds) {
 
 export function Icon({ name, size = 20 }) {
   const shapes = {
+    settings: <><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2"/></>,
     play: <path d="m8 4 12 8-12 8Z" />,
     pause: <><path d="M7 5h3v14H7zM14 5h3v14h-3z" /></>,
     previous: <><path d="M6 5v14m13-14L8 12l11 7Z" /></>,
@@ -40,8 +41,8 @@ export function IconButton({ label, icon, children, active, className = '', ...p
 export function Brand({ product, version }) {
   const win = window.walkmanBridge
   return <header className="app-titlebar">
-    <div className="brand-mark"><img src={lotus} alt="Red Lotus" /><div><strong>RED LOTUS</strong><span>{product === 'player' ? 'PLAYER' : 'WALKMAN BRIDGE'}</span></div></div>
-    <div className="edition">{product === 'player' ? 'PERSONAL AUDIO SYSTEM' : 'LOCAL AUDIO · DEVICE CONTROL'}<small>v{version || '0.2.0'}</small></div>
+    <div className="brand-mark" aria-label={product === 'player' ? 'Red Lotus Player' : 'Red Lotus - Sony Walkman Dashboard'}><img src={lotus} alt="Red Lotus" /><div><strong>RED LOTUS</strong><span>{product === 'player' ? 'PLAYER' : 'Sony Walkman Dashboard'}</span></div></div>
+    <div className="edition"><small>v{version || '0.2.0'}</small></div>
     {win && <div className="window-controls"><button title="Minimize" aria-label="Minimize window" onClick={() => win.minimize?.()}>—</button><button title="Maximize or restore" aria-label="Maximize or restore window" onClick={() => win.maximize?.()}>□</button><button title="Close" aria-label="Close application" onClick={() => win.close?.()}>×</button></div>}
   </header>
 }
@@ -69,17 +70,19 @@ export function Visualizer({ graph, playing, mode, onMode }) {
     let frame = 0, last = 0
     const analyser = graph?.analyser
     const values = new Uint8Array(analyser?.frequencyBinCount || 1024)
+    const colors = () => { const style = window.getComputedStyle(target); return name => style.getPropertyValue(`--polish-${name}`).trim() }
     const draw = time => {
+      const color = colors()
       const box = target.getBoundingClientRect(), dpr = window.devicePixelRatio || 1
       const w = Math.round(box.width * dpr), h = Math.round(box.height * dpr)
       if (target.width !== w || target.height !== h) { target.width = w; target.height = h }
       ctx.clearRect(0, 0, w, h)
-      ctx.strokeStyle = '#493019'; ctx.lineWidth = dpr
+      ctx.strokeStyle = color('line'); ctx.lineWidth = dpr
       for (let y = 1; y < 4; y++) { ctx.beginPath(); ctx.moveTo(0, h * y / 4); ctx.lineTo(w, h * y / 4); ctx.stroke() }
       if (!reduced && playing && analyser && mode !== 'off') {
         if (mode === 'waveform') {
           analyser.getByteTimeDomainData(values)
-          ctx.beginPath(); ctx.strokeStyle = '#ffb543'; ctx.lineWidth = 1.5 * dpr
+          ctx.beginPath(); ctx.strokeStyle = color('accent'); ctx.lineWidth = 1.5 * dpr
           for (let i = 0; i < values.length; i++) { const x = i / (values.length - 1) * w, y = values[i] / 255 * h; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y) }
           ctx.stroke()
         } else {
@@ -91,18 +94,20 @@ export function Visualizer({ graph, playing, mode, onMode }) {
             let level = 0
             for (let k = low; k < high; k++) level = Math.max(level, values[k] || 0)
             const bh = level / 255 * h * 0.9
-            ctx.fillStyle = '#e88a29'; ctx.fillRect(i * w / bars, h - bh, Math.max(1, w / bars - 3 * dpr), bh)
+            ctx.fillStyle = color('accent'); ctx.fillRect(i * w / bars, h - bh, Math.max(1, w / bars - 3 * dpr), bh)
           }
         }
       } else {
-        ctx.strokeStyle = '#936124'; ctx.beginPath(); ctx.moveTo(0, h - 3 * dpr); ctx.lineTo(w, h - 3 * dpr); ctx.stroke()
+        ctx.strokeStyle = color('boundary'); ctx.beginPath(); ctx.moveTo(0, h - 3 * dpr); ctx.lineTo(w, h - 3 * dpr); ctx.stroke()
       }
       if (playing && !reduced && mode !== 'off') frame = requestAnimationFrame(t => { if (t - last >= 32) { last = t; draw(t) } else frame = requestAnimationFrame(draw) })
     }
     draw(0)
     const resize = new ResizeObserver(() => { if (!playing || reduced || mode === 'off') draw(0) })
     resize.observe(target)
-    return () => { cancelAnimationFrame(frame); resize.disconnect() }
+    const appearance = new MutationObserver(() => { cancelAnimationFrame(frame); draw(0) })
+    appearance.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
+    return () => { cancelAnimationFrame(frame); resize.disconnect(); appearance.disconnect() }
   }, [graph, playing, reduced, mode])
   return <div className="visualizer"><canvas ref={canvas} role="img" aria-label={reduced ? 'Visualization paused for reduced motion' : `${mode} audio visualization`} /><div className="visualizer-caption"><span>{reduced ? 'REDUCED MOTION' : playing ? 'LIVE SIGNAL' : 'SIGNAL IDLE'}</span><button type="button" onClick={onMode} aria-label={`Visualization: ${mode}. Change mode`}>{mode.toUpperCase()}</button></div></div>
 }
@@ -138,16 +143,15 @@ export function NowPlaying({ player, available, retro = false, mode, onMode }) {
   const item = player.item
   const extra = supplementalMetadata(item)
   return <section className={`now-playing ${retro ? 'retro-deck' : 'panel'}`} aria-label="Now playing">
-    {retro ? <div className="deck-brand"><img src={lotus} alt="" /> RED LOTUS <small>HIGH FIDELITY / LOCAL AUDIO</small></div> : <SectionHeading aside={<span className="micro">{player.dsp.enabled ? 'DSP ON' : 'DIRECT'}</span>}>Now playing</SectionHeading>}
+    {!retro && <SectionHeading aside={<span className="micro">{player.dsp.enabled ? 'DSP ON' : 'DIRECT'}</span>}>Now playing</SectionHeading>}
     <div className="audio-display">
       <div className="display-topline"><span><i className={player.playing ? 'lit' : ''} /><span role="status">{player.loading ? 'BUFFERING' : player.playing ? 'PLAYING' : item ? 'PAUSED' : 'STANDBY'}</span></span><span>{item?.mime?.split('/')[1]?.toUpperCase() || 'LOCAL AUDIO'}</span></div>
-      <div className="track-display"><Artwork key={item?.id || 'standby'} item={item} /><div className="track-copy"><h1 title={item?.title || item?.name}>{item?.title || item?.name || 'Your next listening session.'}</h1><p>{item ? item.artist || 'Unknown artist' : 'Drop your music. Find your frequency.'}</p><small>{item ? item.album || 'Unknown album' : 'Local files & links · Cleared before playback'}</small>{extra && <small className="track-details">{extra}</small>}</div></div>
+      <div className="track-display"><Artwork key={item?.id || 'standby'} item={item} /><div className="track-copy"><h1 title={item?.title || item?.name}>{item?.title || item?.name || 'Choose a track'}</h1><p>{item ? item.artist || 'Unknown artist' : 'Add files or choose a track from your queue.'}</p><small>{item ? item.album || 'Unknown album' : 'Local files & links · Cleared before playback'}</small>{extra && <small className="track-details">{extra}</small>}</div></div>
       <Visualizer graph={player.graph} playing={player.playing} mode={mode} onMode={onMode} />
       <div className="seek-row"><time>{timeLabel(player.position)}</time><input type="range" aria-label="Playback position" aria-valuetext={`${spokenTime(player.position)} of ${spokenTime(player.duration || item?.duration_seconds)}`} min="0" max={player.duration || 1} step="0.1" value={Math.min(player.position, player.duration || 0)} disabled={!item || !player.duration} onChange={e => player.seek(Number(e.target.value))} /><time>{timeLabel(player.duration || item?.duration_seconds)}</time></div>
     </div>
     {player.error && <ViewState variant="error" role="status" icon="disc" title={VIEW_STATE_COPY.listening.playback.title} message={player.error} />}
     <div className="deck-controls"><Transport player={player} available={available} /><Volume player={player} rotary={retro} />{retro && <button type="button" className="text-button stop-button" onClick={() => { player.seek(0); player.stop().catch(player.showError) }} disabled={!item}><Icon name="stop" size={14} /> Stop</button>}</div>
-    {retro && <div className="deck-foot"><span>10 BAND / STEREO</span><span>RL—01</span></div>}
   </section>
 }
 

@@ -123,6 +123,7 @@ class MediaStore:
         if 'queued' not in {row['name'] for row in self._db.execute('PRAGMA table_info(media)')}:
             self._db.execute('ALTER TABLE media ADD COLUMN queued INTEGER NOT NULL DEFAULT 1')
         self._db.execute('CREATE TABLE IF NOT EXISTS playback_state (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)')
+        self._db.execute("CREATE TABLE IF NOT EXISTS ui_preferences (id INTEGER PRIMARY KEY CHECK(id=1), theme TEXT NOT NULL CHECK(theme IN ('light','dark')))")
         self._db.execute('''CREATE TABLE IF NOT EXISTS local_playlists (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, media_ids TEXT NOT NULL,
             revision INTEGER NOT NULL, position INTEGER NOT NULL)''')
@@ -135,6 +136,17 @@ class MediaStore:
             if record['status'] in ('queued', 'scanning', 'awaiting_permission'):
                 self.update(row['id'], status='needs_scan')
         self._recover_orphans()
+
+    def preferences(self, theme=None):
+        """Keep appearance independent of playback and the renderer's random port."""
+        with self._lock:
+            if theme is not None:
+                if theme not in ('light', 'dark'):
+                    raise MediaError('Unknown appearance')
+                self._db.execute('INSERT OR REPLACE INTO ui_preferences (id, theme) VALUES (1, ?)', (theme,))
+                self._db.commit()
+            row = self._db.execute('SELECT theme FROM ui_preferences WHERE id=1').fetchone()
+            return {'theme': row['theme'] if row else 'light'}
 
     def _recover_orphans(self):
         """Recover incomplete managed copies without evicting any queued artifact."""
