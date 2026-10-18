@@ -486,8 +486,11 @@ def _mpeg_frames(count: int) -> bytes:
     return (b"\xff\xfb\x90\x00" + b"\x00" * 413) * count
 
 
-@pytest.mark.parametrize("prefix", [ID3_EMPTY, b""])
-@pytest.mark.parametrize("filler", [b"\x00" * 2048, b"APETAGEX" + b"\x11" * 300, b"\x7f" * 60000])
+# Explicit ids: pytest publishes the current test id in an environment variable, and the default id
+# for a 60,000-byte parameter exceeds the 32,767-character limit Windows enforces on it.
+@pytest.mark.parametrize("prefix", [ID3_EMPTY, b""], ids=["after-id3", "bare"])
+@pytest.mark.parametrize("filler", [b"\x00" * 2048, b"APETAGEX" + b"\x11" * 300, b"\x7f" * 60000],
+                         ids=["zero-padding", "ape-tag", "long-junk"])
 def test_padding_or_junk_before_the_first_frame_is_tolerated(tmp_path: Path, prefix, filler):
     path = tmp_path / "padded.mp3"
     path.write_bytes(prefix + filler + _mpeg_frames(2))
