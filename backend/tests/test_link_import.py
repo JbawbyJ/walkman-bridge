@@ -151,6 +151,7 @@ class _FakeYoutubeDL:
         "webpage_url": "https://youtube.com/watch?v=dQw4w9WgXcQ",
         "artist": "Safe artist", "album": "Safe album", "genre": "Rock",
         "release_year": 2024, "track": "Safe track", "track_number": 7,
+        "album_artist": "Safe ensemble", "disc_number": 2,
     }
 
     def __init__(self, options):
@@ -224,6 +225,8 @@ def test_download_uses_locked_down_yt_dlp_and_returns_media(tmp_path, monkeypatc
     assert media.metadata["genre"] == "Rock"
     assert media.metadata["year"] == 2024
     assert media.metadata["track"] == 7
+    assert media.metadata["album_artist"] == "Safe ensemble"
+    assert media.metadata["disc"] == 2
     assert media.metadata["title"] == "Safe track"
     assert media.metadata["uploader"] == ""
     assert media.path.read_bytes() == b"data"

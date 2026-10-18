@@ -493,9 +493,11 @@ def _download_link_inprocess(
         "artist": bounded(info.get("artist") or info.get("creator")),
         "uploader": bounded(info.get("uploader")),
         "album": bounded(info.get("album")),
+        "album_artist": bounded(info.get("album_artist")),
         "genre": bounded(info.get("genre"), 128),
         "year": release_year,
         "track": info.get("track_number"),
+        "disc": info.get("disc_number"),
         "duration": info.get("duration"),
         "extension": extension,
     }

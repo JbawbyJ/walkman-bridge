@@ -191,7 +191,7 @@ def analyze_cleared_audio(src: Path) -> dict:
            '-protocol_whitelist', 'file,pipe', '-max_alloc', '67108864',
            '-i', str(src), '-map', '0:a:0', '-vn',
            '-af', 'ebur128=framelog=verbose:peak=true', '-f', 'null', '-',
-           '-map_metadata', '0', '-f', 'ffmetadata', 'pipe:1']
+           '-map', '0:a:0', '-c:a', 'copy', '-map_metadata', '0', '-f', 'ffmetadata', 'pipe:1']
     try:
         result = _run_bounded(cmd, stdout_limit=METADATA_LIMIT)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -200,7 +200,7 @@ def analyze_cleared_audio(src: Path) -> dict:
         raise AudioError('Audio format could not be decoded: ' + result.stderr[-700:])
     text = result.stderr
     try:
-        result = parse_ffmetadata(result.stdout)
+        result = parse_ffmetadata(result.stdout, include_audio_stream=True)
     except ValueError as exc:
         raise AudioError(str(exc)) from exc
     result['has_artwork'] = bool(re.search(r'^  Stream #0:\d+.*Video:.*\(attached pic\)',
