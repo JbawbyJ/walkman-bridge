@@ -272,7 +272,7 @@ test('smoke close deferral exits non-zero instead of hanging', async () => {
   assert.ok(Date.now() - started < 2000)
 })
 
-const DRAIN_NOTICE = 'Walkman Bridge is finishing a save to your Walkman and will close by itself.'
+const DRAIN_NOTICE = 'Walkman Bridge is finishing up and will close by itself.'
 
 test('forced close while the backend is busy destroys the window before the lease and waits out the write', async () => {
   let busy = true

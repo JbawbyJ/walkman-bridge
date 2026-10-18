@@ -26,7 +26,7 @@ const token = crypto.randomBytes(48).toString('base64url')
 let child, window, origin, broker, isolatedSession, cookieWrite
 let closing = false, allowClose = false, playbackReady = false
 let deviceWriteFinishing = false, drainNotice = null
-const drainNoticeBody = `${name} is finishing a save to your Walkman and will close by itself.`
+const drainNoticeBody = `${name} is finishing up and will close by itself.`
 const playbackReadyWaitMs = 3000
 const smokeReadyWaitMs = 20000
 let backendLost = false, expectedBackendExit = false, rendererGone = false
