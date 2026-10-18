@@ -69,7 +69,11 @@ public static partial class Protocol
     private static partial Regex HashPattern();
     [GeneratedRegex("access\\s+is\\s+denied|access\\s+denied|0x80070005", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex AccessDeniedPattern();
-    [GeneratedRegex("\\bthreat(?:s)?\\b.*\\b(?:found|detected)\\b|\\bfound\\s+[1-9]\\d*\\s+threat", RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant)]
+    // A detection is the explicit per-file line "Scanning <path> found N threats." The single-line
+    // phrase cannot be satisfied by a scanned path that merely contains the word "threat". MpCmdRun
+    // exit code 2 also covers "scanning errors" per Microsoft's documentation, so on its own it is a
+    // non-clearing error below, never a confirmed detection.
+    [GeneratedRegex("\\bfound\\s+[1-9]\\d*\\s+threats?\\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex ThreatPattern();
 
     public static void ValidateRequest(ScanRequest request, int helperPid)
@@ -97,14 +101,17 @@ public static partial class Protocol
         string reason;
         string code;
         string defenderState;
-        if (outcome.ExitCode == 2 || ThreatPattern().IsMatch(text))
+        if (ThreatPattern().IsMatch(text))
         {
             ok = false; state = "BLOCKED"; reason = "Microsoft Defender reported a threat";
             code = "defender_threat"; defenderState = "threat";
         }
         else if (outcome.ExitCode != 0 || AccessDeniedPattern().IsMatch(text))
         {
-            ok = false; state = "ERROR"; reason = $"Microsoft Defender elevated scan failed with code {outcome.ExitCode}";
+            ok = false; state = "ERROR";
+            reason = outcome.ExitCode == 2
+                ? "Microsoft Defender did not clear this file (exit code 2: threat, user action required or scanning error)"
+                : $"Microsoft Defender elevated scan failed with code {outcome.ExitCode}";
             code = "defender_scan_error"; defenderState = "error";
         }
         else if (status is null || !status.Complete)

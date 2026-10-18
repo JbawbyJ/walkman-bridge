@@ -42,6 +42,10 @@ class MediaBusyError(MediaError):
     pass
 
 
+class BlockedBytesRemoved(MediaError):
+    """Defender reported a threat and the managed bytes were deleted; only removal and re-import remain."""
+
+
 class PlaylistConflictError(MediaError):
     pass
 
@@ -151,6 +155,12 @@ class MediaStore:
                 if name not in retained and path.exists():
                     no_links(path, self.root)
                     path.unlink()
+        for media_id, record in known.items():
+            if any(info.get('purged') for info in record['artifacts'].values()):
+                try:
+                    self.retry_purges(media_id)
+                except (OSError, MediaError):
+                    pass  # still held or already gone; the next job retries
 
     @staticmethod
     def _id(value):
@@ -168,12 +178,93 @@ class MediaStore:
 
     def path(self, record, artifact='source'):
         media_id = self._id(record['id'])
-        name = record['artifacts'][artifact]['name']
-        if Path(name).name != name or ':' in name or '\\' in name:
-            raise MediaError('Invalid artifact name')
-        path = self.root / media_id / name
+        info = record['artifacts'][artifact]
+        if info.get('purged'):
+            raise BlockedBytesRemoved('Microsoft Defender reported a threat and the blocked bytes were removed '
+                                      'from the managed cache. Remove this item and import a clean copy.')
+        path = self.root / media_id / self._artifact_name(info)
         no_links(path, self.root)
         return path
+
+    @staticmethod
+    def _artifact_name(info):
+        name = info['name']
+        if Path(name).name != name or ':' in name or '\\' in name:
+            raise MediaError('Invalid artifact name')
+        return name
+
+    def purge_artifact(self, media_id, artifact):
+        """Refuse, then delete, the bytes of an artifact Defender reported as a threat.
+
+        The refusal (``purged``) is persisted before the unlink, so a crash in between still
+        refuses the bytes, and playback is pointed back at the source so no derivative of a purged
+        source can be streamed. The source entry remains, marked purged, so the item stays visibly
+        blocked and a rescan reports why. A derivative entry is dropped once its file is gone; if a
+        reader still holds the file (Windows share-read handle), the entry stays refused and the
+        unlink is retried by the next job and at startup.
+        """
+        with self._lock:
+            record = self.get(media_id)
+            info = record['artifacts'].get(artifact)
+            if info is None:
+                return record
+            if not info.get('purged'):
+                info['purged'] = True
+                changes = {}
+                if artifact == 'source' or record.get('playback') == artifact:
+                    changes.update(self._source_playback(record))
+                if artifact in ('source', 'artwork') and record.get('artwork_status') == 'ready':
+                    # Artwork decoded from a purged source is refused in the same atomic update.
+                    changes['artwork_status'] = 'failed'
+                record = self.update(media_id, artifacts=record['artifacts'], **changes)
+            path = self.root / self._id(media_id) / self._artifact_name(info)
+            if path.exists():
+                no_links(path, self.root)
+                path.unlink()
+            if artifact != 'source':
+                record['artifacts'].pop(artifact, None)
+                record = self.update(media_id, artifacts=record['artifacts'])
+            return record
+
+    def refuse_artifacts(self, media_id, artifacts=None):
+        """Persist the refusal of artifacts the moment Defender reports a threat, without touching files.
+
+        A threat on the source refuses every artifact (``artifacts=None``). Playback and artwork are
+        redirected in the same atomic update, so nothing is servable while the job finishes the rest
+        of its batch; ``purge_artifact`` deletes the bytes once no read lock is held.
+        """
+        with self._lock:
+            record = self.get(media_id)
+            names = list(record['artifacts']) if artifacts is None else [name for name in artifacts if name in record['artifacts']]
+            changes = {}
+            for name in names:
+                record['artifacts'][name]['purged'] = True
+                if name == 'source' or record.get('playback') == name:
+                    changes.update(self._source_playback(record))
+                if name in ('source', 'artwork') and record.get('artwork_status') == 'ready':
+                    changes['artwork_status'] = 'failed'
+            return self.update(media_id, artifacts=record['artifacts'], **changes)
+
+    def retry_purges(self, media_id):
+        """Finish an interrupted or held purge: every refused entry, and every derivative of a
+        refused source, is purged again; one file that is still held never blocks the others.
+        Returns the artifacts whose bytes are still held."""
+        record = self.get(media_id)
+        source_purged = record['artifacts']['source'].get('purged')
+        held = []
+        for artifact, info in list(record['artifacts'].items()):
+            if not (info.get('purged') or source_purged):
+                continue
+            try:
+                self.purge_artifact(media_id, artifact)
+            except OSError:
+                held.append(artifact)
+        return held
+
+    @staticmethod
+    def _source_playback(record):
+        suffix = Path(record['artifacts']['source']['name']).suffix.lower()
+        return dict(playback='source', mime=MIMES.get(suffix, 'application/octet-stream'))
 
     def queue(self):
         with self._lock:
@@ -335,7 +426,10 @@ class MediaStore:
     def public(self, record):
         result = {k: v for k, v in record.items() if k not in ('artifacts', 'playback', 'metadata_hints', 'metadata_overrides')}
         result['scan'] = public_scan(result.get('scan'))
-        if record.get('artwork_status') == 'ready':
+        artifacts = record.get('artifacts') or {}
+        refused = (artifacts.get('source', {}).get('purged') or artifacts.get('artwork', {}).get('purged')
+                   or (artifacts.get('source', {}).get('scan') or {}).get('reason_code') == 'defender_threat')
+        if record.get('artwork_status') == 'ready' and not refused:
             result['artwork_url'] = f'/api/media/{record["id"]}/artwork'
         return result
 

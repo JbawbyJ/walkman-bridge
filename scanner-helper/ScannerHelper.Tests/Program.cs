@@ -16,6 +16,7 @@ Run("clean result requires signature status", TestCleanRequiresStatus);
 Run("clean result rejects disabled or passive Defender", TestDisabledDefender);
 Run("trusted PowerShell and sanitized child environment", TestTrustedProcess);
 Run("batch limits and duplicate identities reject", TestBatchLimits);
+Run("threat verdict follows the detection line, not exit code 2", TestThreatClassification);
 Run("pipe ACL grants original client SID without broadening users", TestClientAcl);
 Run("scanner rejects arbitrary executable path", TestScannerPath);
 Run("scanner discovery ignores launch environment", TestScannerDiscovery);
@@ -27,7 +28,7 @@ if (failures.Count > 0)
     Console.Error.WriteLine(string.Join(Environment.NewLine, failures));
     return 1;
 }
-Console.WriteLine("ScannerHelper.Tests: 12 passed");
+Console.WriteLine("ScannerHelper.Tests: 13 passed");
 return 0;
 
 void Run(string name, Action test)
@@ -87,6 +88,20 @@ void TestBatchLimits()
     AssertThrows<SecurityException>(() => Protocol.ValidateBatch(new ScanBatch([request, request]), Environment.ProcessId));
     AssertThrows<SecurityException>(() => Protocol.ValidateBatch(new ScanBatch(Enumerable.Range(0, 201).Select(i => request with { RequestId = i.ToString() }).ToArray()), Environment.ProcessId));
     Protocol.ValidateBatch(new ScanBatch([request, request with { RequestId = "second" }]), Environment.ProcessId);
+}
+
+void TestThreatClassification()
+{
+    var request = new ScanRequest("r", new string('n', 32), new string('a', 32), "C:\\x", new string('a', 64), 1, Environment.ProcessId);
+    var status = new DefenderStatus("1", "2", "3", true, true, "Normal");
+    var detected = Protocol.CreateResult(request, Environment.ProcessId, new DefenderOutcome(2, "Scan finished.\nScanning C:\\x\\source.mp3 found 1 threats.", "", null), 1.0);
+    Assert(!detected.Ok && detected.State == "BLOCKED" && detected.ReasonCode == "defender_threat", "an explicit detection line must be a threat");
+    var listed = Protocol.CreateResult(request, Environment.ProcessId, new DefenderOutcome(0, "found 3 threats.", "", status), 1.0);
+    Assert(!listed.Ok && listed.ReasonCode == "defender_threat", "a detection line is a threat even with exit code 0");
+    var scanError = Protocol.CreateResult(request, Environment.ProcessId, new DefenderOutcome(2, "Scan starting...\nCmdTool: Failed with hr = 0x80070002", "", null), 1.0);
+    Assert(!scanError.Ok && scanError.State == "ERROR" && scanError.ReasonCode == "defender_scan_error", "exit code 2 without a detection line is a non-clearing error, not a threat");
+    var namedPath = Protocol.CreateResult(request, Environment.ProcessId, new DefenderOutcome(0, "Scanning C:\\Users\\Threat Lab\\cache\\source.mp3 found no threats.", "", status), 1.0);
+    Assert(namedPath.Ok && namedPath.ReasonCode == "clean", "a path containing the word threat must not read as a detection");
 }
 
 void TestClientAcl()

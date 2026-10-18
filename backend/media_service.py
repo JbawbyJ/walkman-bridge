@@ -4,7 +4,7 @@ import hashlib
 from contextlib import ExitStack
 from pathlib import Path
 from jobs import JobStatus
-from media_store import MAX_FILE, MediaError, locked_read, no_links
+from media_store import MAX_FILE, BlockedBytesRemoved, MediaError, locked_read, no_links
 from transcode import convert_managed, analyze_cleared_audio, extract_cleared_artwork
 from metadata import normalize_metadata, TRANSFER_TAGS
 from scan_bridge import ELEVATION_WAIT_SECONDS
@@ -37,7 +37,7 @@ class MediaService:
 
     def clear(self, media_id, artifact='source', job=None, batch_id=None):
         record = self.store.get(media_id)
-        path = self.store.path(record, artifact)
+        path = self.store.path(record, artifact)  # raises BlockedBytesRemoved for purged threat bytes
         previous = record['artifacts'][artifact].get('scan')
         if previous and self.scanner.clearance_valid(path, previous):
             if artifact == 'artwork':
@@ -89,6 +89,10 @@ class MediaService:
             self.store.update(media_id, artifacts=record['artifacts'], artwork_status=status)
         else:
             self.store.update(media_id, artifacts=record['artifacts'], status=status, scan=result)
+        if result.get('reason_code') == 'defender_threat':
+            # Refuse the bytes the moment Defender reports, before the rest of the batch is processed;
+            # purge_threats deletes them once every read lock has been released.
+            self.store.refuse_artifacts(media_id, None if artifact == 'source' else [artifact])
         if job:
             job.update_file(media_id, state=status, scan=result,
                             reason_code=result.get('reason_code'), detail=result.get('reason', ''))
@@ -132,8 +136,38 @@ class MediaService:
     def scan_failure(self, job, media_id, exc):
         row = next(row for row in job.to_dict()['files'] if row['file_id'] == media_id)
         if row['state'] not in ('blocked', 'failed'):
-            job.update_file(media_id, state='failed', detail=str(exc), reason_code='scan_failed')
-            self.store.update(media_id, status='failed')
+            blocked = isinstance(exc, BlockedBytesRemoved)
+            job.update_file(media_id, state='blocked' if blocked else 'failed', detail=str(exc),
+                            reason_code='defender_threat' if blocked else 'scan_failed')
+            self.store.update(media_id, status='blocked' if blocked else 'failed')
+
+    def purge_threats(self, job, ids):
+        """Delete managed bytes Defender reported as threats, once every read lock has been released.
+
+        Only explicit Defender threat verdicts are purged. A threat verdict on the source also removes
+        every derivative decoded from those bytes. Format rejections keep their bytes so a later gate
+        relaxation can clear them with a rescan.
+        """
+        def is_threat(info):
+            return (info.get('scan') or {}).get('reason_code') == 'defender_threat'
+        for media_id in ids:
+            try:
+                record = self.store.get(media_id)
+                source = record['artifacts']['source']
+                source_threat = is_threat(source) or source.get('purged')
+                for artifact, info in list(record['artifacts'].items()):
+                    if not (source_threat or is_threat(info) or info.get('purged')):
+                        continue
+                    present = (self.store.root / media_id / info['name']).exists()
+                    try:
+                        self.store.purge_artifact(media_id, artifact)
+                        if present:
+                            job.log(f'Removed blocked bytes ({artifact}) for {record["name"]}')
+                    except OSError as exc:
+                        job.log(f'Blocked bytes ({artifact}) for {record["name"]} are refused and still held; '
+                                f'removal is retried on the next job and at startup: {exc}')
+            except Exception as exc:  # a storage error on one item must not skip the others or fail the job
+                job.log(f'Could not remove blocked bytes for one item: {exc}')
 
     def derivative(self, media_id, kind, job, scan_output=True):
         record = self.store.get(media_id)
@@ -143,6 +177,14 @@ class MediaService:
             self.prepare_metadata(media_id)
             record = self.store.get(media_id)
             existing = record['artifacts'].get(kind)
+            if existing and existing.get('purged'):
+                # The source is clean; a refused derivative whose unlink a reader held is removed now
+                # and regenerated, instead of reporting the item as blocked.
+                try:
+                    record = self.store.purge_artifact(media_id, kind)
+                except OSError as exc:
+                    raise MediaError(f'The previous {kind} file is still in use; retry shortly') from exc
+                existing = record['artifacts'].get(kind)
             if existing and kind == 'transfer' and (existing.get('metadata_policy') != METADATA_POLICY
                     or existing.get('metadata_revision', 0) != record.get('metadata_revision', 0)):
                 # A previous release's untagged transfer.mp3 must not retain cache labels.
@@ -206,6 +248,9 @@ class MediaService:
             # Source clearance failure fails the import even when artwork is optional.
             self.clear(media_id)
             try:
+                if record['artifacts'].get('artwork', {}).get('purged'):
+                    # Retry a held removal; still held raises OSError and leaves the artwork failed.
+                    record = self.store.purge_artifact(media_id, 'artwork')
                 if 'artwork' not in record['artifacts']:
                     with self.store.reserve(1024 * 1024):
                         generated = extract_cleared_artwork(self.store.path(record), out)
@@ -306,6 +351,7 @@ class MediaService:
                     self.clear_group(playback_ids, 'playback', job)
             if kind in ('upload', 'transfer') and ready:
                 self.write_device(job, ready, ticket)
+            self.purge_threats(job, ids)
             rows = job.to_dict()['files']
             good = sum(row['state'] in ('ready', 'transferred') for row in rows)
             unknown = any(row['state'] == 'unknown' for row in rows)

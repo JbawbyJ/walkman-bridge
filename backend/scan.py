@@ -30,7 +30,14 @@ _EXT_FAMILY = {
 }
 _MP4_BRANDS = {b"M4A ", b"M4B ", b"M4P ", b"mp41", b"mp42", b"isom", b"iso2", b"mp71"}
 _DENIED = re.compile(r"access\s+is\s+denied|access\s+denied|requires?\s+elevation|error\s*740|0x80070005", re.I)
-_THREAT = re.compile(r"\bthreat(?:s)?\b.*\b(?:found|detected)\b|\bfound\s+[1-9]\d*\s+threat", re.I | re.S)
+# A detection is the explicit per-file verdict line "Scanning <path> found N threats." It is a
+# single-line phrase so that a scanned path containing the word "threat" can never make the clean
+# line "found no threats" read as a detection. MpCmdRun returns only 0 or 2 unless -ReturnHR is
+# given, and Microsoft documents 2 as "malware found and not remediated, user action required, or
+# scanning errors": exit code 2 is therefore a fail-closed "not cleared" signal, never a confirmed
+# detection on its own, and access-denied output is evaluated before it so elevation stays reachable.
+_THREAT = re.compile(r"\bfound\s+[1-9]\d*\s+threats?\b", re.I)
+_NOT_CLEARED_EXIT_CODE = 2
 
 
 class ScanError(RuntimeError):
@@ -63,17 +70,31 @@ _rows: deque[dict[str, Any]] = deque(maxlen=50)
 _counters = {"cleared": 0, "blocked": 0}
 _seq = 0
 
+# Consumption checks (every stream or artwork request, including each media-element range
+# request) re-verify content and live Defender status. The content hash is recomputed every
+# time: a stat-based shortcut (size, mtime, file index) is defeated by a same-size in-place
+# rewrite with the mtime restored, which a file's owner can always do. Only the Defender status
+# query is reused, for a few seconds, and only when it reported a complete, active engine. Scans
+# never use the cache: a new verdict always queries live.
+STATUS_CACHE_SECONDS = 5.0
+_status_cache: tuple[float, dict[str, Any]] | None = None
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
 
 def _utc_timestamp() -> float:
     return time.time()
 
 
 def reset_for_tests() -> None:
-    global _seq
+    global _seq, _status_cache
     with _lock:
         _rows.clear()
         _counters.update(cleared=0, blocked=0)
         _seq = 0
+        _status_cache = None
 
 
 def begin(target: str, proc: str = ENGINE) -> str:
@@ -184,7 +205,9 @@ def _scan(path: Path, pid: str, *, artwork=False) -> ScanResult:
     if _DENIED.search(blob) or invocation.returncode in {5, 740}:
         return _result(pid, ok=False, state="AWAITING_PERMISSION", reason="Microsoft Defender requires elevation for this file", reason_code="defender_elevation_required", defender_status="elevation_required", fingerprint=fingerprint)
     if invocation.returncode != 0:
-        return _result(pid, ok=False, state="ERROR", reason=f"Microsoft Defender exited with code {invocation.returncode}", reason_code="defender_scan_error", defender_status="error", fingerprint=fingerprint)
+        reason = ("Microsoft Defender did not clear this file (exit code 2: threat, user action required or scanning error)"
+                  if invocation.returncode == _NOT_CLEARED_EXIT_CODE else f"Microsoft Defender exited with code {invocation.returncode}")
+        return _result(pid, ok=False, state="ERROR", reason=reason, reason_code="defender_scan_error", defender_status="error", fingerprint=fingerprint)
 
     try:
         after = _fingerprint(path)
@@ -219,7 +242,7 @@ def clearance_valid(path: Path, record: dict[str, Any], *,
         digest, size = _fingerprint(Path(path))
         if digest != record.get("sha256") or size != int(record.get("size_bytes", -1)):
             return False
-        status = trusted_status if trusted_status is not None else _query_defender_status()
+        status = trusted_status if trusted_status is not None else _cached_defender_status()
         if not _status_complete(status):
             return False
         return all(
@@ -248,6 +271,25 @@ def _fingerprint(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
+def _cached_defender_status() -> dict[str, Any]:
+    """Live Defender status for consumption checks, reused for a few seconds.
+
+    Only a complete, active status is cached; unavailable or disabled results are re-queried
+    every time so recovery is immediate and a disabled engine is never remembered as active.
+    """
+    global _status_cache
+    now = _monotonic()
+    with _lock:
+        cached = _status_cache
+    if cached is not None and now - cached[0] <= STATUS_CACHE_SECONDS:
+        return dict(cached[1])
+    status = _query_defender_status()
+    if _status_complete(status):
+        with _lock:
+            _status_cache = (now, dict(status))
+    return status
+
+
 def _has_reparse_component(path: Path) -> bool:
     absolute = Path(os.path.abspath(path))
     for component in [absolute, *absolute.parents]:
@@ -267,30 +309,50 @@ def _synchsafe(raw: bytes) -> int:
     return (raw[0] << 21) | (raw[1] << 14) | (raw[2] << 7) | raw[3]
 
 
+MAX_ID3_TAGS = 4
+
+
 def _validate_audio_format(path: Path, size: int) -> str | None:
     try:
         with path.open("rb") as stream:
-            header = stream.read(10)
             offset = 0
-            if header.startswith(b"ID3"):
+            tags = 0
+            while True:
+                # ffmpeg reads every consecutive ID3v2 tag at the start of a file, so each one is
+                # validated here before the frame search below may skip past it.
+                stream.seek(offset)
+                header = stream.read(10)
+                if not header.startswith(b"ID3"):
+                    break
+                tags += 1
+                if tags > MAX_ID3_TAGS:
+                    return "too many consecutive ID3 tags"
                 if len(header) != 10 or header[3] not in (2, 3, 4):
                     return "invalid ID3 header"
                 tag_size = _synchsafe(header[6:10])
-                footer = 10 if header[5] & 0x10 else 0
+                # Only ID3v2.4 defines a footer; ffmpeg applies the 10 extra bytes for version 4
+                # alone, so a v2.2/v2.3 header with bit 0x10 set must not hide what follows it.
+                footer = 10 if header[3] == 4 and header[5] & 0x10 else 0
                 total = 10 + tag_size + footer
-                if tag_size > MAX_TAG_BYTES or total >= size:
+                if tag_size > MAX_TAG_BYTES or offset + total >= size:
                     return "truncated or oversized ID3 tag"
-                stream.seek(0)
+                stream.seek(offset)
                 tag = stream.read(total)
                 if len(tag) != total or _validate_id3(tag):
                     return "malformed ID3 frames"
-                offset = total
+                offset += total
             stream.seek(offset)
             body = stream.read(64)
+            kind = _detect_kind(body)
+            family = _EXT_FAMILY.get(path.suffix.lower())
+            if kind is None and family in ("mpeg", "aac"):
+                # Taggers commonly leave zero padding or stray bytes between the tag and the first
+                # frame. Accept the stream only when two consecutive valid frames follow within a
+                # bounded window; a lone sync word inside junk is not audio.
+                stream.seek(offset)
+                kind = _find_frame_sync(stream.read(SYNC_SEARCH_BYTES + MAX_FRAME_BYTES))
     except (OSError, ValueError) as exc:
         return f"audio header is unreadable: {exc}"
-    kind = _detect_kind(body)
-    family = _EXT_FAMILY.get(path.suffix.lower())
     if not kind or not family or not (family == kind or family == "aac" and kind in {"aac", "mp4"}):
         return "extension and audio container do not match"
     return None
@@ -312,39 +374,84 @@ def _validate_artwork_format(path: Path, size: int) -> str | None:
 
 
 def _validate_id3(tag: bytes) -> bool:
+    """Return True when the tag is malformed.
+
+    This runs on untrusted bytes before Defender, so it walks the frame list with an
+    integer cursor: no per-frame copy of the remaining body, linear in the tag size.
+    """
     version = tag[3]
-    body = tag[10:-10] if tag[5] & 0x10 else tag[10:]
-    if tag[5] & 0x40:
-        if len(body) < 4:
-            return True
+    body = tag[10:-10] if version == 4 and tag[5] & 0x10 else tag[10:]
+    extended = bool(tag[5] & 0x40)
+    if version in (2, 3) and tag[5] & 0x80:
+        # The ID3v2.2/2.3 specification unsynchronises the whole tag body (a zero byte inserted
+        # after every 0xFF), so frame headers describe the decoded bytes. ffmpeg instead walks
+        # frame headers over the raw bytes and decodes only each frame's contents. Both readings
+        # are validated and the tag is accepted only when they agree frame for frame, so ffmpeg
+        # cannot read a different frame sequence from this leading tag than the gate validated.
+        # (ID3 tags elsewhere, such as a WAV "id3 " chunk, are outside this gate's scope.)
+        by_specification = _id3_frames(body.replace(b"\xff\x00", b"\xff"), version, extended, decode_payloads=False)
+        by_ffmpeg = _id3_frames(body, version, extended, decode_payloads=True)
+        return by_specification is None or by_ffmpeg is None or by_specification != by_ffmpeg
+    return _id3_frames(body, version, extended, decode_payloads=False) is None
+
+
+def _id3_frames(body: bytes, version: int, extended: bool, *, decode_payloads: bool) -> list[tuple[bytes, bytes]] | None:
+    """Frame identifiers and contents of a tag body, or None when the frame list is malformed."""
+    end = len(body)
+    cursor = 0
+    if extended:
+        if version == 2 or end < 4:
+            # ID3v2.2 defines bit 6 as compression, which the specification says to ignore and
+            # ffmpeg does not skip; the gate rejects rather than walk a different frame list.
+            return None
         try:
-            ext_size = _synchsafe(body[:4]) if version == 4 else int.from_bytes(body[:4], "big") + 4
+            if version == 4:
+                ext_size = _synchsafe(body[:4])
+            else:
+                # The specification reads the ID3v2.3 extended-header size as a plain 32-bit
+                # integer; ffmpeg reads it with 7 bits per byte. Accept only sizes both read alike,
+                # which every legitimate value (6 or 10) satisfies, so the frame walk starts where
+                # ffmpeg's does and nothing can hide in the gap between the two readings.
+                ext_size = int.from_bytes(body[:4], "big") + 4
+                if _synchsafe(body[:4]) + 4 != ext_size:
+                    return None
         except ValueError:
-            return True
-        if ext_size < 4 or ext_size > len(body):
-            return True
-        body = body[ext_size:]
+            return None
+        if ext_size < 4 or ext_size > end:
+            return None
+        cursor = ext_size
     header_size = 6 if version == 2 else 10
     id_size = 3 if version == 2 else 4
-    while body:
-        if all(byte == 0 for byte in body):
-            return False
-        if len(body) < header_size:
-            return True
-        frame_id = body[:id_size]
+    frames: list[tuple[bytes, bytes]] = []
+    while cursor < end:
+        if body[cursor] == 0:
+            # Padding may only follow the last frame; any later non-zero byte is malformed.
+            return frames if body.count(0, cursor) == end - cursor else None
+        if end - cursor < header_size:
+            return None
+        frame_id = body[cursor:cursor + id_size]
         if not all(48 <= byte <= 57 or 65 <= byte <= 90 for byte in frame_id):
-            return True
+            return None
         try:
-            frame_size = int.from_bytes(body[3:6], "big") if version == 2 else (_synchsafe(body[4:8]) if version == 4 else int.from_bytes(body[4:8], "big"))
+            if version == 2:
+                frame_size = int.from_bytes(body[cursor + 3:cursor + 6], "big")
+            elif version == 4:
+                frame_size = _synchsafe(body[cursor + 4:cursor + 8])
+            else:
+                frame_size = int.from_bytes(body[cursor + 4:cursor + 8], "big")
         except ValueError:
-            return True
-        if frame_size <= 0 or header_size + frame_size > len(body):
-            return True
-        payload = body[header_size:header_size + frame_size]
+            return None
+        payload_start = cursor + header_size
+        if frame_size <= 0 or payload_start + frame_size > end:
+            return None
+        payload = body[payload_start:payload_start + frame_size]
+        if decode_payloads:
+            payload = payload.replace(b"\xff\x00", b"\xff")
         if frame_id in {b"APIC", b"PIC"} and not _valid_apic(payload, version):
-            return True
-        body = body[header_size + frame_size:]
-    return False
+            return None
+        frames.append((frame_id, payload))
+        cursor = payload_start + frame_size
+    return frames
 
 
 def _find_terminator(payload: bytes, start: int, encoding: int) -> int:
@@ -394,6 +501,60 @@ def _detect_kind(data: bytes) -> str | None:
         return "mp4"
     if len(data) >= 2 and data[0] == 0xFF and data[1] & 0xE0 == 0xE0:
         return "aac" if (data[1] >> 1) & 0x03 == 0 else "mpeg"
+    return None
+
+
+SYNC_SEARCH_BYTES = 64 * 1024
+MAX_FRAME_BYTES = 8192  # ADTS frames are at most 8191 bytes; MPEG audio frames are shorter.
+# Bitrates in kbps for bitrate indexes 1..14, keyed by (MPEG generation, layer bits).
+_MPEG_BITRATES_KBPS = {
+    (3, 3): (32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448),  # MPEG-1 Layer I
+    (3, 2): (32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384),     # MPEG-1 Layer II
+    (3, 1): (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),      # MPEG-1 Layer III
+    (2, 3): (32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256),     # MPEG-2/2.5 Layer I
+    (2, 2): (8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),          # MPEG-2/2.5 Layer II/III
+}
+# Sample rates keyed by the header's version bits: 3 = MPEG-1, 2 = MPEG-2, 0 = MPEG-2.5.
+_MPEG_SAMPLE_RATES = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000), 0: (11025, 12000, 8000)}
+
+
+def _mpeg_frame_length(header: bytes) -> int | None:
+    """Byte length of an MPEG audio frame from its header, or None when the header is invalid."""
+    if len(header) < 4 or header[0] != 0xFF or header[1] & 0xE0 != 0xE0:
+        return None
+    version, layer = (header[1] >> 3) & 0x03, (header[1] >> 1) & 0x03
+    bitrate_index, rate_index, padding = header[2] >> 4, (header[2] >> 2) & 0x03, (header[2] >> 1) & 0x01
+    if version == 1 or layer == 0 or bitrate_index in (0, 15) or rate_index == 3:
+        return None
+    table = _MPEG_BITRATES_KBPS[(3, layer) if version == 3 else (2, 3 if layer == 3 else 2)]
+    bitrate = table[bitrate_index - 1] * 1000
+    rate = _MPEG_SAMPLE_RATES[version][rate_index]
+    if layer == 3:
+        return (12 * bitrate // rate + padding) * 4
+    if layer == 1 and version != 3:
+        return 72 * bitrate // rate + padding
+    return 144 * bitrate // rate + padding
+
+
+def _adts_frame_length(header: bytes) -> int | None:
+    """Byte length of an ADTS AAC frame from its header, or None when the header is invalid."""
+    if len(header) < 7 or header[0] != 0xFF or header[1] & 0xF6 != 0xF0 or (header[2] >> 2) & 0x0F == 15:
+        return None
+    length = ((header[3] & 0x03) << 11) | (header[4] << 3) | (header[5] >> 5)
+    return length if length >= 7 else None
+
+
+def _find_frame_sync(data: bytes) -> str | None:
+    """Kind of the first two consecutive valid MPEG or ADTS frames in the window, else None."""
+    limit = min(len(data), SYNC_SEARCH_BYTES)
+    index = data.find(b"\xff")
+    while 0 <= index < limit:
+        if index + 7 <= len(data) and data[index + 1] & 0xE0 == 0xE0:
+            for kind, measure in (("mpeg", _mpeg_frame_length), ("aac", _adts_frame_length)):
+                length = measure(data[index:index + 7])
+                if length and measure(data[index + length:index + length + 7]) is not None:
+                    return kind
+        index = data.find(b"\xff", index + 1)
     return None
 
 
