@@ -37,6 +37,10 @@ function Test-SmokeStartedBefore($LiveStart, $SmokeStart) {
     # Process.StartTime can sit a fraction of a millisecond after Win32_Process.CreationDate.
     return $live -lt $smoke.AddMilliseconds(-1)
 }
+function Get-SmokeLaunchInstant($Process) {
+    try { return $Process.StartTime.ToUniversalTime() }
+    catch { throw "Could not record the smoke start time; the owned-process sweep would be skipped after the product exits. $($_.Exception.Message)" }
+}
 function Copy-OwnedProcess($Item) {
     [pscustomobject]@{
         Name = [string]$Item.Name
@@ -79,7 +83,7 @@ function Hide-SmokePath([string]$Text) {
         $segments = @([string]$pair.Path -split '[\\/]+' | Where-Object { $_ })
         if (-not $segments) { continue }
         $body = (($segments | ForEach-Object { [regex]::Escape($_) }) -join '(?:\\\\|[\\/])')
-        $pattern = $body + '(?=(?:\.(?=$|\s))|(?![A-Za-z0-9_.~-]))'
+        $pattern = $body + '(?=(?:\.(?=$|\s|["),]))|(?![A-Za-z0-9_.~-]))'
         $Text = [regex]::Replace($Text, $pattern, [string]$pair.Token, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     }
     return $Text
@@ -100,28 +104,31 @@ function Get-SmokeProcesses {
     $found = [System.Collections.Generic.List[object]]::new()
     $seen = @{}
     $pending = [System.Collections.Generic.Queue[string]]::new()
-    if ($RootProcessId -gt 0) { $pending.Enqueue([string]$RootProcessId) }
-    while ($pending.Count -gt 0) {
-        $current = $pending.Dequeue()
-        if ($seen.ContainsKey($current)) { continue }
-        $seen[$current] = $true
-        $keep = $false
-        if ($byId.ContainsKey($current)) {
-            $copied = Copy-OwnedProcess $byId[$current]
-            $keep = $true
-            if ([int]$copied.ProcessId -ne $RootProcessId) {
-                $parentKey = [string][int]$copied.ParentProcessId
-                $parentStart = $null
-                if ($byId.ContainsKey($parentKey)) { $parentStart = ConvertTo-SmokeInstant $byId[$parentKey].CreationDate }
-                # A reused PID is older than its supposed parent. Real children start with or after the parent.
-                if (-not $parentStart -or -not $copied.CreationDate -or ($copied.CreationDate -lt $parentStart)) { $keep = $false }
+    $walkOwned = {
+        while ($pending.Count -gt 0) {
+            $current = $pending.Dequeue()
+            if ($seen.ContainsKey($current)) { continue }
+            $seen[$current] = $true
+            $keep = $false
+            if ($byId.ContainsKey($current)) {
+                $copied = Copy-OwnedProcess $byId[$current]
+                $keep = $true
+                if ([int]$copied.ProcessId -ne $RootProcessId) {
+                    $parentKey = [string][int]$copied.ParentProcessId
+                    $parentStart = $null
+                    if ($byId.ContainsKey($parentKey)) { $parentStart = ConvertTo-SmokeInstant $byId[$parentKey].CreationDate }
+                    # A reused PID is older than its supposed parent. Real children start with or after the parent.
+                    if (-not $parentStart -or -not $copied.CreationDate -or ($copied.CreationDate -lt $parentStart)) { $keep = $false }
+                }
+                if ($keep) { [void]$found.Add($copied) }
             }
-            if ($keep) { [void]$found.Add($copied) }
-        }
-        if ($keep -and $childrenOf.ContainsKey($current)) {
-            foreach ($child in $childrenOf[$current]) { $pending.Enqueue([string][int]$child.ProcessId) }
+            if ($keep -and $childrenOf.ContainsKey($current)) {
+                foreach ($child in $childrenOf[$current]) { $pending.Enqueue([string][int]$child.ProcessId) }
+            }
         }
     }
+    if ($RootProcessId -gt 0) { $pending.Enqueue([string]$RootProcessId) }
+    & $walkOwned
     $smokeStart = ConvertTo-SmokeInstant $SmokeStart
     if (-not $smokeStart -and $RootProcessId -gt 0 -and $byId.ContainsKey([string]$RootProcessId)) {
         $smokeStart = ConvertTo-SmokeInstant $byId[[string]$RootProcessId].CreationDate
@@ -137,8 +144,12 @@ function Get-SmokeProcesses {
             $itemStart = ConvertTo-SmokeInstant $item.CreationDate
             if ($ownedHit -and $itemStart -and -not (Test-SmokeStartedBefore $itemStart $smokeStart)) {
                 [void]$found.Add((Copy-OwnedProcess $item)); $seen[$idKey] = $true
+                if ($childrenOf.ContainsKey($idKey)) {
+                    foreach ($child in $childrenOf[$idKey]) { $pending.Enqueue([string][int]$child.ProcessId) }
+                }
             }
         }
+        & $walkOwned
     }
     return @($found | Where-Object { [int]$_.ProcessId -gt 0 -and [int]$_.ProcessId -ne $PID })
 }
@@ -313,7 +324,7 @@ try {
     if (-not (Test-Path -LiteralPath $AppPath)) { throw 'Installer did not create the expected executable' }
     $Process = Start-Process -FilePath $AppPath -ArgumentList '--smoke' -WindowStyle Hidden -PassThru
     $null = $Process.Handle
-    try { $script:SmokeStart = $Process.StartTime.ToUniversalTime() } catch { $script:SmokeStart = $null }
+    $script:SmokeStart = Get-SmokeLaunchInstant $Process
     $smokeExited = $Process.WaitForExit(120000)
     if ($smokeExited) { $Process.WaitForExit(); $Process.Refresh() }
     $script:GraceConsumed = $true

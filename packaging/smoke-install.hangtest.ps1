@@ -59,6 +59,9 @@ try {
     Assert-SmokeRedaction 'C:\Users\runneradmin' '<USERPROFILE>'
     Assert-SmokeRedaction 'Finished at C:\Users\runneradmin.' 'Finished at <USERPROFILE>.'
     Assert-SmokeRedaction 'Finished at C:\Users\runneradmin. Next' 'Finished at <USERPROFILE>. Next'
+    Assert-SmokeRedaction 'C:\Users\runneradmin."' '<USERPROFILE>."'
+    Assert-SmokeRedaction 'C:\Users\runneradmin.)' '<USERPROFILE>.)'
+    Assert-SmokeRedaction 'C:\Users\runneradmin.,' '<USERPROFILE>.,'
     Assert-SmokeRedaction 'C:\Users\runneradmin.txt' 'C:\Users\runneradmin.txt'
     Assert-SmokeRedaction 'C:\\Users\\runneradmin\\walkman-bridge\\src' '<REPO>\\src'
     Assert-SmokeRedaction 'C:\\Users\\runneradmin\\AppData' '<USERPROFILE>\\AppData'
@@ -93,13 +96,24 @@ try {
     $script:SmokeShortPathOverride = $null
     $unusedShort = Get-SmokeShortPath 'C:\no\such\smoke-short\path'
     if ($unusedShort) { throw "missing folder returned a short path: $unusedShort" }
+    $selfStart = Get-SmokeLaunchInstant (Get-Process -Id $PID)
+    if ($selfStart -isnot [datetime]) { throw 'A readable process did not produce a smoke start time' }
+    $missingStart = New-Object psobject
+    $missingStart | Add-Member -MemberType ScriptProperty -Name StartTime -Value { throw 'process has exited' }
+    $startFailed = $false
+    try { Get-SmokeLaunchInstant $missingStart } catch {
+        $startFailed = $true
+        if ($_.Exception.Message -notlike '*Could not record the smoke start time*') { throw }
+    }
+    if (-not $startFailed) { throw 'A missing smoke start time was accepted' }
 } finally {
     $Repo = $savedRepo
     $script:SmokeShortPathOverride = $null
     if ($null -eq $savedProfile) { Remove-Item Env:USERPROFILE -ErrorAction SilentlyContinue } else { $env:USERPROFILE = $savedProfile }
     if ($proofPath -and (Test-Path -LiteralPath $proofPath)) { Remove-Item -LiteralPath $proofPath -Force -ErrorAction SilentlyContinue }
 }
-Write-Host 'Redaction cases passed: space, double quote, single quote, semicolon, comma, close paren, equals, backslash, forward slash, end of string, sentence-final dot, runner versus runneradmin, case, mixed slash, longer path, 8.3 short path, JSON escapes, result.json, success line.'
+Write-Host 'Redaction cases passed: space, double quote, single quote, semicolon, comma, close paren, equals, backslash, forward slash, end of string, sentence-final dot, sentence dot before quote paren and comma, runner versus runneradmin, case, mixed slash, longer path, 8.3 short path, JSON escapes, result.json, success line.'
+Write-Host 'Smoke start recording failed closed when StartTime threw.'
 
 if (-not (Get-Command Get-CimInstance -ErrorAction SilentlyContinue)) {
     Write-Host 'Win32_Process/CIM is not available; hang cleanup cases were not exercised here.'
@@ -118,10 +132,15 @@ $scratch = Join-Path ([IO.Path]::GetTempPath()) ("smoke-unrelated-" + [guid]::Ne
 $unrelated = $null
 $parent = $null
 $exitParent = $null
+$nestParent = $null
 $childId = 0
 $childStart = $null
 $lingerId = 0
 $lingerStart = $null
+$nestChildId = 0
+$nestChildStart = $null
+$grandId = 0
+$grandStart = $null
 try {
     New-Item -ItemType Directory -Force -Path $scratch,$Run | Out-Null
     $unrelatedScript = Join-Path $scratch 'sleep.ps1'
@@ -243,13 +262,88 @@ Set-Content -LiteralPath "$lingerPidFile" -Value `$child.Id
     if ($text -notlike '*after 2s shutdown grace*') { throw "Linger message did not report the 2s grace:`n$text" }
     if ($ShutdownGraceSeconds -ne 45) { throw "Installed smoke grace changed from 45 to $ShutdownGraceSeconds" }
     Write-Host "Linger cleanup test passed: parent $($exitParent.Id) exited, killed child $lingerId, left unrelated $($unrelated.Id) running."
+
+    $grandScript = Join-Path $scratch 'grand.ps1'
+    $nestScript = Join-Path $Run 'nest-child.ps1'
+    $nestParentScript = Join-Path $Run 'nest-parent.ps1'
+    $nestPidFile = Join-Path $Run 'nest-child.pid'
+    $grandPidFile = Join-Path $Run 'grand.pid'
+    Set-Content -LiteralPath $grandScript -Encoding utf8 "while (`$true) { Start-Sleep -Seconds 30 }`n"
+    @"
+`$grandStart = @{ FilePath = "$pwsh"; ArgumentList = @('-NoProfile','-File', "$grandScript"); PassThru = `$true }
+if (`$IsWindows) { `$grandStart.WindowStyle = 'Hidden' }
+`$grand = Start-Process @grandStart
+Set-Content -LiteralPath "$grandPidFile" -Value `$grand.Id
+while (`$true) { Start-Sleep -Seconds 30 }
+"@ | Set-Content -LiteralPath $nestScript -Encoding utf8
+    @"
+`$childStart = @{ FilePath = "$pwsh"; ArgumentList = @('-NoProfile','-File', "$nestScript", "$Run"); PassThru = `$true }
+if (`$IsWindows) { `$childStart.WindowStyle = 'Hidden' }
+`$child = Start-Process @childStart
+Set-Content -LiteralPath "$nestPidFile" -Value `$child.Id
+"@ | Set-Content -LiteralPath $nestParentScript -Encoding utf8
+    $nestParent = Start-HangProcess @('-NoProfile','-File', $nestParentScript)
+    try { $nestSmokeStart = $nestParent.StartTime.ToUniversalTime() } catch { $nestSmokeStart = $null }
+    if (-not $nestSmokeStart) { throw 'Could not record the nested smoke start time' }
+    $nestText = ''
+    $grandText = ''
+    $deadline = [datetime]::UtcNow.AddSeconds(20)
+    do {
+        try { $nestParent.Refresh() } catch { }
+        if (Test-Path -LiteralPath $nestPidFile) {
+            $nestText = (Get-Content -LiteralPath $nestPidFile -Raw -ErrorAction SilentlyContinue)
+            if ($nestText) { $nestText = $nestText.Trim() }
+        }
+        if (Test-Path -LiteralPath $grandPidFile) {
+            $grandText = (Get-Content -LiteralPath $grandPidFile -Raw -ErrorAction SilentlyContinue)
+            if ($grandText) { $grandText = $grandText.Trim() }
+        }
+        if ($nestText -and $grandText -and $nestParent.HasExited) { break }
+        if ([datetime]::UtcNow -ge $deadline) { throw "Nested grandchild did not outlive parent $($nestParent.Id); child '$nestText' grand '$grandText'" }
+        Start-Sleep -Seconds 1
+    } while ($true)
+    $nestChildId = [int]$nestText
+    $grandId = [int]$grandText
+    try { $nestChildStart = (Get-Process -Id $nestChildId -ErrorAction Stop).StartTime.ToUniversalTime() } catch { $nestChildStart = $null }
+    try { $grandStart = (Get-Process -Id $grandId -ErrorAction Stop).StartTime.ToUniversalTime() } catch { $grandStart = $null }
+    $Log = Join-Path $Run 'nest.log'
+    @("log $Repo", "log $env:USERPROFILE") | Set-Content -LiteralPath $Log -Encoding utf8
+    $script:DiagnosticsWritten = $false
+    $script:HangRecorded = $false
+    $script:SmokeGraceSeconds = $null
+    $captured = & {
+        try {
+            $cleared = Wait-SmokeShutdown -Process $nestParent -OwnedPath $Run -GraceSeconds 2 -SmokeStart $nestSmokeStart
+            if ($cleared) { throw 'A grandchild without the run directory was treated as a clear tree after the parent exited.' }
+            Publish-SmokeHang -Process $nestParent -SmokeStart $nestSmokeStart
+            'HANG_RESULT pass'
+        } catch {
+            "HANG_RESULT fail: $($_.Exception.Message)"
+        }
+    } *>&1
+    $text = Format-HangCapture $captured
+    Write-Host $text
+    try { $unrelated.Refresh() } catch { }
+    $nestChild = Get-Process -Id $nestChildId -ErrorAction SilentlyContinue
+    $grand = Get-Process -Id $grandId -ErrorAction SilentlyContinue
+    if ($nestChild -and -not $nestChild.HasExited) { throw "Nested child $nestChildId was not killed" }
+    if ($grand -and -not $grand.HasExited) { throw "Grandchild $grandId was not killed" }
+    if ($unrelated.HasExited) { throw "Unrelated process $($unrelated.Id) was killed after the nested parent exited" }
+    $grandLines = @($text -split "`n" | Where-Object { $_ -match "pid=$grandId parent=" })
+    if (-not $grandLines) { throw "Diagnostics omitted grandchild $grandId`n$text" }
+    if (($grandLines -join "`n") -like '*hang-selftest*') { throw "Grandchild command line contained the run directory: $($grandLines -join '`n')" }
+    if ($text -notlike '*HANG_RESULT fail:*' -or $text -like '*HANG_RESULT pass*') { throw "Nested cleanup was treated as a pass:`n$text" }
+    if ($text -notlike '*remains running*') { throw "Nested cleanup did not report that the product remains running:`n$text" }
+    Write-Host "Nest cleanup test passed: parent $($nestParent.Id) exited, killed child $nestChildId and grandchild $grandId, left unrelated $($unrelated.Id) running."
 } finally {
-    foreach ($proc in @($parent, $exitParent, $unrelated)) {
+    foreach ($proc in @($parent, $exitParent, $nestParent, $unrelated)) {
         if ($proc) { try { $proc.Refresh(); if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } } catch { } }
     }
     foreach ($tracked in @(
         @{ Id = $childId; Start = $childStart },
-        @{ Id = $lingerId; Start = $lingerStart }
+        @{ Id = $lingerId; Start = $lingerStart },
+        @{ Id = $nestChildId; Start = $nestChildStart },
+        @{ Id = $grandId; Start = $grandStart }
     )) {
         if (-not $tracked.Id) { continue }
         $live = Get-Process -Id $tracked.Id -ErrorAction SilentlyContinue
