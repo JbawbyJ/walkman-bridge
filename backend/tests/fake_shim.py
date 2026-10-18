@@ -17,6 +17,22 @@ def emit(obj: dict) -> None:
     print(json.dumps(obj), flush=True)
 
 
+def emit_line(line: str) -> None:
+    """Print one confirmed HeadlessCli line with its bytes unchanged."""
+    print(line, flush=True)
+
+
+# jsymphonic #4 @ ba26514. Compact JSON, key order included. Do not reformat.
+LOCKED_FATAL_LINE = '{"event":"fatal","message":"Device file is locked","code":"DEVICE_FILE_LOCKED","path":"OMGAUDIO/10F00/10000001.OMA"}'
+READ_ONLY_FATAL_LINE = '{"event":"fatal","message":"Device file is read-only","code":"DEVICE_FILE_READ_ONLY","path":"OMGAUDIO/10F00/10000001.OMA"}'
+# jsymphonic #4 @ 9d96537. playlist-create, playlist-update, playlist-delete, and playlist-repair emit this too.
+ROLLBACK_FATAL_LINE = '{"event":"fatal","message":"Database update failed; incomplete recovery requires a verified backup","code":"DEVICE_ROLLBACK_FAILED"}'
+# jsymphonic #4 @ 979b355. Compact JSON, key order included. Do not reformat.
+PROBE_RESTORE_FATAL_LINE = '{"event":"fatal","message":"Device file probe could not be restored","code":"DEVICE_PROBE_RESTORE_FAILED","path":"OMGAUDIO/10F00/10000001.OMA","probe_path":"OMGAUDIO/10F00/10000001.OMA.jsymphonic-probe"}'
+PROBE_CONFLICT_FATAL_LINE = '{"event":"fatal","message":"Device file probe conflicts with the track","code":"DEVICE_PROBE_CONFLICT","path":"OMGAUDIO/10F00/10000001.OMA","probe_path":"OMGAUDIO/10F00/10000001.OMA.jsymphonic-probe"}'
+PROBE_PENDING_WARNING_LINE = '{"event":"warning","code":"DEVICE_PROBE_PENDING","path":"OMGAUDIO/10F00/10000001.OMA","probe_path":"OMGAUDIO/10F00/10000001.OMA.jsymphonic-probe"}'
+
+
 def main() -> int:
     scenario = sys.argv[1]
     args = sys.argv[2:]
@@ -129,6 +145,121 @@ def main() -> int:
     if scenario == "echo_args":
         emit({"event": "args", "argv": args})
         return 0
+
+    if scenario == "playlist_inspect_committed":
+        # files on playlistJournal are coverage. Ids and the done line are not.
+        emit({"event": "playlistJournal", "state": "committed",
+              "files": ["01TREE22.DAT", "10F00/10000001.OMA", "tree", "info"],
+              "playlistIds": ["4"], "trackIds": ["11", "1"], "message": "uncommitted discarded"})
+        emit({"event": "done", "state": "uncommitted", "outcome": "discarded",
+              "files": ["ignored.mp3"]})
+        return 0
+
+    if scenario == "playlist_inspect_uncommitted":
+        emit({"event": "playlistJournal", "state": "uncommitted", "message": "committed",
+              "files": "OMGAUDIO/10F00/1000.mp3"})
+        emit({"event": "done", "state": "none", "files": ["ignored.mp3"]})
+        return 0
+
+    if scenario == "playlist_inspect_none":
+        emit({"event": "playlistJournal", "state": "none", "message": "committed journal",
+              "files": []})
+        emit({"event": "done", "state": "committed"})
+        return 0
+
+    if scenario == "playlist_inspect_missing":
+        # Success with no playlistJournal. Message text is not a state.
+        emit({"event": "done", "message": "state committed uncommitted none",
+              "files": ["OMGAUDIO/10F00/1000.mp3"], "state": "committed"})
+        return 0
+
+    if scenario == "playlist_inspect_unknown":
+        emit({"event": "step", "state": "finished", "message": "committed"})
+        emit({"event": "playlistJournal", "state": "finished", "message": "committed",
+              "files": [1]})
+        emit({"event": "done", "state": "committed", "files": ["OMGAUDIO/10F00/1000.mp3"]})
+        return 0
+
+    if scenario == "playlist_recover_rolled_forward":
+        emit({"event": "playlistJournal", "state": "committed", "outcome": "rolled_forward",
+              "message": "discarded"})
+        emit({"event": "done", "outcome": "discarded", "state": "none"})
+        return 0
+
+    if scenario == "playlist_recover_discarded":
+        emit({"event": "playlistJournal", "state": "uncommitted", "outcome": "discarded",
+              "message": "rolled_forward"})
+        emit({"event": "done", "outcome": "rolled_forward"})
+        return 0
+
+    if scenario == "playlist_recover_none":
+        emit({"event": "playlistJournal", "outcome": "none", "message": "rolled_forward"})
+        emit({"event": "done", "outcome": "discarded"})
+        return 0
+
+    if scenario == "playlist_recover_missing":
+        emit({"event": "done", "message": "outcome rolled_forward discarded none",
+              "outcome": "rolled_forward"})
+        return 0
+
+    if scenario == "playlist_recover_unknown":
+        emit({"event": "playlistJournal", "outcome": "committed", "message": "rolled_forward"})
+        emit({"event": "done", "outcome": "rolled_forward"})
+        return 0
+
+    if scenario == "playlist_repair_zero":
+        emit({"event": "playlistRepair", "prunedCount": 0, "prunedTrackIds": [], "playlistIds": [],
+              "message": "refused because of an empty mount"})
+        emit({"event": "done"})
+        return 0
+
+    if scenario == "playlist_repair_some":
+        # prunedCount counts member references and can exceed the id list.
+        # Summary ids are numbers. The following playlist row uses strings.
+        emit({"event": "playlistRepair", "prunedCount": 2, "prunedTrackIds": [3], "playlistIds": [1]})
+        emit({"event": "playlist", "id": "1", "name": "Keep", "trackIds": ["1"]})
+        emit({"event": "done", "prunedTrackIds": [9], "playlistIds": [4]})
+        return 0
+
+    if scenario == "playlist_repair_missing":
+        emit({"event": "done", "message": "pruned zero tracks", "prunedCount": 0,
+              "prunedTrackIds": [3], "playlistIds": [1]})
+        return 0
+
+    if scenario == "playlist_repair_empty_mount":
+        emit({"event": "scan", "message": "looking at the mount"})
+        emit({"event": "fatal", "message": "Playlist repair refused: library is not loaded",
+              "code": "PLAYLIST_LIBRARY_NOT_LOADED"})
+        return 1
+
+    if scenario == "playlist_file_locked":
+        emit_line(LOCKED_FATAL_LINE)
+        return 1
+
+    if scenario == "playlist_file_read_only":
+        emit_line(READ_ONLY_FATAL_LINE)
+        return 1
+
+    if scenario == "playlist_rollback_failed":
+        emit_line(ROLLBACK_FATAL_LINE)
+        return 1
+
+    if scenario == "playlist_probe_restore_failed":
+        emit_line(PROBE_RESTORE_FATAL_LINE)
+        return 1
+
+    if scenario == "playlist_probe_conflict":
+        emit_line(PROBE_CONFLICT_FATAL_LINE)
+        return 1
+
+    if scenario == "device_probe_pending":
+        emit_line(PROBE_PENDING_WARNING_LINE)
+        return 0
+
+    if scenario == "playlist_fatal_nested_code":
+        emit({"event": "fatal", "message": "PLAYLIST_REF_MISSING",
+              "details": {"code": "PLAYLIST_JOURNAL_PENDING"}})
+        return 1
 
     print(f"unknown scenario {scenario}", file=sys.stderr)
     return 2

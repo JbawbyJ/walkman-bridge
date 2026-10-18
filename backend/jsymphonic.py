@@ -66,6 +66,26 @@ class FatalCode(enum.StrEnum):
     PLAYLIST_JOURNAL_PENDING: a leftover .jsymphonic-playlist-transaction
     journal blocks reads and writes.
     PLAYLIST_SLOTS_EXHAUSTED: all 2048 lifetime playlist slots are used.
+    PLAYLIST_LIBRARY_NOT_LOADED: playlist repair refused because the mount
+    is empty or the library is not loaded. Nothing was written.
+    DEVICE_FILE_LOCKED: a device file is locked. On recover during
+    roll-forward the save may already be committed and the journal still
+    pending, so that endpoint reconciles. Every other write leaves the
+    previous snapshot in place and leaves no journal. The fatal event
+    carries a top-level `path`, an opaque string relative to the mount.
+    It is copied unchanged and is never joined or reformatted.
+    DEVICE_FILE_READ_ONLY: a device file is read-only. Recover treats it
+    like the locked roll-forward case. Every other write is the pre-write
+    rename probe and writes nothing. It carries the same opaque
+    mount-relative `path` as DEVICE_FILE_LOCKED.
+    DEVICE_ROLLBACK_FAILED: rollback did not restore a known snapshot, so
+    the device state is uncertain. playlist-create, playlist-update,
+    playlist-delete, and playlist-repair keep the journal the same way
+    add and del do (jsymphonic #4 @ 9d96537).
+    DEVICE_PROBE_RESTORE_FAILED: a rename probe could not be restored.
+    The device is uncertain on every endpoint (jsymphonic #4 @ 979b355).
+    DEVICE_PROBE_CONFLICT: the probe copy and the track differ. The
+    device is uncertain on every endpoint. Nothing is renamed to resolve it.
 
     Any other fatal omits `code`. Missing, non-string, and unrecognized
     values are generic (None). Message text is never parsed for a code.
@@ -75,6 +95,12 @@ class FatalCode(enum.StrEnum):
     PLAYLIST_REF_MISSING = "PLAYLIST_REF_MISSING"
     PLAYLIST_JOURNAL_PENDING = "PLAYLIST_JOURNAL_PENDING"
     PLAYLIST_SLOTS_EXHAUSTED = "PLAYLIST_SLOTS_EXHAUSTED"
+    PLAYLIST_LIBRARY_NOT_LOADED = "PLAYLIST_LIBRARY_NOT_LOADED"
+    DEVICE_FILE_LOCKED = "DEVICE_FILE_LOCKED"
+    DEVICE_FILE_READ_ONLY = "DEVICE_FILE_READ_ONLY"
+    DEVICE_ROLLBACK_FAILED = "DEVICE_ROLLBACK_FAILED"
+    DEVICE_PROBE_RESTORE_FAILED = "DEVICE_PROBE_RESTORE_FAILED"
+    DEVICE_PROBE_CONFLICT = "DEVICE_PROBE_CONFLICT"
 
 
 def normalize_fatal_code(value) -> str | None:
@@ -94,14 +120,96 @@ def fatal_code_of(exc) -> str | None:
     return normalize_fatal_code(getattr(exc, "code", None))
 
 
+def fatal_path_of(exc) -> str | None:
+    """Top-level fatal `path` when it is a string, else None.
+
+    Message text and nested objects are not a path.
+    """
+    path = getattr(exc, "path", None)
+    return path if isinstance(path, str) else None
+
+
+def fatal_probe_path_of(exc) -> str | None:
+    """Top-level fatal `probe_path` when it is a string, else None."""
+    path = getattr(exc, "probe_path", None)
+    return path if isinstance(path, str) else None
+
+
+def _string_path(value):
+    return value if isinstance(value, str) else None
+
+
+def _fatal_needs_reconcile(mutating: bool, code) -> bool:
+    """Definite non-writes stay false. Rollback and probe fatals stay uncertain."""
+    normalized = normalize_fatal_code(code)
+    if normalized in {FatalCode.DEVICE_ROLLBACK_FAILED, FatalCode.DEVICE_PROBE_RESTORE_FAILED, FatalCode.DEVICE_PROBE_CONFLICT}:
+        return True
+    if normalized in {FatalCode.PLAYLIST_LIBRARY_NOT_LOADED, FatalCode.DEVICE_FILE_LOCKED, FatalCode.DEVICE_FILE_READ_ONLY}:
+        return False
+    return bool(mutating)
+
+
+def job_needs_reconcile(exc, writing: bool, *, recover: bool = False) -> bool:
+    """Job flag for a failed device operation.
+
+    PLAYLIST_LIBRARY_NOT_LOADED, DEVICE_FILE_LOCKED, and DEVICE_FILE_READ_ONLY
+    leave the previous snapshot in place, except on the recover endpoint.
+    Roll-forward can already be committed while the journal is still pending,
+    so those two codes reconcile there. DEVICE_ROLLBACK_FAILED,
+    DEVICE_PROBE_RESTORE_FAILED, and DEVICE_PROBE_CONFLICT leave the device
+    uncertain on every endpoint. Any other failure is reconciled only after
+    a write has started. The endpoint chooses; message text does not.
+    """
+    code = fatal_code_of(exc)
+    if recover and code in {FatalCode.DEVICE_FILE_LOCKED.value, FatalCode.DEVICE_FILE_READ_ONLY.value}:
+        return True
+    if code in {FatalCode.DEVICE_ROLLBACK_FAILED.value, FatalCode.DEVICE_PROBE_RESTORE_FAILED.value, FatalCode.DEVICE_PROBE_CONFLICT.value}:
+        return True
+    if code in {FatalCode.PLAYLIST_LIBRARY_NOT_LOADED.value, FatalCode.DEVICE_FILE_LOCKED.value, FatalCode.DEVICE_FILE_READ_ONLY.value}:
+        return False
+    if not writing:
+        return False
+    return getattr(exc, "needs_reconcile", True) is not False
+
+
+_RECOVERY_ACTIONS = {
+    FatalCode.PLAYLIST_JOURNAL_PENDING.value: "inspect_recover",
+    FatalCode.DEVICE_ROLLBACK_FAILED.value: "inspect_recover",
+    FatalCode.PLAYLIST_REF_MISSING.value: "repair",
+    FatalCode.PLAYLIST_SLOTS_EXHAUSTED.value: "free_slots",
+    FatalCode.PLAYLIST_LIBRARY_NOT_LOADED.value: "reconnect_retry",
+    FatalCode.DEVICE_FILE_LOCKED.value: "close_and_retry",
+    FatalCode.DEVICE_FILE_READ_ONLY.value: "clear_read_only_retry",
+    FatalCode.DEVICE_PROBE_RESTORE_FAILED.value: "inspect_recover",
+    FatalCode.DEVICE_PROBE_CONFLICT.value: "manual_help",
+}
+
+
+def recovery_action_for(code, *, recover: bool = False) -> str | None:
+    """UI action for a fatal code. Recover's locked and read-only fatals use inspect_recover.
+
+    The choice is the endpoint plus the fatal `code`. Message text is ignored.
+    """
+    normalized = normalize_fatal_code(code)
+    if recover and normalized in {FatalCode.DEVICE_FILE_LOCKED, FatalCode.DEVICE_FILE_READ_ONLY}:
+        return "inspect_recover"
+    if normalized is None:
+        return None
+    return _RECOVERY_ACTIONS.get(normalized)
+
+
 class JSymphonicError(RuntimeError):
-    def __init__(self, message, *, events=(), needs_reconcile=False, code=None):
+    def __init__(self, message, *, events=(), needs_reconcile=False, code=None, path=None, probe_path=None):
         super().__init__(message)
         self.events = list(events)
         self.needs_reconcile = needs_reconcile
         self.result: AddResult | None = None
         # None means generic: no code, or a code outside FatalCode.
+        # `code` is the fatal event's top-level JSON field, never message text.
         self.code = normalize_fatal_code(code)
+        # Top-level fatal `path` and `probe_path` only. Non-strings are dropped.
+        self.path = _string_path(path)
+        self.probe_path = _string_path(probe_path)
 
 
 def _ensure_java() -> str:
@@ -134,6 +242,22 @@ def _build_cmd(args: list[str]) -> list[str]:
     return [_ensure_java(), "-cp", str(_ensure_jar()), SHIM_MAIN, *args]
 
 
+def _command_mutates(args: list[str]) -> bool:
+    """True when this argv can rewrite OMGAUDIO.
+
+    `playlist-recover --inspect` is the read-only half of that command.
+    `playlist-recover` without `--inspect`, and `playlist-repair`, write.
+    """
+    if not args:
+        return False
+    command = args[0]
+    if command in {"add", "del", "playlist-create", "playlist-update", "playlist-delete", "playlist-repair"}:
+        return True
+    if command == "playlist-recover":
+        return "--inspect" not in args
+    return False
+
+
 def _run(
     args: list[str],
     timeout: float,
@@ -142,7 +266,7 @@ def _run(
     """Run one shim command, streaming parsed stdout events. Returns them all."""
     cmd = _build_cmd(args)
     events: list[dict] = []
-    mutating = bool(args and args[0] in {"add", "del", "playlist-create", "playlist-update", "playlist-delete"})
+    mutating = _command_mutates(args)
     with _shim_lock:
         try:
             proc = subprocess.Popen(
@@ -220,10 +344,11 @@ def _run(
         if proc.returncode != 0:
             for event in reversed(events):
                 if event.get("event") == "fatal":
+                    code = event.get("code")
                     raise JSymphonicError(
                         str(event.get("message") or "shim reported a fatal error"),
-                        events=events, needs_reconcile=mutating,
-                        code=event.get("code"),
+                        events=events, needs_reconcile=_fatal_needs_reconcile(mutating, code),
+                        code=code, path=event.get("path"), probe_path=event.get("probe_path"),
                     )
             tail = "\n".join(list(stderr_lines)[-5:]).strip()
             raise JSymphonicError(
@@ -236,10 +361,13 @@ def _run(
 def _require_terminal(events: list[dict], terminal: str, *, mutating=False) -> None:
     for event in events:
         if event.get("event") == "fatal" or event.get("error"):
+            code = event.get("code") if event.get("event") == "fatal" else None
+            path = event.get("path") if event.get("event") == "fatal" else None
+            probe_path = event.get("probe_path") if event.get("event") == "fatal" else None
             raise JSymphonicError(
                 str(event.get("message") or event.get("error") or "Shim reported a fatal error"),
-                events=events, needs_reconcile=mutating,
-                code=event.get("code") if event.get("event") == "fatal" else None,
+                events=events, needs_reconcile=_fatal_needs_reconcile(mutating, code),
+                code=code, path=path, probe_path=probe_path,
             )
     if not events or events[-1].get("event") != terminal:
         raise JSymphonicError(
@@ -262,6 +390,43 @@ def wait_for_idle(timeout: float | None = None) -> bool:
     return acquired
 
 
+class DeviceRows(list):
+    """Track or playlist rows plus read-only probe warnings.
+
+    JSON encoding stays a list. `warnings` is not a row.
+    """
+
+    def __init__(self, rows, warnings):
+        super().__init__(rows)
+        self.warnings = warnings
+
+
+def probe_warnings(events) -> list[dict]:
+    """Copy `DEVICE_PROBE_PENDING` warnings. Other events are not warnings.
+
+    `path` and `probe_path` are copied only when they are strings. They are
+    never joined or reformatted. A warning is not a failure.
+    """
+    found = []
+    for event in events:
+        if event.get("event") != "warning" or event.get("code") != "DEVICE_PROBE_PENDING":
+            continue
+        item = {"code": "DEVICE_PROBE_PENDING"}
+        for key in ("path", "probe_path"):
+            value = event.get(key)
+            if isinstance(value, str):
+                item[key] = value
+        found.append(item)
+    return found
+
+
+def _with_probe_warnings(payload, events):
+    warnings = probe_warnings(events)
+    if not warnings:
+        return payload
+    return {**payload, "warnings": warnings}
+
+
 def device_details(mount: Path) -> dict:
     """Validate the mount via the shim and return its `device` event."""
     events = _run(["info", "--device", str(mount)], INFO_TIMEOUT)
@@ -270,7 +435,7 @@ def device_details(mount: Path) -> dict:
         if event.get("event") == "device":
             if event.get("ok") is not True:
                 raise JSymphonicError("Shim did not validate the device", events=events)
-            return event
+            return _with_probe_warnings(event, events)
     raise JSymphonicError("shim produced no device event")
 
 
@@ -291,7 +456,7 @@ def list_tracks(mount: Path) -> list[dict]:
     count = events[-1].get("count")
     if type(count) is not int or count != len(tracks):
         raise JSymphonicError("Shim listEnd count does not match returned tracks", events=events)
-    return tracks
+    return DeviceRows(tracks, probe_warnings(events))
 
 
 def add_tracks(
@@ -343,7 +508,7 @@ def list_playlists(mount: Path) -> list[dict]:
     count = events[-1].get('count')
     if type(count) is not int or count != len(rows) or len({row['id'] for row in rows}) != len(rows):
         raise JSymphonicError('Shim playlistsEnd count or playlist IDs are invalid', events=events)
-    return rows
+    return DeviceRows(rows, probe_warnings(events))
 
 
 def _playlist_mutation(args):
@@ -395,3 +560,108 @@ def update_playlist(mount: Path, playlist_id: str, name: str | None = None, trac
 def delete_playlist(mount: Path, playlist_id: str) -> None:
     events = _run(['playlist-delete', '--device', str(mount), '--id', _device_playlist_id(playlist_id)], DEL_TIMEOUT)
     _require_terminal(events, 'done', mutating=True)
+
+
+_JOURNAL_STATES = frozenset({"committed", "uncommitted", "none"})
+_RECOVER_OUTCOMES = frozenset({"rolled_forward", "discarded", "none"})
+
+
+def _last_event(events: list[dict], name: str):
+    found = None
+    for event in events:
+        if event.get("event") == name:
+            found = event
+    return found
+
+
+def _enum_field(event, key: str, allowed: frozenset[str]):
+    """Known value of one top-level field on one event, else None."""
+    if not event or key not in event:
+        return None
+    value = event[key]
+    if isinstance(value, str) and value in allowed:
+        return value
+    return None
+
+
+def _journal_covers(event):
+    """`covers.files` from playlistJournal.files, or None.
+
+    Each string is opaque and relative to the OMGAUDIO folder (jsymphonic #4
+    @ ba26514). The list is copied as-is. A missing field or any non-list /
+    non-string value is null. playlistIds and trackIds are not coverage.
+    """
+    if not event or "files" not in event:
+        return None
+    files = event["files"]
+    if not isinstance(files, list) or any(not isinstance(item, str) for item in files):
+        return None
+    return {"files": list(files)}
+
+
+def _summary_ids(value):
+    """Normalize playlistRepair summary ids to strings.
+
+    jsymphonic 5763643 emits JSON numbers. Playlist rows use strings.
+    """
+    if not isinstance(value, list):
+        return None
+    out = []
+    for item in value:
+        if type(item) is int and item > 0:
+            text = str(item)
+        elif isinstance(item, str):
+            text = item
+        else:
+            return None
+        if not re.fullmatch(r"[1-9][0-9]{0,9}", text):
+            return None
+        out.append(text)
+    return out
+
+
+def inspect_playlist_journal(mount: Path) -> dict:
+    """Read-only `playlist-recover --device <mount> --inspect`.
+
+    `state` is read only from the `playlistJournal` event (jsymphonic #4
+    @ 5763643). Inspect does not emit `outcome`. A missing or unknown
+    `state` is null. `exists` follows `state`.
+    """
+    events = _run(["playlist-recover", "--device", str(mount), "--inspect"], INFO_TIMEOUT)
+    _require_terminal(events, "done", mutating=False)
+    journal = _last_event(events, "playlistJournal")
+    state = _enum_field(journal, "state", _JOURNAL_STATES)
+    exists = None if state is None else state != "none"
+    return _with_probe_warnings({"exists": exists, "state": state, "covers": _journal_covers(journal)}, events)
+
+
+def recover_playlist_journal(mount: Path) -> dict:
+    """Mutating `playlist-recover --device <mount>`.
+
+    `outcome` is the top-level field on the `playlistJournal` event, not on
+    `done` and not message text. Values: rolled_forward, discarded, none.
+    """
+    events = _run(["playlist-recover", "--device", str(mount)], DEL_TIMEOUT)
+    _require_terminal(events, "done", mutating=True)
+    outcome = _enum_field(_last_event(events, "playlistJournal"), "outcome", _RECOVER_OUTCOMES)
+    return {"outcome": outcome}
+
+
+def repair_playlists(mount: Path) -> dict:
+    """Mutating `playlist-repair --device <mount>`.
+
+    The `playlistRepair` summary comes before playlist rows and `done`.
+    `prunedCount` counts removed member references and is not checked
+    against `len(prunedTrackIds)`. Summary ids are JSON numbers and are
+    returned as strings. An empty mount is the fatal code
+    `PLAYLIST_LIBRARY_NOT_LOADED`, raised by `_run`.
+    """
+    events = _run(["playlist-repair", "--device", str(mount)], DEL_TIMEOUT)
+    _require_terminal(events, "done", mutating=True)
+    summary = _last_event(events, "playlistRepair") or {}
+    count = summary.get("prunedCount") if summary else None
+    return {
+        "pruned_count": count if type(count) is int and count >= 0 else None,
+        "pruned_track_ids": _summary_ids(summary.get("prunedTrackIds")) if "prunedTrackIds" in summary else None,
+        "playlist_ids": _summary_ids(summary.get("playlistIds")) if "playlistIds" in summary else None,
+    }
