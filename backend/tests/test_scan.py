@@ -380,13 +380,37 @@ def test_unsynchronisation_decode_applies_only_to_v22_and_v23_with_the_flag(tmp_
 def test_every_consecutive_leading_id3_tag_is_validated(tmp_path: Path):
     first = _id3v23_tag(_minimal_frame(b"TIT2", b"\x00first"))
     good_second = _id3v23_tag(_minimal_frame(b"TALB", b"\x00second"))
-    bad_second = _id3v23_tag(_minimal_frame(b"APIC", b"\x00image/jpeg-without-terminator") + _minimal_frame(b"TALB", b"\x00x"))
+    good_third = _id3v23_tag(_minimal_frame(b"TPE1", b"\x00the third one"))
+    bad = _id3v23_tag(_minimal_frame(b"APIC", b"\x00image/jpeg-without-terminator") + _minimal_frame(b"TALB", b"\x00x"))
+    assert len({len(first), len(good_second), len(good_third), len(bad)}) == 4  # distinct sizes pin the offsets
     path = tmp_path / "tags.mp3"
-    path.write_bytes(first + good_second + _mpeg_frames(2))
+    path.write_bytes(first + good_second + good_third + _mpeg_frames(2))
     assert scan.scan_audio(path).ok is True
-    path.write_bytes(first + bad_second + _mpeg_frames(2))
+    path.write_bytes(first + bad + _mpeg_frames(2))
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+    path.write_bytes(first + good_second + bad + _mpeg_frames(2))  # only the third tag is malformed
     assert scan.scan_audio(path).reason_code == "invalid_audio_format"
     path.write_bytes(first * (scan.MAX_ID3_TAGS + 1) + _mpeg_frames(2))
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+
+
+def test_footer_flag_is_honoured_only_for_id3v24(tmp_path: Path):
+    """ffmpeg applies the 10-byte footer only to ID3v2.4; a v2.3 header with bit 0x10 must not hide the next tag."""
+    def synchsafe(n):
+        return bytes(((n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F))
+    first_body = _minimal_frame(b"TIT2", b"\x00first")
+    flagged_v23 = b"ID3\x03\x00\x10" + synchsafe(len(first_body)) + first_body
+    hidden = _id3v23_tag(_minimal_frame(b"APIC", b"\x00image/jpeg-without-terminator") + _minimal_frame(b"TALB", b"\x00hidden"))
+    path = tmp_path / "footer.mp3"
+    path.write_bytes(flagged_v23 + hidden + _mpeg_frames(2))
+    assert scan.scan_audio(path).reason_code == "invalid_audio_format"
+    # A real ID3v2.4 footer is stepped over, and the good tag that follows it is validated and accepted.
+    v24_body = b"TIT2" + synchsafe(6) + b"\x00\x00" + b"\x00first"
+    v24 = b"ID3\x04\x00\x10" + synchsafe(len(v24_body)) + v24_body + b"3DI\x04\x00\x10" + synchsafe(len(v24_body))
+    good_second = _id3v23_tag(_minimal_frame(b"TALB", b"\x00second"))
+    path.write_bytes(v24 + good_second + _mpeg_frames(2))
+    assert scan.scan_audio(path).ok is True
+    path.write_bytes(v24 + hidden + _mpeg_frames(2))
     assert scan.scan_audio(path).reason_code == "invalid_audio_format"
 
 

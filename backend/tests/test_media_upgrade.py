@@ -323,3 +323,87 @@ def test_source_threat_with_a_held_derivative_refuses_playback_and_retries_the_u
     record = store.get(media_id)
     assert not flac.exists() and 'playback' not in record['artifacts']
     assert list((store.root / media_id).iterdir()) == []
+
+
+def test_clean_source_with_a_held_refused_derivative_regenerates_once_released(context, monkeypatch):
+    from pathlib import Path
+    store = context.app.state.store
+    conversions = []
+
+    def convert(src, out, kind, maximum, metadata=None):
+        conversions.append(kind)
+        out.write_bytes(b'fLaC' + b'\x00' * 8)
+
+    monkeypatch.setattr(media_service, 'convert_managed', convert)
+    job = imported(context)
+    media_id = job['files'][0]['media_id']
+    assert context.client.post(f'/api/media/{media_id}/prepare', json={'format': 'flac'}).status_code == 200
+    flac = store.root / media_id / 'playback.flac'
+    record = store.get(media_id)
+    record['artifacts']['playback']['scan'] = dict(ok=False, state='BLOCKED', reason_code='defender_threat')
+    store.update(media_id, artifacts=record['artifacts'])
+    real_unlink = Path.unlink
+
+    def held_unlink(self, *args, **kwargs):
+        if self.name == 'playback.flac':
+            raise PermissionError(13, 'held by a reader')
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'unlink', held_unlink)
+    with pytest.raises(PermissionError):
+        store.purge_artifact(media_id, 'playback')
+    refused = store.get(media_id)
+    assert refused['artifacts']['playback']['purged'] is True and flac.exists() and refused['playback'] == 'source'
+    assert context.client.get(f'/api/media/{media_id}/stream').status_code == 200  # the clean source still streams
+
+    def prepare():
+        job_id = context.client.post(f'/api/media/{media_id}/prepare', json={'format': 'flac'}).json()['job_id']
+        return context.client.get('/api/jobs/' + job_id).json()
+
+    # While a reader still holds the refused file: a retryable condition, not re-import advice.
+    held = prepare()
+    assert held['files'][0]['state'] == 'failed'
+    assert 'still in use' in held['files'][0]['detail'] and 'clean copy' not in held['files'][0]['detail']
+    monkeypatch.setattr(Path, 'unlink', real_unlink)
+    released = prepare()
+    assert released['status'] == 'done' and released['files'][0]['state'] == 'ready'
+    record = store.get(media_id)
+    assert record['playback'] == 'playback' and record['artifacts']['playback'].get('purged') is None
+    assert flac.exists() and conversions == ['playback', 'playback']
+
+
+def test_stream_rechecks_the_refusal_after_taking_the_file_lock(context, monkeypatch):
+    from pathlib import Path
+    store = context.app.state.store
+    monkeypatch.setattr(media_service, 'convert_managed',
+                        lambda src, out, kind, maximum, metadata=None: out.write_bytes(b'fLaC' + b'\x00' * 8))
+    job = imported(context)
+    media_id = job['files'][0]['media_id']
+    assert context.client.post(f'/api/media/{media_id}/prepare', json={'format': 'flac'}).status_code == 200
+    assert context.client.get(f'/api/media/{media_id}/stream').status_code == 200
+    real_unlink = Path.unlink
+
+    def held_unlink(self, *args, **kwargs):
+        if self.name == 'playback.flac':
+            raise PermissionError(13, 'held by a reader')
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'unlink', held_unlink)
+    original_path = store.path
+    raced = []
+
+    def racing_path(record, artifact='source'):
+        resolved = original_path(record, artifact)
+        if artifact == 'playback' and not raced:
+            raced.append(True)
+            # A threat purge commits between the route's lease snapshot and its file lock.
+            store.purge_artifact(media_id, 'source')
+            try:
+                store.purge_artifact(media_id, 'playback')
+            except PermissionError:
+                pass
+        return resolved
+
+    monkeypatch.setattr(store, 'path', racing_path)
+    assert context.client.get(f'/api/media/{media_id}/stream').status_code == 423
+    assert raced and (store.root / media_id / 'playback.flac').exists()

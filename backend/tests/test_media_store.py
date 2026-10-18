@@ -106,3 +106,36 @@ def test_purge_persists_the_refusal_before_unlinking_and_startup_retries_a_held_
     reopened = MediaStore(tmp_path / 'state.db', tmp_path / 'cache')  # startup retries the refused unlink
     assert not derivative.exists()
     assert 'playback' not in reopened.get(media_id)['artifacts']
+
+
+def test_purging_the_source_alone_resets_playback_even_while_the_derivative_remains(tmp_path):
+    import io
+    store = MediaStore(tmp_path / 'state.db', tmp_path / 'cache')
+    record = store.import_file('song.mp3', io.BytesIO(b'\xff\xfb\x90\x00' + b'\x00' * 64))
+    media_id = record['id']
+    derivative = store.root / media_id / 'playback.flac'
+    derivative.write_bytes(b'fLaC' + b'\x00' * 8)
+    record['artifacts']['playback'] = dict(name='playback.flac', size_bytes=12, sha256='0' * 64, scan={'ok': True})
+    store.update(media_id, artifacts=record['artifacts'], playback='playback', mime='audio/flac')
+    updated = store.purge_artifact(media_id, 'source')
+    assert (updated['playback'], updated['mime']) == ('source', 'audio/mpeg')
+    assert 'playback' in updated['artifacts'] and derivative.exists()  # the derivative itself is untouched here
+    with pytest.raises(MediaError):
+        store.path(updated, updated['playback'])
+
+
+def test_purging_artwork_drops_it_from_the_public_record(tmp_path):
+    import io
+    store = MediaStore(tmp_path / 'state.db', tmp_path / 'cache')
+    record = store.import_file('song.mp3', io.BytesIO(b'\xff\xfb\x90\x00' + b'\x00' * 64))
+    media_id = record['id']
+    artwork = store.root / media_id / 'artwork.jpg'
+    artwork.write_bytes(b'\xff\xd8\xff\xe0fake\xff\xd9')
+    record['artifacts']['artwork'] = dict(name='artwork.jpg', size_bytes=10, sha256='0' * 64,
+                                          scan={'reason_code': 'defender_threat'})
+    store.update(media_id, artifacts=record['artifacts'], artwork_status='ready')
+    assert 'artwork_url' in store.public(store.get(media_id))
+    updated = store.purge_artifact(media_id, 'artwork')
+    assert updated['artwork_status'] == 'failed'
+    assert 'artwork' not in updated['artifacts'] and not artwork.exists()
+    assert 'artwork_url' not in store.public(updated)

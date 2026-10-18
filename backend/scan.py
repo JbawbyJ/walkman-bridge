@@ -330,7 +330,9 @@ def _validate_audio_format(path: Path, size: int) -> str | None:
                 if len(header) != 10 or header[3] not in (2, 3, 4):
                     return "invalid ID3 header"
                 tag_size = _synchsafe(header[6:10])
-                footer = 10 if header[5] & 0x10 else 0
+                # Only ID3v2.4 defines a footer; ffmpeg applies the 10 extra bytes for version 4
+                # alone, so a v2.2/v2.3 header with bit 0x10 set must not hide what follows it.
+                footer = 10 if header[3] == 4 and header[5] & 0x10 else 0
                 total = 10 + tag_size + footer
                 if tag_size > MAX_TAG_BYTES or offset + total >= size:
                     return "truncated or oversized ID3 tag"
@@ -378,7 +380,7 @@ def _validate_id3(tag: bytes) -> bool:
     integer cursor: no per-frame copy of the remaining body, linear in the tag size.
     """
     version = tag[3]
-    body = tag[10:-10] if tag[5] & 0x10 else tag[10:]
+    body = tag[10:-10] if version == 4 and tag[5] & 0x10 else tag[10:]
     if version in (2, 3) and tag[5] & 0x80:
         # ID3v2.2/2.3 unsynchronisation applies to the whole tag body: a zero byte was inserted
         # after every 0xFF. Frame headers describe the decoded bytes, so decode before walking.

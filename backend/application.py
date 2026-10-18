@@ -335,7 +335,12 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
                     raise HTTPException(404, 'No cleared artwork for this track')
                 path = store.path(record, 'artwork')
                 with locked_read(path, store.root) as stream:
-                    if not scanner.clearance_valid(path, record['artifacts']['artwork'].get('scan') or {}):
+                    # Re-read under the file lock: a threat purge may have committed after the snapshot.
+                    fresh = store.get(media_id)
+                    info = fresh['artifacts'].get('artwork')
+                    if fresh.get('artwork_status') != 'ready' or info is None or info.get('purged'):
+                        raise HTTPException(404, 'No cleared artwork for this track')
+                    if not scanner.clearance_valid(path, info.get('scan') or {}):
                         store.update(media_id, artwork_status='needs_scan')
                         raise HTTPException(423, 'Artwork needs Defender clearance')
                     data = stream.read(1024 * 1024 + 1)
@@ -388,7 +393,12 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
             artifact = record['playback']
             path = store.path(record, artifact)
             stream = stack.enter_context(locked_read(path, store.root))
-            clearance = record['artifacts'][artifact].get('scan')
+            # Re-read under the file lock: a threat purge may have committed after the lease snapshot.
+            record = store.get(media_id)
+            info = record['artifacts'].get(artifact)
+            if info is None or info.get('purged') or record.get('playback') != artifact:
+                raise HTTPException(423, 'Defender clearance is required; rescan this item')
+            clearance = info.get('scan')
             if not clearance or not scanner.clearance_valid(path, clearance):
                 store.update(media_id, status='needs_scan')
                 raise HTTPException(423, 'Defender clearance is required; rescan this item')

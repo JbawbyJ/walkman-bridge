@@ -172,6 +172,14 @@ class MediaService:
             self.prepare_metadata(media_id)
             record = self.store.get(media_id)
             existing = record['artifacts'].get(kind)
+            if existing and existing.get('purged'):
+                # The source is clean; a refused derivative whose unlink a reader held is removed now
+                # and regenerated, instead of reporting the item as blocked.
+                try:
+                    record = self.store.purge_artifact(media_id, kind)
+                except OSError as exc:
+                    raise MediaError(f'The previous {kind} file is still in use; retry shortly') from exc
+                existing = record['artifacts'].get(kind)
             if existing and kind == 'transfer' and (existing.get('metadata_policy') != METADATA_POLICY
                     or existing.get('metadata_revision', 0) != record.get('metadata_revision', 0)):
                 # A previous release's untagged transfer.mp3 must not retain cache labels.
@@ -235,6 +243,9 @@ class MediaService:
             # Source clearance failure fails the import even when artwork is optional.
             self.clear(media_id)
             try:
+                if record['artifacts'].get('artwork', {}).get('purged'):
+                    # Retry a held removal; still held raises OSError and leaves the artwork failed.
+                    record = self.store.purge_artifact(media_id, 'artwork')
                 if 'artwork' not in record['artifacts']:
                     with self.store.reserve(1024 * 1024):
                         generated = extract_cleared_artwork(self.store.path(record), out)
