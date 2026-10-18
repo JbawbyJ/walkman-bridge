@@ -18,6 +18,7 @@ const server = http.createServer(async (req, res) => {
     if (req.headers.cookie !== 'fixture=management') return json({ detail: 'unauthorized' }, 403)
     let text = ''; for await (const chunk of req) text += chunk
     const body = text ? JSON.parse(text) : {}
+    if (p === '/api/preferences') return json({ theme: 'light' })
     if (p === '/api/health') return json({ ok: true, product, version: '0.4.1' })
     if (p === '/api/queue') return json({ items: items.filter(item => queued.has(item.id)), library_items: items, playlists: lists })
     if (p === '/api/playback-state') { if (method === 'PATCH') saved = { ...saved, ...body }; return json({ ...saved, playlist: lists.find(l => l.id === saved.playlist_id) || null }) }

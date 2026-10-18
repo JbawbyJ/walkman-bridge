@@ -15,8 +15,8 @@
   #define OutDir "dist"
 #endif
 
-#define AppName "Walkman Bridge"
-#define AppPublisher "Walkman Bridge"
+#define AppName "Red Lotus - Sony Walkman Dashboard"
+#define AppPublisher "Red Lotus"
 #define AppExe "WalkmanBridge.exe"
 
 [Setup]
@@ -92,9 +92,9 @@ begin
   Result := True;
   if not WebView2Installed() then
     MsgBox('Microsoft Edge WebView2 was not detected.' + #13#13 +
-           'Walkman Bridge will still work - it will open its dashboard in ' +
+           'Red Lotus - Sony Walkman Dashboard will still work - it will open its dashboard in ' +
            'your default web browser instead of its own window.' + #13#13 +
            'To get the app window, install "Microsoft Edge WebView2 Runtime" ' +
-           'from Microsoft, then restart Walkman Bridge.',
+           'from Microsoft, then restart the dashboard.',
            mbInformation, MB_OK);
 end;

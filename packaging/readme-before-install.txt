@@ -1,4 +1,4 @@
-Walkman Bridge — before you install
+Red Lotus - Sony Walkman Dashboard — before you install
 
 WHAT THIS IS
     A local app for putting music on a Sony NW-S705F Walkman (2007) without
@@ -21,7 +21,7 @@ IMPORTANT — BEFORE YOUR FIRST TRANSFER
     Back up your player first: plug it in and copy the whole drive (including
     the OMGAUDIO folder) to a folder on your PC. That copy restores it.
 
-    Also note: once Walkman Bridge writes to the player, Sony's SonicStage can
+    Also note: once Red Lotus - Sony Walkman Dashboard writes to the player, Sony's SonicStage can
     no longer manage it without wiping the device first.
 
 WINDOWS SMARTSCREEN

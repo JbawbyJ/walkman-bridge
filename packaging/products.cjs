@@ -2,7 +2,8 @@
 const path = require('node:path');
 const products = Object.freeze({
   bridge: Object.freeze({
-    productName: 'Walkman Bridge',
+    productName: 'Red Lotus - Sony Walkman Dashboard',
+    dataDirectoryName: 'Walkman Bridge',
     executableName: 'Walkman Bridge',
     appId: 'com.redlotus.nightops.bridge',
     packageName: 'walkman-bridge',
@@ -10,6 +11,7 @@ const products = Object.freeze({
   }),
   player: Object.freeze({
     productName: 'Red Lotus Player',
+    dataDirectoryName: 'Red Lotus Player',
     executableName: 'Red Lotus Player',
     appId: 'com.redlotus.nightops.player',
     packageName: 'red-lotus-player',

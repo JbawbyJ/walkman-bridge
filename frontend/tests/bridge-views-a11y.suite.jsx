@@ -354,6 +354,7 @@ test('the bridge shell routes the three playlist codes into Walkman and Transfer
     const view = await renderBridge(async url => {
       const path = String(url).split('?')[0]
       if (path === '/api/health') return jsonResponse({ ok: true, product: 'bridge', version: '0.4.1' })
+      if (path === '/api/preferences') return jsonResponse({ theme: 'light' })
       if (path === '/api/playback-state') return jsonResponse({})
       if (path === '/api/queue') return jsonResponse({ items: [], quota: { used_bytes: 0, limit_bytes: 100 } })
       if (path === '/api/engine-busy') return jsonResponse({ busy: false, active: [] })
@@ -384,7 +385,8 @@ test('the bridge shell routes the three playlist codes into Walkman and Transfer
   const generic = await renderBridge(async url => {
     const path = String(url).split('?')[0]
     if (path === '/api/health') return jsonResponse({ ok: true, product: 'bridge', version: '0.4.1' })
-    if (path === '/api/playback-state') return jsonResponse({})
+    if (path === '/api/preferences') return jsonResponse({ theme: 'light' })
+      if (path === '/api/playback-state') return jsonResponse({})
     if (path === '/api/queue') return jsonResponse({ items: [], quota: { used_bytes: 0, limit_bytes: 100 } })
     if (path === '/api/engine-busy') return jsonResponse({ busy: false, active: [] })
     if (path === '/api/device') return jsonResponse({ detail: { code: 'playlist_failed', message: 'Playlist edit rejected', fatal_code: null } }, { status: 409 })
@@ -401,7 +403,8 @@ test('the bridge shell routes the three playlist codes into Walkman and Transfer
   const readBlocked = await renderBridge(async url => {
     const path = String(url).split('?')[0]
     if (path === '/api/health') return jsonResponse({ ok: true, product: 'bridge', version: '0.4.1' })
-    if (path === '/api/playback-state') return jsonResponse({})
+    if (path === '/api/preferences') return jsonResponse({ theme: 'light' })
+      if (path === '/api/playback-state') return jsonResponse({})
     if (path === '/api/queue') return jsonResponse({ items: [], quota: { used_bytes: 0, limit_bytes: 100 } })
     if (path === '/api/engine-busy') return jsonResponse({ busy: false, active: [] })
     if (path === '/api/device') return jsonResponse({ connected: true, model: 'NW-S705F', free_bytes: 10, total_bytes: 20, track_count: 0 })

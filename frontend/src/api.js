@@ -25,6 +25,8 @@ const json = (method, body) => ({ method, headers: { 'Content-Type': 'applicatio
 
 export const api = {
   health: () => req('/health'),
+  preferences: () => req('/preferences'),
+  savePreferences: theme => req('/preferences', json('PATCH', { theme })),
   playbackState: () => req('/playback-state'),
   savePlaybackState: state => req('/playback-state', { ...json('PATCH', state), keepalive: true }),
   acquirePlaybackLease: media_id => req('/playback/lease', json('POST', { media_id })),

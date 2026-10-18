@@ -56,7 +56,7 @@ function harness(options = {}) {
           if (options.stopScriptGate && String(code).includes('walkman:stop-playback')) return options.stopScriptGate.promise
           if (!options.smoke) return
           const script = String(code)
-          if (script.includes('hasClose')) return { product: 'bridge', hasClose: true, cookieHidden: true, origin: ORIGIN, title: 'Walkman Bridge' }
+          if (script.includes('hasClose')) return { product: 'bridge', hasClose: true, cookieHidden: true, origin: ORIGIN, title: 'Red Lotus - Sony Walkman Dashboard' }
           if (script.includes('scanner/pending')) return 403
         }, stop() { state.playbackStopped = true },
         send: (channel, nonce) => {
@@ -318,7 +318,7 @@ test('smoke close deferral exits non-zero instead of hanging', async () => {
   assert.ok(Date.now() - started < 2000)
 })
 
-const DRAIN_NOTICE = 'Walkman Bridge is finishing up and will close by itself.'
+const DRAIN_NOTICE = 'Red Lotus - Sony Walkman Dashboard is finishing up and will close by itself.'
 
 test('forced close while the backend is busy destroys the window before the lease and waits out the write', async () => {
   let busy = true
@@ -364,7 +364,7 @@ test('forced-close drain shows a notice while a Walkman write finishes and clear
   const closing = h.invoke('closeSafely()')
   assert.equal(await waitUntil(() => h.state.notices.some(notice => notice.shown && !notice.closed)), true)
   assert.equal(h.state.notices.length, 1)
-  assert.equal(h.state.notices[0].options.title, 'Walkman Bridge')
+  assert.equal(h.state.notices[0].options.title, 'Red Lotus - Sony Walkman Dashboard')
   assert.equal(h.state.notices[0].options.body, DRAIN_NOTICE)
   assert.equal(h.state.dialogs.length, 0)
   assert.equal(h.state.windows.length, 1)

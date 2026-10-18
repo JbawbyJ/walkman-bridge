@@ -5,6 +5,7 @@ import './index.css'
 import './nightops.css'
 import './retro.css'
 import './cover-art.css'
+import './polish.css'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>

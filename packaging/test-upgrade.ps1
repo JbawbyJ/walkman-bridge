@@ -2,21 +2,22 @@
 param([Parameter(Mandatory)][ValidateSet('bridge','player')][string]$Product)
 $ErrorActionPreference = 'Stop'
 $Repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-$CurrentName = if ($Product -eq 'bridge') { 'Walkman Bridge' } else { 'Red Lotus Player' }
+$DataName = if ($Product -eq 'bridge') { 'Walkman Bridge' } else { 'Red Lotus Player' }
+$CurrentName = if ($Product -eq 'bridge') { 'Red Lotus - Sony Walkman Dashboard' } else { 'Red Lotus Player' }
 $OldName = if ($Product -eq 'bridge') { 'Walkman Bridge ' + [char]0x2014 + ' Night Ops' } else { 'Red Lotus Player' }
 $OldFile = if ($Product -eq 'bridge') { 'Walkman-Bridge-Night-Ops-Setup-0.4.0-x64.exe' } else { 'Red-Lotus-Player-Setup-0.4.0-x64.exe' }
 $NewFile = if ($Product -eq 'bridge') { 'Walkman-Bridge-Setup-0.4.1-x64.exe' } else { 'Red-Lotus-Player-Setup-0.4.1-x64.exe' }
 $OldExe = if ($Product -eq 'bridge') { 'Walkman Bridge Night Ops.exe' } else { 'Red Lotus Player.exe' }
-$NewExe = $CurrentName + '.exe'
+$NewExe = $DataName + '.exe'
 function Registrations {
     $RegistryRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
     if (-not (Test-Path -LiteralPath $RegistryRoot -ErrorAction Stop)) { return @() }
-    @(Get-ChildItem -LiteralPath $RegistryRoot -ErrorAction Stop | Get-ItemProperty -ErrorAction Stop | Where-Object { $_.DisplayName -in @($CurrentName,$OldName) })
+    @(Get-ChildItem -LiteralPath $RegistryRoot -ErrorAction Stop | Get-ItemProperty -ErrorAction Stop | Where-Object { $_.DisplayName -in @($CurrentName,$DataName,$OldName) })
 }
 if (@(Registrations).Count) { throw 'An existing user product is installed; isolated upgrade testing refuses to replace it.' }
-if (Get-Process -Name $CurrentName,([IO.Path]::GetFileNameWithoutExtension($OldExe)) -ErrorAction SilentlyContinue) { throw 'A user product is running.' }
+if (Get-Process -Name $DataName,([IO.Path]::GetFileNameWithoutExtension($OldExe)) -ErrorAction SilentlyContinue) { throw 'A user product is running.' }
 foreach ($Directory in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))) {
-    foreach ($Name in @($CurrentName,$OldName)) {
+    foreach ($Name in @($CurrentName,$DataName,$OldName)) {
         if (Test-Path -LiteralPath (Join-Path $Directory ($Name + '.lnk'))) { throw 'An existing user product shortcut is present; isolated testing refuses to replace it.' }
     }
 }
@@ -24,7 +25,7 @@ $Run = Join-Path $Repo ('packaging/build/upgrade-041/' + $Product + '-' + [Guid]
 $Install = Join-Path $Run 'installed'
 $LocalData = Join-Path $Run 'local-data'
 $RoamingData = Join-Path $Run 'roaming-data'
-$Data = Join-Path $LocalData $CurrentName
+$Data = Join-Path $LocalData $DataName
 New-Item -ItemType Directory -Path $Run,$LocalData,$RoamingData | Out-Null
 $PreviousLocal = $env:LOCALAPPDATA; $PreviousRoaming = $env:APPDATA; $PreviousData = $env:REDLOTUS_UPGRADE_DIR
 $PreviousProduct = $env:REDLOTUS_UPGRADE_PRODUCT; $PreviousNode = $env:ELECTRON_RUN_AS_NODE
@@ -124,13 +125,13 @@ try {
 } finally {
     try {
         if ($Installed) {
-            if (Get-Process -Name $CurrentName,([IO.Path]::GetFileNameWithoutExtension($OldExe)) -ErrorAction SilentlyContinue) { throw 'Test product remains running; cleanup deferred for diagnosis.' }
+            if (Get-Process -Name $DataName,([IO.Path]::GetFileNameWithoutExtension($OldExe)) -ErrorAction SilentlyContinue) { throw 'Test product remains running; cleanup deferred for diagnosis.' }
             $Uninstaller = @(Get-ChildItem -LiteralPath $Install -Filter 'Uninstall*.exe' -File)
             if ($Uninstaller.Count -ne 1) { throw 'Exactly one test-owned uninstaller is required.' }
             Run-Process $Uninstaller[0].FullName @('/S',"_?=$Install")
             if (@(Registrations).Count) { throw 'Uninstall left a product registration.' }
             foreach ($Directory in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'),(Join-Path $RoamingData 'Microsoft/Windows/Start Menu/Programs'))) {
-                foreach ($Name in @($CurrentName,$OldName)) {
+                foreach ($Name in @($CurrentName,$DataName,$OldName)) {
                     if (Test-Path -LiteralPath (Join-Path $Directory ($Name + '.lnk'))) { throw 'Uninstall left a product shortcut.' }
                 }
             }

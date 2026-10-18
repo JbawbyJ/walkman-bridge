@@ -27,6 +27,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname.startsWith('/api')) {
     calls.push({ method: req.method, path: url.pathname, authenticated: req.headers.cookie === 'fixture=private' })
     if (req.headers.cookie !== 'fixture=private') return json({ detail: 'Fixture authentication required' }, 401)
+    if (url.pathname === '/api/preferences') return json({ theme: 'light' })
     if (url.pathname === '/api/health') return json({ ok: true, product, version: '0.2.0' })
     if (url.pathname === '/api/playback-state') return json({ media_id: 'cover', position_seconds: 0, volume: .3, shuffle: false, repeat: 'off' })
     if (url.pathname === '/api/playback/lease') return json({ ok: true })

@@ -14,7 +14,7 @@ const productFile = path.join(resources, 'product.json')
 const product = app.isPackaged ? JSON.parse(fs.readFileSync(productFile, 'utf8')).product :
   (process.argv.includes('--product=player') ? 'player' : 'bridge')
 if (!['bridge', 'player'].includes(product)) throw new Error('Invalid installed product')
-const name = product === 'player' ? 'Red Lotus Player' : 'Walkman Bridge'
+const name = product === 'player' ? 'Red Lotus Player' : 'Red Lotus - Sony Walkman Dashboard'
 const smoke = process.argv.includes('--smoke')
 const dataDir = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'),
   product === 'player' ? 'Red Lotus Player' : 'Walkman Bridge')

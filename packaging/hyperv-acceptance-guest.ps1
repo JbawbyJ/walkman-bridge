@@ -41,7 +41,7 @@ try {
         }
     }
     $DevProducts = @($Installed | Where-Object { $_.DisplayName -match '(?i)(Node\.js|Python|Java Development|OpenJDK|Temurin|\.NET SDK|Visual Studio|Git for Windows|FFmpeg)' })
-    $AppProducts = @($Installed | Where-Object { $_.DisplayName -match '(?i)(Walkman Bridge|Red Lotus Player)' })
+    $AppProducts = @($Installed | Where-Object { $_.DisplayName -match '(?i)(Walkman Bridge|Red Lotus Player|Red Lotus - Sony Walkman Dashboard)' })
     $KnownDevPaths = @()
     foreach ($Pattern in @('C:\Program Files\nodejs','C:\Program Files\Git','C:\Program Files\Java','C:\Program Files\dotnet\sdk','C:\Program Files\Microsoft Visual Studio','C:\Python*',"$env:LOCALAPPDATA\Programs\Python")) {
         if (Test-Path -Path $Pattern -ErrorAction Stop) {

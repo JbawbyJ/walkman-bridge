@@ -23,8 +23,8 @@ export default function Titlebar({ version, host, winApi }) {
       style={{ WebkitAppRegion: 'drag' }}
     >
       <div className="flex items-center gap-[10px] px-[14px]">
-        <img src={lotus} alt="Red Lotus" className="w-4 h-4 object-contain" style={{ filter: 'invert(1)' }} />
-        <span className="font-display text-[11px] font-bold tracking-widest">WALKMAN BRIDGE</span>
+        <img src={lotus} alt="Red Lotus" className="w-4 h-4 object-contain"  />
+        <span className="font-display text-[11px] font-bold tracking-widest">Red Lotus - Sony Walkman Dashboard</span>
         <span className="font-mono text-[10px] text-muted">v{version}</span>
         <span className="font-mono text-[9px] tracking-wider px-2 py-[2px] border border-line text-success">
           LIVE · {host}

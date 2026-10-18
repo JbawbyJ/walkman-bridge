@@ -146,22 +146,32 @@ export async function startHarness() {
   return {
     origin: server.origin,
     unexpected: server.unexpected,
-    async newPage() {
+    async newPage({ product = 'bridge' } = {}) {
       const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
       const errors = []
       page.on('pageerror', error => errors.push(`pageerror: ${error.message}`))
       page.on('console', message => { if (message.type() === 'error') errors.push(`console: ${message.text()}`) })
-      await page.addInitScript(() => {
+      await page.addInitScript(product => {
         window.walkmanBridge = {
-          product: 'bridge',
+          product,
           minimize() {},
           maximize() {},
           close() {},
           onStopPlayback() { return () => {} },
           onDraining() { return () => {} },
         }
-      })
+      }, product)
       page.errors = errors
+      let savedPlayback = { media_id: null, position_seconds: 0, volume: 0.4, shuffle: false, repeat: 'off' }
+      await page.route('**/api/playback-state', async route => {
+        if (route.request().method() === 'PATCH') savedPlayback = { ...savedPlayback, ...route.request().postDataJSON() }
+        await route.fulfill({ json: savedPlayback })
+      })
+      let preferences = { theme: 'light' }
+      await page.route('**/api/preferences', async route => {
+        if (route.request().method() === 'PATCH') preferences = route.request().postDataJSON()
+        await route.fulfill({ json: preferences })
+      })
       return page
     },
     async close() {

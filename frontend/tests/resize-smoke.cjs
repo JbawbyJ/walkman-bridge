@@ -31,6 +31,7 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1')
   const json = value => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(value)) }
   if (url.pathname.startsWith('/api/')) {
+    if (url.pathname === '/api/preferences') return json({ theme: 'light' })
     if (url.pathname === '/api/health') return json({ ok: true, product, version: '0.4.1' })
     if (url.pathname === '/api/queue') return json({ items, quota: { used_bytes: 12345678 * items.length, limit_bytes: 10 * 1024 ** 3 } })
     if (url.pathname === '/api/playback-state') return json({ media_id: null, position_seconds: 0, volume: 0.4, repeat: 'off', shuffle: false })
@@ -150,7 +151,7 @@ async function main() {
       if(await evaluate(win,`[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='Import link')`))result.dialogs.push(await dialogCheck(win,'link'))
       if(await evaluate(win,`!!document.querySelector('.device-track .icon-button')`))result.dialogs.push(await dialogCheck(win,'delete'))
       if(contextual&&view===views[0])result.dialogs.push(await dialogCheck(win,'manager'))
-      result.ok=!result.legacyBranding&&result.title===(mode==='player'?'Red Lotus Player':'Walkman Bridge')&&result.retroControls&&!result.horizontal.length&&!result.unreachable.length&&result.footerVisible&&result.main.height>=30&&result.root[1]<=result.viewport[1]+2&&result.dialogs.every(d=>d.bounded&&!d.legacyBranding&&!d.horizontal&&!d.unreachable.length)
+      result.ok=!result.legacyBranding&&result.title===(mode==='player'?'Red Lotus Player':'Red Lotus - Sony Walkman Dashboard')&&result.retroControls&&!result.horizontal.length&&!result.unreachable.length&&result.footerVisible&&result.main.height>=30&&result.root[1]<=result.viewport[1]+2&&result.dialogs.every(d=>d.bounded&&!d.legacyBranding&&!d.horizontal&&!d.unreachable.length)
       results.push(result)
       if(!result.ok)failures.push(`${mode} ${view} ${width}x${height} @${scale}: ${JSON.stringify(result)}`)
       progress(`${result.ok?'PASS':'FAIL'} ${mode} ${view} ${width}x${height} @${scale}`)
