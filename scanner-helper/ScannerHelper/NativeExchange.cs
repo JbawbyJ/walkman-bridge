@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.IO.Pipes;
-using System.Security.Principal;
 using System.Text.Json;
 
 namespace NightOps.ScannerHelper;
@@ -20,14 +19,11 @@ public static class NativeExchange
         TrustedProcess.SanitizeCurrentEnvironment();
         Environment.CurrentDirectory = TrustedProcess.SystemDirectory;
         var executable = Environment.ProcessPath ?? throw new SecurityException("helper executable path unavailable");
-        // The elevated helper grants pipe access to this process's identity, which differs from the
-        // elevated identity when a standard user elevates with an administrator's credentials.
-        var clientIdentity = WindowsIdentity.GetCurrent().User ?? throw new SecurityException("current Windows user has no SID");
         var start = new ProcessStartInfo(executable) {
             UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden,
             WorkingDirectory = TrustedProcess.SystemDirectory,
         };
-        foreach (var argument in new[] { "--pipe", pipeName, "--cache-root", root, "--expected-client-pid", Environment.ProcessId.ToString(), "--expected-client-sid", clientIdentity.Value })
+        foreach (var argument in new[] { "--pipe", pipeName, "--cache-root", root, "--expected-client-pid", Environment.ProcessId.ToString() })
             start.ArgumentList.Add(argument);
         // Retain this process handle throughout the exchange. The claimed PID
         // is from the OS launch, never from JSON supplied by a pipe server.

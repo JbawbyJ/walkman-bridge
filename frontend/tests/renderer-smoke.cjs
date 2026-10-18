@@ -1,5 +1,8 @@
-// Isolated real-Electron renderer test. The HTTP fixture is deliberately owned
-// by this test; it never invokes the production scanner or any device operation.
+// Isolated real-Electron renderer test for WAV decode, paused restore, seek,
+// queue advance and playback DSP. Headless Bridge boot with no console errors
+// is walkman-smoke.test.mjs (`npm run test:frontend`). The HTTP fixture is
+// deliberately owned by this test; it never invokes the production scanner
+// or any device operation.
 const { app, BrowserWindow } = require('electron')
 const http = require('node:http')
 const fs = require('node:fs')

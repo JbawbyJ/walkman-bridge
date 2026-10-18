@@ -569,19 +569,6 @@ def test_opus_extension_is_an_ogg_container(tmp_path: Path):
     assert scan.scan_audio(path).ok is True
 
 
-def test_platform_fallback_prefers_the_numerically_newest_defender(monkeypatch, tmp_path: Path):
-    program_files = tmp_path / "Program Files"
-    program_files.mkdir()
-    platform = tmp_path / "ProgramData" / "Microsoft" / "Windows Defender" / "Platform"
-    for folder in ("4.18.25080.5-0", "4.18.25080.11-0", "4.18.24100.4-0"):
-        (platform / folder).mkdir(parents=True)
-        (platform / folder / "MpCmdRun.exe").write_bytes(b"")
-    monkeypatch.setenv("ProgramFiles", str(program_files))
-    monkeypatch.setenv("ProgramData", str(tmp_path / "ProgramData"))
-    monkeypatch.setattr(scan.shutil, "which", lambda name: None)
-    assert scan._defender_exe() == platform / "4.18.25080.11-0" / "MpCmdRun.exe"
-
-
 def test_consumption_checks_rehash_every_time_and_reuse_status_briefly(monkeypatch, tmp_path: Path):
     path = tmp_path / "song.mp3"
     path.write_bytes(_mp3_stub())

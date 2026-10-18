@@ -1,0 +1,38 @@
+[
+  {
+    "file": "LICENSE-NODE-TYPES.txt",
+    "url": "https://raw.githubusercontent.com/denoland/deno/v2.9.5/cli/tsc/dts/node/LICENSE",
+    "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+    "bytes": 1141
+  },
+  {
+    "file": "LICENSE-UNDICI.txt",
+    "url": "https://raw.githubusercontent.com/denoland/deno/v2.9.5/cli/tsc/dts/node/undici/LICENSE",
+    "sha256": "a6db8096b2707bc0102d256917d4d33f298ba36d8c3f25de067a2b5bb379db27",
+    "bytes": 1090
+  },
+  {
+    "file": "LICENSE-WEBGPU.md",
+    "url": "https://raw.githubusercontent.com/denoland/deno/v2.9.5/ext/webgpu/LICENSE.md",
+    "sha256": "f62497fffecc0852960c8d3e6934b9db86d16396e9b604072e923892cae3a588",
+    "bytes": 1074
+  },
+  {
+    "file": "LICENSE-TYPESCRIPT.txt",
+    "url": "https://raw.githubusercontent.com/microsoft/TypeScript/v6.0.3/LICENSE.txt",
+    "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+    "bytes": 9197
+  },
+  {
+    "file": "LICENSE-RUSTY-V8.txt",
+    "url": "https://raw.githubusercontent.com/denoland/rusty_v8/v150.4.0/LICENSE",
+    "sha256": "1c6356fb751d45f0c53093ebf8a7f5e580e802f51999178e19d60f3ec39e147d",
+    "bytes": 1078
+  },
+  {
+    "file": "LICENSE-V8.txt",
+    "url": "https://raw.githubusercontent.com/denoland/v8/ac1e23989121713ca642f6650b34deff7b686896/LICENSE",
+    "sha256": "6ab33af8774a0f396ee3aeeb761e3229057682d6f9fa7f572e390c2cb3a6e509",
+    "bytes": 3093
+  }
+]

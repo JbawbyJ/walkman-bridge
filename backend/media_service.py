@@ -381,9 +381,13 @@ class MediaService:
                         raise MediaError('Verify device state before another transfer of this track')
                     stack.enter_context(locked_read(path, self.store.root))
                     self.clear(media_id, 'transfer', job)
-                job.set_phase('device_writing')
-                for media_id, _ in ready:
-                    job.update_file(media_id, state='transferring', detail='Writing to Walkman')
+                admitted = {media_id for media_id, _ in ready}
+                rows = job.to_dict()['files']
+                for row in rows:
+                    row['volume_id'] = ticket.device.volume_id
+                    if row['file_id'] in admitted:
+                        row.update(state='transferring', detail='Writing to Walkman')
+                job.set_files(rows, phase='device_writing')
                 writing = True
                 result = self.device_api.add_tracks(mount, [p for _, p in ready],
                     lambda event: job.log(str(event.get('message') or event.get('event') or 'Device progress')))
@@ -399,11 +403,21 @@ class MediaService:
                 if result.needs_reconcile or outcome.state == 'unknown':
                     self.store.update(media_id, needs_reconcile=True)
         except Exception as exc:
-            uncertain = writing and getattr(exc, 'needs_reconcile', True)
+            from jsymphonic import fatal_code_of, fatal_path_of, fatal_probe_path_of, job_needs_reconcile, recovery_action_for
+            uncertain = job_needs_reconcile(exc, writing)
+            fatal_code = fatal_code_of(exc)
+            path = fatal_path_of(exc)
+            probe = fatal_probe_path_of(exc)
             job.needs_reconcile = uncertain
             for media_id, _ in ready:
-                job.update_file(media_id, state='unknown' if uncertain else 'failed', detail=str(exc),
-                                reason_code='verify_device_state' if uncertain else 'device_admission_failed')
+                changes = dict(state='unknown' if uncertain else 'failed', detail=str(exc),
+                               reason_code='verify_device_state' if uncertain else 'device_admission_failed',
+                               fatal_code=fatal_code, recovery_action=recovery_action_for(fatal_code))
+                if path is not None:
+                    changes['fatal_path'] = path
+                if probe is not None:
+                    changes['fatal_probe_path'] = probe
+                job.update_file(media_id, **changes)
                 if uncertain:
                     self.store.update(media_id, needs_reconcile=True)
             job.touch()

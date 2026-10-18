@@ -59,7 +59,7 @@ class OperationCoordinator:
             raise ValueError("Operation ticket is not admitted by this coordinator")
 
     @contextmanager
-    def device_session(self, ticket):
+    def device_session(self, ticket, *, on_verified=None):
         import device as device_module
 
         with self._condition:
@@ -81,6 +81,10 @@ class OperationCoordinator:
                 except device_module.DeviceChangedError as exc:
                     exc.needs_reconcile = True
                     raise
+                # Publish local verification only after the final identity
+                # check, while the device gate still excludes other writes.
+                if on_verified is not None:
+                    on_verified()
         finally:
             with self._condition:
                 self._sessions.pop(ticket.id, None)
@@ -105,6 +109,14 @@ class OperationCoordinator:
     def snapshot(self) -> dict:
         with self._condition:
             return self._snapshot()
+
+    def other_device_work(self, ticket) -> bool:
+        """Verification must not race an admitted write still preparing audio."""
+        with self._condition:
+            self._validate(ticket)
+            return any(t.id != ticket.id and t.device is not None
+                       and t.kind not in {'device_read', 'device_reconcile'}
+                       for t in self._tickets.values())
 
     def begin_drain(self) -> dict:
         with self._condition:

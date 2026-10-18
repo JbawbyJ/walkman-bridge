@@ -30,7 +30,7 @@ from urllib.request import Request
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))['version']
-ENGINE_SHA256 = 'cbab7deae5baed02b799f43a454095e5b8b8d00a26151cc0c8649c2cccbcfc72'
+ENGINE_SHA256 = '556cf46b7453620ae391dd04a983a687df35cf9b5eadd9d5df934d40afdc0997'
 spec = importlib.util.spec_from_file_location('packaged_media_probe',
     Path(__file__).with_name('probe-packaged-media.py'))
 helper = importlib.util.module_from_spec(spec)

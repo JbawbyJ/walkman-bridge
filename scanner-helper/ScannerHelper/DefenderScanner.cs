@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace NightOps.ScannerHelper;
 
@@ -11,29 +12,51 @@ public static class DefenderScanner
     public static async Task<DefenderOutcome> ScanAsync(string path, CancellationToken cancellationToken)
     {
         var executable = LocateDefender() ?? throw new FileNotFoundException("Microsoft Defender command line scanner is unavailable");
+        using var scanner = OpenTrustedScanner(executable);
         var result = await RunAsync(executable, BuildScanArguments(path), cancellationToken);
         var status = result.ExitCode == 0 ? await QueryStatusAsync(cancellationToken) : null;
         return new DefenderOutcome(result.ExitCode, result.Stdout, result.Stderr, status);
     }
 
-    private static string? LocateDefender()
+    private static IEnumerable<string> DefenderCandidates()
     {
         var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         var installed = System.IO.Path.Combine(programFiles, "Windows Defender", "MpCmdRun.exe");
-        if (File.Exists(installed)) return installed;
+        yield return installed;
         var platform = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "Microsoft", "Windows Defender", "Platform");
-        if (!Directory.Exists(platform)) return null;
-        // Numeric order: "4.18.25080.11-0" is newer than "4.18.25080.5-0" although it sorts lower as text.
-        return Directory.EnumerateDirectories(platform)
-            .OrderByDescending(folder => PlatformVersion(System.IO.Path.GetFileName(folder)))
-            .Select(folder => System.IO.Path.Combine(folder, "MpCmdRun.exe")).FirstOrDefault(File.Exists);
+        if (!Directory.Exists(platform) || HasReparseComponent(platform)) yield break;
+        foreach (var folder in Directory.EnumerateDirectories(platform)
+            .Where(value => Regex.IsMatch(Path.GetFileName(value), @"^\d+\.\d+\.\d+\.\d+(?:-\d+)?$"))
+            .OrderByDescending(value => Version.Parse(Path.GetFileName(value).Split('-')[0])))
+            yield return Path.Combine(folder, "MpCmdRun.exe");
     }
 
-    public static Version PlatformVersion(string folder)
+    public static string? LocateDefender()
+        => DefenderCandidates().FirstOrDefault(path => File.Exists(path) && !HasReparseComponent(path));
+
+    private static bool HasReparseComponent(string path)
     {
-        var dash = folder.IndexOf('-');
-        return Version.TryParse(dash < 0 ? folder : folder[..dash], out var version) ? version : new Version(0, 0);
+        for (var current = path; current != null; current = Path.GetDirectoryName(current))
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return true;
+        return false;
+    }
+
+    public static ManagedFile OpenTrustedScanner(string executable)
+    {
+        if (!Path.IsPathFullyQualified(executable)
+            || !DefenderCandidates().Contains(executable, StringComparer.OrdinalIgnoreCase)
+            || HasReparseComponent(executable))
+            throw new SecurityException("untrusted Microsoft Defender executable location");
+        // Existing managed-file handle validation also denies write/delete
+        // sharing and resolves the final OS path. Retain it through process exit.
+        var opened = ManagedFile.OpenValidated(executable, Path.GetDirectoryName(executable)!);
+        if (!opened.Path.Equals(executable, StringComparison.OrdinalIgnoreCase))
+        {
+            opened.Dispose();
+            throw new SecurityException("Microsoft Defender executable identity changed");
+        }
+        return opened;
     }
 
     public static string BuildStatusScript()

@@ -16,7 +16,7 @@ Implement the user's request to “build / fix all three”: improve local music
 - Board: external Kanban operations are excluded from this delegated task; no board switch or mutation is authorized here.
 - Cards: no external card IDs assigned. The following local work units identify ownership without inventing Kanban IDs.
 - Commands already applied / to apply: no Kanban commands. This handoff is already assigned to the active build; the launch commands below are recovery instructions, not a request to start a duplicate build.
-- Prior implementation/security context: `docs/IMPLEMENTATION-PROGRESS.md`, `docs/security/NIGHT-OPS-REVIEW-2026-09-05.md`, `packaging/README-NIGHT-OPS.md`.
+- Prior implementation/security context: `docs/archive/IMPLEMENTATION-PROGRESS.md`, `docs/security/NIGHT-OPS-REVIEW-2026-09-05.md`, `packaging/README-NIGHT-OPS.md`.
 
 | Work unit | Owner | Files / responsibility | State at handoff |
 |---|---|---|---|

@@ -19,7 +19,8 @@ MAX_BATCH = 2 * 1024**3
 MAX_FILES = 200
 CACHE_LIMIT = 10 * 1024**3
 MIMES = {'.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.flac': 'audio/flac',
-         '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.ogg': 'audio/ogg', '.opus': 'audio/ogg'}
+         '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.ogg': 'audio/ogg',
+         '.opus': 'audio/ogg', '.wma': 'audio/x-ms-wma', '.aif': 'audio/aiff', '.aiff': 'audio/aiff'}
 
 def public_scan(record):
     if not isinstance(record, dict):

@@ -1,10 +1,20 @@
+# Implementation progress — 0.2.0 (historical)
+
+**Historical.** This file records the **0.2.0** baseline. It is not the current build.
+
+The repository version in `package.json` and `backend/application.py` is **0.4.1**. Current behavior and acceptance are in [../BRANDING-SANDBOX-0.4.1.md](../BRANDING-SANDBOX-0.4.1.md). That record supersedes this file, along with [../MANAGEMENT-0.4.0.md](../MANAGEMENT-0.4.0.md) (0.4.0 manager, playlists, and layout) and [../MEDIA-UPGRADE-0.3.0.md](../MEDIA-UPGRADE-0.3.0.md) (0.3.0 metadata, artwork, and link import).
+
+Prose paths in the body below were written when this file lived in `docs/`. Test counts, installer names, and hashes are 0.2.0 evidence only.
+
+---
+
 # Night Ops implementation and verification — 0.2.0
 
 This records the original 0.2.0 baseline. The later metadata, artwork and link-import
-upgrade and its 0.3.0 verification are documented in [MEDIA-UPGRADE-0.3.0.md](MEDIA-UPGRADE-0.3.0.md).
+upgrade and its 0.3.0 verification are documented in [../MEDIA-UPGRADE-0.3.0.md](../MEDIA-UPGRADE-0.3.0.md).
 The 0.4.0 music manager, local/native playlists, resizing and clutter cleanup,
 including the backed-up physical Sony test, are documented in
-[MANAGEMENT-0.4.0.md](MANAGEMENT-0.4.0.md). Hardware statements below describe the
+[../MANAGEMENT-0.4.0.md](../MANAGEMENT-0.4.0.md). Hardware statements below describe the
 earlier 0.2.0 baseline only.
 
 The approved two-product plan is implemented in the existing checkout. Original dirty work was preserved in ../implementation-evidence/baseline-20260905-155756.zip, with its status/diff evidence. No reset, commit, push or publication was performed.

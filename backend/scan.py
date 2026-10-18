@@ -5,12 +5,12 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import subprocess
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -559,33 +559,120 @@ def _find_frame_sync(data: bytes) -> str | None:
 
 
 def _defender_exe() -> Path | None:
-    candidates = [
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Windows Defender" / "MpCmdRun.exe",
-        Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Microsoft" / "Windows Defender" / "Platform",
-    ]
-    if candidates[0].is_file():
-        return candidates[0]
-    platform = candidates[1]
-    if platform.is_dir():
-        # Numeric order: "4.18.25080.11" is newer than "4.18.25080.5" although it sorts lower as text.
-        for folder in sorted(platform.iterdir(), key=lambda entry: _version_key(entry.name), reverse=True):
-            executable = folder / "MpCmdRun.exe"
-            if executable.is_file():
+    try:
+        for executable in _defender_candidates():
+            if executable.is_file() and not _has_reparse_component(executable):
                 return executable
-    found = shutil.which("MpCmdRun.exe")
-    return Path(found) if found else None
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _known_folder(name: str) -> Path:
+    """Machine-known locations; caller environment variables are not authority."""
+    if os.name != "nt":
+        raise OSError("Microsoft Defender requires Windows")
+    import ctypes
+    from ctypes import wintypes
+    from uuid import UUID
+    identifiers = {
+        "program_files": "6d809377-6af0-444b-8957-a3773f02200e",  # ProgramFilesX64
+        "program_data": "62ab5d82-fdc1-4dc3-a9dd-070d1d495d97",
+    }
+    identifier = (ctypes.c_ubyte * 16).from_buffer_copy(UUID(identifiers[name]).bytes_le)
+    shell = ctypes.WinDLL("shell32", use_last_error=True)
+    shell.SHGetKnownFolderPath.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.HANDLE, ctypes.POINTER(ctypes.c_void_p)]
+    shell.SHGetKnownFolderPath.restype = ctypes.c_long
+    ole = ctypes.WinDLL("ole32")
+    ole.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    ole.CoTaskMemFree.restype = None
+    output = ctypes.c_void_p()
+    try:
+        if shell.SHGetKnownFolderPath(ctypes.byref(identifier), 0, None, ctypes.byref(output)) != 0 or not output.value:
+            raise OSError("Windows known-folder discovery failed")
+        path = Path(ctypes.wstring_at(output))
+        if not path.is_absolute():
+            raise OSError("Windows known-folder path is not absolute")
+        return path
+    finally:
+        if output.value:
+            ole.CoTaskMemFree(output)
+
+
+def _system_directory() -> Path:
+    if os.name != "nt":
+        raise OSError("Windows system directory unavailable")
+    import ctypes
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetSystemDirectoryW(buffer, len(buffer))
+    if not 0 < length < len(buffer):
+        raise OSError("Windows system directory unavailable")
+    return Path(buffer.value)
+
+
+def _defender_candidates() -> list[Path]:
+    installed = _known_folder("program_files") / "Windows Defender" / "MpCmdRun.exe"
+    platform = _known_folder("program_data") / "Microsoft" / "Windows Defender" / "Platform"
+    candidates = [installed]
+    if platform.is_dir() and not _has_reparse_component(platform):
+        folders = (folder for folder in platform.iterdir()
+                   if re.fullmatch(r"\d+\.\d+\.\d+\.\d+(?:-\d+)?", folder.name) and folder.is_dir())
+        candidates.extend(folder / "MpCmdRun.exe" for folder in sorted(folders, key=lambda p: _version_key(p.name), reverse=True))
+    return candidates
+
+
+def _trusted_process_environment() -> dict[str, str]:
+    system = _system_directory()
+    replaced = {"PATH", "PSMODULEPATH", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "PROGRAMFILES", "PROGRAMW6432", "PROGRAMDATA"}
+    env = {key: value for key, value in os.environ.items()
+           if key.upper() not in replaced and not key.upper().startswith(("DOTNET_", "COMPLUS_", "CORECLR_", "COR_"))}
+    env.update(PATH=str(system), SystemRoot=str(system.parent), WINDIR=str(system.parent),
+               SystemDrive=system.drive, ProgramFiles=str(_known_folder("program_files")),
+               ProgramW6432=str(_known_folder("program_files")), ProgramData=str(_known_folder("program_data")))
+    return env
+
+
+@contextmanager
+def _locked_scanner(executable: Path):
+    """Validate exact location and keep the executable non-writable until exit."""
+    if executable not in _defender_candidates() or _has_reparse_component(executable):
+        raise OSError("untrusted Microsoft Defender executable location")
+    import ctypes
+    from ctypes import wintypes
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    api.CreateFileW.restype = wintypes.HANDLE
+    api.GetFinalPathNameByHandleW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    api.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    api.CloseHandle.argtypes = [wintypes.HANDLE]
+    api.CloseHandle.restype = wintypes.BOOL
+    # GENERIC_READ, FILE_SHARE_READ only, OPEN_EXISTING. No write/delete sharing.
+    handle = api.CreateFileW(str(executable), 0x80000000, 1, None, 3, 0x80, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = api.GetFinalPathNameByHandleW(handle, buffer, len(buffer), 0)
+        final = buffer.value.removeprefix("\\\\?\\")
+        if not 0 < length < len(buffer) or Path(final) != executable or _has_reparse_component(executable):
+            raise OSError("Microsoft Defender executable identity changed")
+        yield
+    finally:
+        api.CloseHandle(handle)
 
 
 def _invoke_defender(path: Path) -> subprocess.CompletedProcess[str] | None:
     executable = _defender_exe()
     if executable is None:
         return None
-    return subprocess.run(
-        [str(executable), "-Scan", "-ScanType", "3", "-File", str(path), "-DisableRemediation"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=DEFENDER_TIMEOUT_SECONDS,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False,
-    )
+    with _locked_scanner(executable):
+        return subprocess.run(
+            [str(executable), "-Scan", "-ScanType", "3", "-File", str(path), "-DisableRemediation"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=DEFENDER_TIMEOUT_SECONDS,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False,
+            cwd=str(_system_directory()), env=_trusted_process_environment(),
+        )
 
 
 def _query_defender_status() -> dict[str, Any]:
@@ -594,11 +681,10 @@ def _query_defender_status() -> dict[str, Any]:
         return registry
     if os.name != 'nt':
         return {"available": False}
-    import ctypes
-    buffer = ctypes.create_unicode_buffer(32768)
-    if not ctypes.windll.kernel32.GetSystemDirectoryW(buffer, len(buffer)):
+    try:
+        system = _system_directory()
+    except OSError:
         return {'available': False}
-    system = Path(buffer.value)
     powershell = system / 'WindowsPowerShell' / 'v1.0' / 'powershell.exe'
     module = system / 'WindowsPowerShell' / 'v1.0' / 'Modules' / 'Defender' / 'Defender.psd1'
     utility = system / 'WindowsPowerShell' / 'v1.0' / 'Modules' / 'Microsoft.PowerShell.Utility' / 'Microsoft.PowerShell.Utility.psd1'
@@ -620,8 +706,7 @@ def _query_defender_status() -> dict[str, Any]:
             [str(powershell), "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False,
-            cwd=str(system), env={key: value for key, value in os.environ.items()
-                if not key.upper().startswith(('DOTNET_', 'COMPLUS_', 'CORECLR_', 'COR_', 'PSMODULEPATH'))},
+            cwd=str(system), env=_trusted_process_environment(),
         )
         if result.returncode != 0:
             blob = f"{result.stdout or ''}\n{result.stderr or ''}"
@@ -654,16 +739,8 @@ def _query_defender_registry_status() -> dict[str, Any]:
             engine = str(winreg.QueryValueEx(key, "EngineVersion")[0])
         if not _defender_policy_active(winreg):
             return {"available": False, "disabled": True}
-        platform_root = (
-            Path(os.environ.get("ProgramData", r"C:\ProgramData"))
-            / "Microsoft" / "Windows Defender" / "Platform"
-        )
-        platform_dirs = sorted(
-            (folder.name for folder in platform_root.iterdir()
-             if folder.is_dir() and (folder / "MpCmdRun.exe").is_file()),
-            key=_version_key,
-            reverse=True,
-        )
+        platform_dirs = [path.parent.name for path in _defender_candidates()[1:]
+                         if path.is_file() and not _has_reparse_component(path)]
         if not platform_dirs:
             return {"available": False}
         platform = re.sub(r"-\d+$", "", platform_dirs[0])

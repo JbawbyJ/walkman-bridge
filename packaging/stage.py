@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
@@ -20,12 +21,49 @@ ROOT = Path(__file__).resolve().parent.parent
 PACKAGING = ROOT / "packaging"
 BUILD = PACKAGING / "build" / "redlotus"
 CACHE = PACKAGING / ".cache" / "nightops"
-DEVICE_MODULES = {"device.py", "jsymphonic.py"}
+DEVICE_MODULES = {"device.py", "jsymphonic.py", "reconciliation.py"}
 
 
 def sha256(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def jsymphonic_archive_name(runtime_lock: dict) -> str:
+    relative = runtime_lock["jsymphonic"]["source_archive"]
+    if not isinstance(relative, str):
+        raise ValueError("Unsafe JSymphonic source archive path")
+    path = PurePosixPath(relative)
+    if (path.is_absolute() or "\\" in relative or ":" in relative or ".." in path.parts
+            or path.as_posix() != relative or not path.name.endswith(".zip")):
+        raise ValueError(f"Unsafe JSymphonic source archive path: {relative}")
+    return path.name
+
+
+def copy_pinned_jsymphonic(runtime_lock: dict, sources_dir: Path, packaging: Path = PACKAGING) -> Path:
+    """Copy the locked source archive into staged sources/ or fail closed."""
+    expected = runtime_lock["jsymphonic"].get("sha256")
+    if not isinstance(expected, str) or len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        raise ValueError("Pinned JSymphonic source archive hash mismatch")
+    name = jsymphonic_archive_name(runtime_lock)
+    relative = PurePosixPath(runtime_lock["jsymphonic"]["source_archive"])
+    archive = packaging.joinpath(*relative.parts)
+    if not archive.resolve().is_relative_to(packaging.resolve()) or archive.is_symlink() or not archive.is_file():
+        raise FileNotFoundError(f"Pinned JSymphonic source archive missing: {relative.as_posix()}")
+    if sha256(archive) != expected:
+        raise ValueError(f"Pinned JSymphonic source archive hash mismatch: {archive.name}")
+    sources_dir.mkdir(parents=True, exist_ok=True)
+    destination = sources_dir / name
+    temporary = destination.with_name(name + ".partial")
+    shutil.copyfile(archive, temporary)
+    try:
+        if sha256(temporary) != expected:
+            raise ValueError(f"Pinned JSymphonic source archive hash mismatch: {name}")
+        temporary.replace(destination)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return destination
 
 
 def reset_generated(directory: Path) -> None:
@@ -89,6 +127,38 @@ def checked(command, **kwargs):
     return completed
 
 
+def verify_engine_contract(java: Path, jar: Path):
+    """Reject a stale JAR using only a new disposable device fixture."""
+    def require(condition):
+        if not condition:
+            raise ValueError('Invalid recovery contract')
+    with tempfile.TemporaryDirectory(prefix='engine-contract-') as temporary:
+        mount = Path(temporary) / 'device'
+        (mount / 'OMGAUDIO').mkdir(parents=True)
+        prefix = [str(java.resolve()), '-cp', str(jar.resolve()), 'org.naurd.media.jsymphonic.headless.HeadlessCli']
+        for command, options in (('playlist-recover', ['--inspect']), ('playlist-recover', []), ('playlist-repair', [])):
+            result = subprocess.run([*prefix, command, '--device', str(mount), *options],
+                capture_output=True, text=True, encoding='utf-8', errors='strict', timeout=45,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            try:
+                events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+                require(all(isinstance(event, dict) for event in events))
+                if command == 'playlist-repair':
+                    require(result.returncode != 0)
+                    require(any(e.get('event') == 'fatal' and e.get('code') == 'PLAYLIST_LIBRARY_NOT_LOADED' for e in events))
+                    require(not any(e.get('event') == 'done' for e in events))
+                else:
+                    require(result.returncode == 0 and events[-1].get('event') == 'done')
+                    journal = next(e for e in events if e.get('event') == 'playlistJournal')
+                    require(journal.get('state') == 'none')
+                    require(re.fullmatch(r'[0-9a-f]{64}', journal.get('library_fingerprint', '')))
+                    require(journal.get('files') == [])
+                    if not options:
+                        require(journal.get('outcome') == 'none')
+            except (ValueError, StopIteration, IndexError, TypeError) as exc:
+                raise ValueError(f'Packaged engine lacks the required recovery contract: {command}') from exc
+
+
 def verify_requirements(wheels):
     locked = {row["name"].lower().replace("_", "-"): row["version"] for row in wheels}
     for line in (ROOT / "backend" / "requirements.txt").read_text().splitlines():
@@ -112,8 +182,8 @@ def stage(args):
         raise FileNotFoundError("Publish the self-contained .NET 10 scanner helper first")
     if not (ROOT / "frontend" / "dist" / "index.html").is_file():
         raise FileNotFoundError("Build the frontend before packaging")
-    if args.product == "bridge" and (not args.jar.is_file() or not (args.jsymphonic_source / "src").is_dir()):
-        raise FileNotFoundError("Bridge requires the headless JAR and its corresponding source checkout")
+    if args.product == "bridge" and not args.jar.is_file():
+        raise FileNotFoundError("Bridge requires the headless JAR")
 
     stage_root = BUILD / args.product
     reset_generated(stage_root)
@@ -173,6 +243,7 @@ def stage(args):
         release = (jdk / "release").read_text()
         if f'JAVA_VERSION="{runtime_lock["jdk"]["version"]}"' not in release:
             raise ValueError("JDK version does not match the runtime lock")
+        verify_engine_contract(jdk / 'bin' / 'java.exe', args.jar)
         checked([jdk / "bin" / "jlink.exe", "--add-modules",
                  "java.base,java.desktop,java.logging,java.naming,java.management",
                  "--strip-debug", "--no-header-files", "--no-man-pages", "--compress=zip-6",
@@ -182,17 +253,16 @@ def stage(args):
         java_notices = stage_root / "notices" / "java"
         java_notices.mkdir()
         shutil.copy2(jdk / "NOTICE", java_notices / "NOTICE")
+        sources = stage_root / "sources"
+        pinned_source = copy_pinned_jsymphonic(runtime_lock, sources)
         source_notices = stage_root / "notices" / "jsymphonic"
         source_notices.mkdir()
-        shutil.copy2(args.jsymphonic_source / "LICENSE", source_notices / "LICENSE")
-        sources = stage_root / "sources"
-        sources.mkdir()
-        with zipfile.ZipFile(sources / "jsymphonic.zip", "w", zipfile.ZIP_DEFLATED) as archive:
-            for source in sorted(args.jsymphonic_source.rglob("*")):
-                relative = source.relative_to(args.jsymphonic_source)
-                allowed = relative.parts[0] in {"src", "docs"} or relative.as_posix() in {"pom.xml", "LICENSE", "README.md", "INSTALLING-FFMPEG.md", "NATIVE-PLAYLISTS.md"}
-                if source.is_file() and allowed:
-                    archive.write(source, relative.as_posix())
+        with zipfile.ZipFile(pinned_source) as archive:
+            try:
+                license_bytes = archive.read("LICENSE")
+            except KeyError as error:
+                raise ValueError("Pinned JSymphonic source archive is missing LICENSE") from error
+        (source_notices / "LICENSE").write_bytes(license_bytes)
 
     (stage_root / "product.json").write_text(json.dumps({"product": args.product}) + "\n", encoding="utf-8")
     shutil.copy2(PACKAGING / "python-wheels.lock.json", stage_root / "python-wheels.lock.json")
@@ -214,8 +284,13 @@ def validate_layout(root: Path, product: str):
                 "python/python313.zip", "python/Lib/site-packages/fastapi/__init__.py",
                 "ffmpeg/ffmpeg.exe", "scanner-helper/RedLotus.ScanHelper.exe", "deno/deno.exe",
                 "backend/main.py", "backend/boot.py", "frontend/dist/index.html", "THIRD-PARTY-NOTICES.md"]
+    required += [f"notices/deno/{name}" for name in (
+        "LICENSE.md", "LICENSE-NODE-TYPES.txt", "LICENSE-RUSTY-V8.txt", "LICENSE-TYPESCRIPT.txt",
+        "LICENSE-UNDICI.txt", "LICENSE-V8.txt", "LICENSE-WEBGPU.md", "PROVENANCE.json", "README.md")]
     if product == "bridge":
-        required += ["jre/bin/java.exe", "backend/vendor/jsymphonic.jar", "sources/jsymphonic.zip"]
+        lock = json.loads((PACKAGING / "runtime-lock.json").read_text(encoding="utf-8"))
+        required += ["jre/bin/java.exe", "backend/vendor/jsymphonic.jar",
+                     f"sources/{jsymphonic_archive_name(lock)}"]
     for relative in required:
         if not (root / relative).is_file():
             raise FileNotFoundError(f"Product resource missing: {relative}")
@@ -237,7 +312,8 @@ def main():
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--jdk-home", type=Path, default=ROOT.parent / "tools" / "jdk-21.0.12+8")
     parser.add_argument("--jar", type=Path, default=ROOT / "backend" / "vendor" / "jsymphonic.jar")
-    parser.add_argument("--jsymphonic-source", type=Path, default=ROOT.parent / "jsymphonic")
+    parser.add_argument("--jsymphonic-source", type=Path, default=ROOT.parent / "jsymphonic",
+                        help="Accepted for existing build scripts. Staging copies the sha256-pinned archive instead.")
     parser.add_argument("--helper", type=Path, default=ROOT / "scanner-helper" / "artifacts" / "win-x64" / "RedLotus.ScanHelper.exe")
     stage(parser.parse_args())
 

@@ -8,8 +8,15 @@
   "ffmpeg": {
     "version": "9.0.1",
     "filename": "ffmpeg-9.0.1-essentials_build.zip",
-    "url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.1-essentials_build.zip",
+    "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip",
     "sha256": "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9"
+  },
+  "ffmpeg_source": {
+    "version": "9.0.1",
+    "commit": "bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa",
+    "filename": "ffmpeg-9.0.1.tar.xz",
+    "url": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz",
+    "sha256": "cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635"
   },
   "deno": {
     "version": "2.9.5",
@@ -25,10 +32,10 @@
   },
   "jsymphonic": {
     "repository": "JbawbyJ/jsymphonic",
-    "commit": "628d5b7e481d223ba8b110dce5801d5351e3c323",
-    "source_archive": "sources/jsymphonic-nightops-0.4.0-src.zip",
-    "sha256": "424c7878ae1adda012e5e7aed195b48c84c8a585d9f36d59182e069a1f00e569",
-    "source_revision": "nightops-0.4.0",
-    "source_description": "Release snapshot including local changes on the recorded base commit; archive SHA-256 identifies the complete source."
+    "commit": "453c69e5a0146821ddcafd0a0ee9ebbd25322dbb",
+    "source_archive": "sources/jsymphonic-453c69e5a014-src.zip",
+    "sha256": "abb614ba8fe2de7b870710094e16735b25afab903735a6b16fe247ec3da97db5",
+    "source_revision": "453c69e5a0146821ddcafd0a0ee9ebbd25322dbb",
+    "source_description": "Exact tracked source from the immutable recovery-hardening commit; archive SHA-256 identifies the complete source."
   }
 }

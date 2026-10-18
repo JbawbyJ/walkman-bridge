@@ -10,11 +10,15 @@ named pipe and calls Windows `GetNamedPipeServerProcessId`. Electron then claims
 the pending requests with the backend and sends their secrets over the exchange
 process's private stdin. The exchange verifies the pipe server PID again before
 writing any nonce or file identity. The elevated pipe server independently checks
-the exchange client PID using `GetNamedPipeClientProcessId`. The exchange also
-passes its own account SID (`--expected-client-sid`); the elevated server grants
-pipe access to that identity rather than to its own elevated identity, so a
-standard user who elevates with an administrator's credentials can still connect.
-The PID check, not the SID, binds the connection to the exact exchange process.
+the exchange client PID using `GetNamedPipeClientProcessId`.
+
+The server grants read/write to the original exchange process's Windows token
+SID as well as the elevated account, preserving alternate-admin credential UAC.
+It retains a handle to the expected client process until the exchange ends, and
+still verifies the connected PID before reading the payload. No Everyone,
+Authenticated Users, or generic Users access rule is added. The default test
+suite validates this ACL and kernel peer checks without requesting elevation;
+actual cross-account UAC remains an operator acceptance check.
 
 Private stdin and pipe payload: `{ "requests": [ScanRequest, ...] }`.
 Result: `{ "results": [ScanResponse, ...] }`. Each request includes the existing
@@ -31,6 +35,20 @@ directory is trusted, and child environments discard .NET hooks, profiler
 variables, and caller module paths. The published runtime disables startup-hook
 support; the actual single-file artifact is checked with a harmless hook DLL.
 
+Both ordinary and elevated scanner discovery use Windows-known machine folders,
+never `ProgramFiles`, `ProgramData`, or `PATH` values inherited from the launcher.
+Only the installed Defender executable or a numeric Defender platform directory
+is eligible. Every path component must be free of reparse points, and a retained
+read handle validates the final OS path and denies executable writes/deletion
+through process completion. Scanner children use the Windows system directory
+and discard runtime/module injection variables.
+
+This addresses an untrusted local launch environment. Trust rests on the OS
+installation folders and their Windows ACLs; this is not a claim of resisting a
+compromised administrator or tampered OS installation. No separate Authenticode
+publisher check has been added. The location/handle boundary is independent of
+Electron's inherited environment and does not add a scanner override or bypass.
+
 Build with the SDK version in `global.json`. Workspace SDK provisioning used the
 official Microsoft 10.0.400 win-x64 ZIP and verified its published SHA-512:
 `9b8b88590e4da131bfd0da7aa089d0fc04d5418d5f8607ec13d55dc5a17b4399afd54d496c12657fa05c6c6546dc5eab930f26ac6c50f2d3a7712c0fb378c366`.
@@ -45,7 +63,9 @@ powershell -File tests/Verify-PublishedHardening.ps1
 node ../electron/scanner-broker.test.cjs
 ```
 
-The opt-in `node tests/real-uac-smoke.cjs` requests real elevation for two generated
+The default native tests use a deliberately mismatched media hash so the real
+pipe exchange returns failure before invoking Defender. The opt-in
+`node tests/real-uac-smoke.cjs` requests real elevation for two generated
 silent WAV files and verifies their actual Defender results. Its backend is an
 isolated test fixture; it never accesses a Walkman. Cancellation is recorded as
 such and must not be reported as a successful elevated scan.
