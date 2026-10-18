@@ -7,7 +7,7 @@ def test_buffered_playback_retains_removed_copy_until_stop_and_drain(context):
     source = store.path(store.get(media_id))
     assert context.client.post('/api/playback/lease', json={'media_id': media_id}).status_code == 200
     assert context.client.get(f'/api/media/{media_id}/stream').status_code == 200
-    assert context.client.delete(f'/api/queue/items/{media_id}').status_code == 200
+    assert context.client.delete(f'/api/media/{media_id}').status_code == 200
     assert source.exists()
     assert context.client.post('/api/shutdown/drain').json()['busy'] is True
     assert context.client.request('DELETE', '/api/playback/lease', json={'media_id': media_id}).status_code == 200

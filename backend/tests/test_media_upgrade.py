@@ -227,7 +227,7 @@ def test_defender_threat_bytes_are_removed_and_the_item_stays_blocked(context):
     job = context.client.get('/api/jobs/' + rescan['job_id']).json()
     assert job['files'][0]['state'] == 'blocked' and 'removed' in job['files'][0]['detail']
     assert store.get(media_id)['status'] == 'blocked'
-    assert context.client.delete(f'/api/queue/items/{media_id}').status_code in (200, 204)
+    assert context.client.delete(f'/api/media/{media_id}').status_code in (200, 204)
     assert not (store.root / media_id).exists()
 
 

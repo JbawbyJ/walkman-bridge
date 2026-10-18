@@ -35,6 +35,7 @@ export default function App() {
 
 function Workspace({ product, version, session }) {
   const [items, setItems] = useState([]), [quota, setQuota] = useState(null)
+  const [queueItems, setQueueItems] = useState([])
   const [device, setDevice] = useState({ connected: false }), [tracks, setTracks] = useState([]), [etag, setEtag] = useState(null)
   const [jobs, setJobs] = useState([]), [operations, setOperations] = useState({ busy: false }), [pending, setPending] = useState(false)
   const [error, setError] = useState(null), [errorFatal, setErrorFatal] = useState(null), [pollError, setPollError] = useState(null), [pollFatal, setPollFatal] = useState(null), [jobError, setJobError] = useState(null), [notice, setNotice] = useState(null)
@@ -65,14 +66,14 @@ function Workspace({ product, version, session }) {
     try { const result = await api.prepare(id); prepareJobs.current.set(result.job_id, id); addJob(result.job_id, 'prepare') }
     catch (e) { showError(`Lossless preparation failed: ${e.message}`, fatalFrom(e)) }
   }
-  const player = usePlayer(items, product, prepare, session)
-  latest.current = { jobs, player, items, busy }
+  const player = usePlayer(items, product, prepare, session, queueItems)
+  latest.current = { jobs, player, items, queueItems, busy }
 
   const refresh = async () => {
     const queue = await api.queue()
     if (!mounted.current) return
-    const next = queue.items || []
-    setItems(next); setQuota(queue.quota)
+    const next = queue.library_items || queue.items || []
+    setItems(next); setQueueItems(queue.items || []); setQuota(queue.quota)
     if (Array.isArray(queue.playlists)) latest.current.player.syncPlaylists(queue.playlists)
     setSelection(previous => new Set([...previous].filter(id => next.some(item => item.id === id && transferable(item)))))
     if (latest.current.player.item && !next.some(item => item.id === latest.current.player.id)) await latest.current.player.forget()
@@ -170,7 +171,7 @@ function Workspace({ product, version, session }) {
   }
   const rescan = id => action(async () => { if (player.id === id) await player.stop(); const result = await api.rescan(id); addJob(result.job_id, 'rescan') })
   const remove = id => action(() => latest.current.player.removeFromQueue(id))
-  const move = (id, direction) => action(async () => { const next = moveTrack(latest.current.items, id, direction); await api.orderQueue(next.map(item => item.id)); setItems(next) })
+  const move = (id, direction) => action(async () => { const next = moveTrack(latest.current.queueItems, id, direction); await api.orderQueue(next.map(item => item.id)); setQueueItems(next) })
   const transfer = ids => action(async () => { const result = await api.transfer(ids); addJob(result.job_id, 'transfer'); setSelection(new Set()) })
   const backup = async () => {
     if (busy) return
@@ -186,14 +187,14 @@ function Workspace({ product, version, session }) {
     setDeleteTrack(null)
     action(async () => { await api.deleteTrack(track.id, etag); setNotice(`Removed ${track.title || 'track'} from the device.`) })
   }
-  const available = items.some(playable)
-  const queueProps = { items, player, busy, quota, onImport: () => fileInput.current?.click(), onImportLink: event => { if (!latest.current.busy) setLinkDialog({ opener: event.currentTarget }) }, onRemove: remove, onMove: move, onRescan: rescan }
+  const available = (player.activePlaylist ? items.filter(item => player.activePlaylist.media_ids.includes(item.id)) : queueItems).some(playable)
+  const queueProps = { items: queueItems, player, busy, quota, onImport: () => fileInput.current?.click(), onImportLink: event => { if (!latest.current.busy) setLinkDialog({ opener: event.currentTarget }) }, onRemove: remove, onMove: move, onRescan: rescan }
   const changeWing = (name, value) => { (name === 'queue' ? setShowQueue : setShowEq)(value); storePreference(`nightops:${product}:${name}-wing`, value) }
   const changeVisual = () => { const next = { spectrum: 'waveform', waveform: 'off', off: 'spectrum' }[visualMode] || 'spectrum'; setVisualMode(next); storePreference(`nightops:${product}:visual`, next) }
   const openManager = event => setMusicManager({ opener: event.currentTarget })
   const removeManagedMedia = async id => {
     if (latest.current.busy) throw new Error('Wait for the current operation to finish before removing music.')
-    await latest.current.player.removeFromQueue(id)
+    await latest.current.player.removeManagedMedia(id)
     await refresh()
   }
   const stagePlaylist = ids => {

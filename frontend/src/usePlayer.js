@@ -3,7 +3,7 @@ import { api } from './api.js'
 import { createAudioGraph, dspSettings } from './dsp.js'
 import { nextTrackId, playable, restoreSession } from './playback.js'
 
-export function usePlayer(items, product, onCodecError, session) {
+export function usePlayer(items, product, onCodecError, session, queueItems = items) {
   const [state, setState] = useState(() => {
     const ids = session?.playlist?.media_ids
     const stale = Array.isArray(ids) && !ids.includes(session?.media_id)
@@ -18,9 +18,9 @@ export function usePlayer(items, product, onCodecError, session) {
   const saveChain = useRef(Promise.resolve()), lastSave = useRef(0)
   const selectedId = useRef(state.id), positionRef = useRef(state.position), wantsPlay = useRef(false), generation = useRef(0)
   const leaseChain = useRef(Promise.resolve()), leasedId = useRef(null), loadingId = useRef(null)
-  const removing = useRef(new Set()), preparing = useRef(new Set())
+  const removing = useRef(new Map()), preparing = useRef(new Set())
   const sessionKey = `nightops:${product}:session`
-  latest.current = { items, state, dsp, onCodecError, sessionKey }
+  latest.current = { items, queueItems, state, dsp, onCodecError, sessionKey }
 
   const persist = () => {
     const s = latest.current.state
@@ -138,14 +138,16 @@ export function usePlayer(items, product, onCodecError, session) {
     setState(s => ({ ...s, id: null, position: 0, duration: 0, playing: false }))
     return saved
   }
-  const removeFromQueue = async id => {
-    removing.current.add(id)
+  const removeFromCollection = async (id, scope) => {
+    removing.current.set(id, scope)
     try {
       if (selectedId.current === id) await forget()
-      await api.removeQueueItem(id)
-      // Keep selection blocked until a queue refresh confirms its removal.
+      await (scope === 'queue' ? api.removeQueueItem(id) : api.removeManagedMedia(id))
+      // Keep selection blocked until refresh confirms the corresponding removal.
     } catch (error) { removing.current.delete(id); throw error }
   }
+  const removeFromQueue = id => removeFromCollection(id, 'queue')
+  const removeManagedMedia = id => removeFromCollection(id, 'library')
 
   useEffect(() => {
     const element = new Audio()
@@ -213,7 +215,9 @@ export function usePlayer(items, product, onCodecError, session) {
   }, [dsp, state.id, trackLoudness])
 
   useEffect(() => {
-    for (const id of removing.current) if (!items.some(item => item.id === id)) removing.current.delete(id)
+    for (const [id, scope] of removing.current) {
+      if (!(scope === 'queue' ? queueItems : items).some(item => item.id === id)) removing.current.delete(id)
+    }
     const current = items.find(item => item.id === selectedId.current)
     if (!current && selectedId.current && (items.length || audio.current?.getAttribute('src'))) {
       forget().catch(() => {})
@@ -227,7 +231,7 @@ export function usePlayer(items, product, onCodecError, session) {
       // Metadata restoration acquires a lease, but never requests playback.
       loadTrack(current, { position: positionRef.current })
     }
-  }, [items])
+  }, [items, queueItems])
 
   const seek = seconds => {
     if (!audio.current || !Number.isFinite(seconds)) return
@@ -238,7 +242,7 @@ export function usePlayer(items, product, onCodecError, session) {
 
   const collectionItems = () => playlistRef.current
     ? playlistRef.current.media_ids.map(id => latest.current.items.find(item => item.id === id)).filter(Boolean)
-    : latest.current.items
+    : latest.current.queueItems
   const clearPlaylist = () => {
     playlistRef.current = null; setActivePlaylist(null)
     return persist()
@@ -267,7 +271,7 @@ export function usePlayer(items, product, onCodecError, session) {
     ...state, graph, dsp, audio,
     activePlaylist, setPlaylist, clearPlaylist, syncPlaylists,
     item: items.find(item => item.id === state.id),
-    play, stop, advance, seek, forget, removeFromQueue,
+    play, stop, advance, seek, forget, removeFromQueue, removeManagedMedia,
     showError: error => setState(s => ({ ...s, error: error.message || String(error) })),
     toggle: () => state.playing ? pausePlayback() : play(selectedId.current, { position: positionRef.current }),
     volumeChange: volume => setState(s => ({ ...s, volume: Math.max(0, Math.min(1, volume)) })),

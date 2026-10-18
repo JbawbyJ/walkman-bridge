@@ -6,7 +6,7 @@ if (label && !/^[a-z0-9-]+$/.test(label)) throw new Error('Invalid output label'
 const output = path.resolve(__dirname, '../test-output', label ? `management-${label}` : 'management')
 fs.mkdirSync(output, { recursive: true }); app.setPath('userData', path.join(output, 'profile'))
 app.on('window-all-closed', () => {})
-const checks = [], calls = []; let product, items, lists, sony, saved, revision
+const checks = [], calls = []; let product, items, queued, lists, sony, saved, revision
 const wave = Buffer.alloc(44 + 44100 * 2)
 wave.write('RIFF'); wave.writeUInt32LE(wave.length - 8, 4); wave.write('WAVEfmt ', 8); wave.writeUInt32LE(16, 16); wave.writeUInt16LE(1, 20); wave.writeUInt16LE(1, 22); wave.writeUInt32LE(44100, 24); wave.writeUInt32LE(88200, 28); wave.writeUInt16LE(2, 32); wave.writeUInt16LE(16, 34); wave.write('data', 36); wave.writeUInt32LE(wave.length - 44, 40)
 const fixture = id => ({ id, name: `${id}.wav`, title: id === 'a' ? 'Ember' : 'Lotus', artist: 'Test Artist', album: 'Test Album', status: 'ready', scan: { ok: true }, duration_seconds: 1, mime: 'audio/wav', size_bytes: wave.length })
@@ -19,7 +19,7 @@ const server = http.createServer(async (req, res) => {
     let text = ''; for await (const chunk of req) text += chunk
     const body = text ? JSON.parse(text) : {}
     if (p === '/api/health') return json({ ok: true, product, version: '0.4.1' })
-    if (p === '/api/queue') return json({ items, playlists: lists })
+    if (p === '/api/queue') return json({ items: items.filter(item => queued.has(item.id)), library_items: items, playlists: lists })
     if (p === '/api/playback-state') { if (method === 'PATCH') saved = { ...saved, ...body }; return json({ ...saved, playlist: lists.find(l => l.id === saved.playlist_id) || null }) }
     if (p === '/api/playback/lease') return json({ ok: true })
     if (p === '/api/engine-busy') return json({ busy: false, active: [] })
@@ -47,7 +47,8 @@ const server = http.createServer(async (req, res) => {
       return json({ ok: true, job_id: 'native', playlist: row })
     }
     if (/\/api\/media\/[^/]+\/metadata$/.test(p)) { const row = items.find(i => i.id === p.split('/')[3]); Object.assign(row, body); return json(row) }
-    if (p.startsWith('/api/queue/items/')) { const id = p.split('/').at(-1); items = items.filter(i => i.id !== id); lists.forEach(l => l.media_ids = l.media_ids.filter(value => value !== id)); return json({ ok: true }) }
+    if (p.startsWith('/api/queue/items/')) { queued.delete(p.split('/').at(-1)); return json({ ok: true }) }
+    if (/^\/api\/media\/[^/]+$/.test(p) && method === 'DELETE') { const id = p.split('/').at(-1); items = items.filter(i => i.id !== id); queued.delete(id); lists.forEach(l => l.media_ids = l.media_ids.filter(value => value !== id)); return json({ ok: true }) }
     if (p.endsWith('/stream')) { res.setHeader('Content-Type', 'audio/wav'); return res.end(wave) }
     return json({ detail: `Unexpected fixture ${method} ${p}` }, 404)
   }
@@ -65,6 +66,7 @@ const ready = win => until(win, `!document.querySelector('.music-manager [role=s
 async function open(win) { await click(win, 'Manage music', 'body'); await until(win, `!!document.querySelector('.music-manager[open]')`); await delay(150) }
 async function verify(mode) {
   product = mode; items = [fixture('a'), fixture('b')]; lists = []; sony = []; saved = { media_id: 'a', volume: 0, repeat: 'off' }; revision = 0
+  queued = new Set(items.map(item => item.id))
   const origin = `http://127.0.0.1:${server.address().port}`, partition = session.fromPartition(`management-${mode}`)
   await partition.cookies.set({ url: origin, name: 'fixture', value: 'management', path: '/api', httpOnly: true, sameSite: 'strict' })
   const win = new BrowserWindow({ show: false, width: 1280, height: 850, webPreferences: { session: partition, sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
@@ -89,6 +91,14 @@ async function verify(mode) {
   await until(win, `document.querySelectorAll('.manager-members li').length===2`)
   await run(win, `document.querySelector('.manager-members li button:last-child').click()`); await ready(win)
   assert.equal(lists[0].media_ids.length, 1); assert.equal(items.length, 2)
+  await click(win, 'Done'); await until(win, `!document.querySelector('.music-manager')`)
+  const savedMembers = [...lists[0].media_ids]
+  await run(win, `document.querySelector('.queue-row-menu').open=true;document.querySelector('.queue-row-menu [aria-label$="from queue"]').click()`)
+  await until(win, `document.querySelectorAll('.queue-row').length===1`)
+  assert.equal(items.length, 2); assert.deepEqual(lists[0].media_ids, savedMembers)
+  await open(win)
+  assert.equal(await run(win, `document.querySelectorAll('.manager-file-row').length`), 2)
+  checks.push(`${mode}: queue-only removal preserves managed files and playlist membership`)
   if (mode === 'bridge') {
     await click(win, 'Sony playlists'); await enter(win, '[aria-label="New Sony playlist name"]', 'Sony Evening'); await click(win, 'Create playlist'); await ready(win)
     await until(win, `!!document.querySelector('.manager-add-tracks')`)
@@ -109,6 +119,9 @@ async function verify(mode) {
   const bounds = await run(win, `({horizontal:document.documentElement.scrollWidth>innerWidth+1,bottom:document.querySelector('.music-manager').getBoundingClientRect().bottom,height:innerHeight})`)
   assert.equal(bounds.horizontal, false); assert.ok(bounds.bottom <= bounds.height)
   fs.writeFileSync(path.join(output, `${mode}-manager.png`), (await win.webContents.capturePage()).toPNG())
+  await click(win, 'Remove selected'); await click(win, 'Confirm removal'); await ready(win)
+  assert.equal(items.length, 0); assert.deepEqual(lists[0].media_ids, [])
+  assert.ok(calls.some(call => call.p === '/api/media/a' && call.method === 'DELETE'))
   await click(win, 'Done'); await until(win, `!document.querySelector('.music-manager')`)
   await run(win, `window.dispatchEvent(new Event('walkman:stop-playback'))`); win.destroy()
   checks.push(`${mode}: metadata escaping, create/rename/reorder/play local playlist, membership-only removal, deletion confirmation, bounded manager`)

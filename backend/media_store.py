@@ -117,6 +117,11 @@ class MediaStore:
         self._db.row_factory = sqlite3.Row
         self._db.execute('''CREATE TABLE IF NOT EXISTS media (
             id TEXT PRIMARY KEY, record TEXT NOT NULL, position INTEGER)''')
+        # A null position remains the existing library-deletion tombstone.
+        # Queue membership is independent, so lease release/startup cannot
+        # mistake a removed queue entry for music awaiting deletion.
+        if 'queued' not in {row['name'] for row in self._db.execute('PRAGMA table_info(media)')}:
+            self._db.execute('ALTER TABLE media ADD COLUMN queued INTEGER NOT NULL DEFAULT 1')
         self._db.execute('CREATE TABLE IF NOT EXISTS playback_state (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)')
         self._db.execute('''CREATE TABLE IF NOT EXISTS local_playlists (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, media_ids TEXT NOT NULL,
@@ -269,6 +274,11 @@ class MediaStore:
     def queue(self):
         with self._lock:
             return [json.loads(row[0]) for row in self._db.execute(
+                'SELECT record FROM media WHERE position IS NOT NULL AND queued=1 ORDER BY position')]
+
+    def library(self):
+        with self._lock:
+            return [json.loads(row[0]) for row in self._db.execute(
                 'SELECT record FROM media WHERE position IS NOT NULL ORDER BY position')]
 
     def used_bytes(self):
@@ -298,7 +308,7 @@ class MediaStore:
     def reserve(self, size):
         with self._lock:
             if size < 0 or self.used_bytes() + self._reserved + size > self.limit:
-                raise MediaError('Managed cache is full; remove queue items to free space')
+                raise MediaError('Managed cache is full; remove managed files in Manage music to free space')
             self._reserved += size
         try:
             yield
@@ -358,7 +368,7 @@ class MediaStore:
                                              sha256=digest.hexdigest(), scan=None)}, playback='source')
                 with self._lock:
                     position = self._db.execute('SELECT COALESCE(MAX(position),-1)+1 FROM media').fetchone()[0]
-                    self._db.execute('INSERT INTO media VALUES(?,?,?)',
+                    self._db.execute('INSERT INTO media(id,record,position) VALUES(?,?,?)',
                                      (media_id, json.dumps(record), position))
                     self._db.commit()
                 return record
@@ -381,6 +391,11 @@ class MediaStore:
                 raise MediaError('Queue order must be an exact permutation of the current queue')
             self._db.executemany('UPDATE media SET position=? WHERE id=?', enumerate(ids))
             self._db.commit()
+
+    def remove_from_queue(self, media_id):
+        with self._lock, self._db:
+            self.get(media_id)
+            self._db.execute('UPDATE media SET queued=0 WHERE id=?', (media_id,))
 
     def remove(self, media_id):
         with self._lock:
