@@ -4,9 +4,9 @@
 and **Red Lotus Player**, version 0.4.1. `npm run dist:bridge` and `npm run dist:player`
 build one product. No command publishes or uploads a release.
 
-Use Windows 10/11 x64, Node 24+, a build Python 3.11+, and .NET SDK 10.0.400.
-The frontend build pins Vite 8.2.2 and its React plugin 6.1.1; React remains 18.3.1.
-Bridge also needs the pinned JSymphonic source/JAR and Temurin JDK 21.0.12+8.
+Use Windows 10/11 x64, Node 24+, a build Python 3.11+, and .NET SDK 10.0.402.
+The frontend build pins Vite 8.3.4 and its React plugin 6.1.2; React remains 18.3.1.
+Bridge also needs the pinned JSymphonic source/JAR and Temurin JDK 21.0.12.1+1.
 The workflow in `.github/workflows/windows-products.yml` provisions these tools
 and runs the complete build and checks on a clean Windows runner.
 The headless Java source is vendored in `packaging/sources` and checksum-locked;
@@ -25,8 +25,8 @@ dotnet publish scanner-helper/ScannerHelper/ScannerHelper.csproj -c Release -r w
 npm run dist
 ```
 
-The default local Bridge source/JDK paths are the sibling `../jsymphonic` and
-`../tools/jdk-21.0.12+8`. Pass `-JSymphonicSource`, `-Jar` and `-JdkHome` to
+The scripts retain the historical sibling `../jsymphonic` and
+`../tools/jdk-21.0.12+8` defaults. Supply the locked Temurin 21.0.12.1+1 explicitly. Pass `-JSymphonicSource`, `-Jar` and `-JdkHome` to
 `packaging/build-products.ps1` to use other prepared paths. If no matching local
 JDK is available, staging downloads the archive pinned in `runtime-lock.json`.
 Build the headless fork using `mvn -B -f <source>/pom.xml package`, run its tests,
@@ -48,8 +48,8 @@ The two executables have separate app IDs, package names, shortcuts and product
 manifests. The installed resources include their dependency notices and file-hash
 inventory in `runtime-manifest.json`.
 
-Both products bundle the isolated CPython 3.13.15 embeddable runtime, locked
-site-packages (including yt-dlp and its bundled EJS solver), Deno 2.9.5, ffmpeg,
+Both products bundle the isolated CPython 3.13.16 embeddable runtime, locked
+site-packages (including yt-dlp and its bundled EJS solver), Deno 2.9.7, ffmpeg,
 self-contained .NET scanner helper, backend source and built
 frontend with local fonts. Player excludes the JRE, JAR and device modules.
 Bridge carries its JRE legal notices and a JSymphonic source snapshot. Source

@@ -15,16 +15,16 @@
   "devDependencies": {
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "6.1.1",
+    "@vitejs/plugin-react": "6.1.2",
     "autoprefixer": "^10.4.20",
     "axe-core": "^4.10.3",
     "esbuild": "^0.28.2",
     "jsdom": "^26.1.0",
-    "playwright-core": "1.64.0",
+    "playwright-core": "1.64.1",
     "postcss": "^8.4.49",
     "braces": "file:overrides/braces",
     "tailwindcss": "^3.4.14",
-    "vite": "8.2.2"
+    "vite": "8.3.4"
   },
   "overrides": {
     "braces": "$braces",

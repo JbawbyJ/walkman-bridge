@@ -28,14 +28,18 @@ variables, and caller module paths. The published runtime disables startup-hook
 support; the actual single-file artifact is checked with a harmless hook DLL.
 
 Build with the SDK version in `global.json`. Workspace SDK provisioning used the
-official Microsoft 10.0.400 win-x64 ZIP and verified its published SHA-512:
-`9b8b88590e4da131bfd0da7aa089d0fc04d5418d5f8607ec13d55dc5a17b4399afd54d496c12657fa05c6c6546dc5eab930f26ac6c50f2d3a7712c0fb378c366`.
+official [Microsoft 10.0.402 win-x64 ZIP](https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.402/dotnet-sdk-10.0.402-win-x64.zip)
+and verified its published SHA-512 against the
+[.NET 10 release metadata](https://builds.dotnet.microsoft.com/dotnet/release-metadata/10.0/releases.json):
+`ae4fd528cb7e9f6af6aaf7de36715a69f761f183744f1bb3025d19f5a92447090ec561410e46266c1d10a63781ed6f3de771760bc76c876d87daabc367b898cd`.
+This SDK publishes the helper with the self-contained .NET 10.0.13 runtime.
 
-Verification commands (from this directory):
+Verification commands (from this directory), with `$Dotnet` set to the verified
+portable SDK's `dotnet.exe` path:
 
 ```
-../../tools/dotnet/dotnet.exe build ScannerHelper.Tests/ScannerHelper.Tests.csproj -c Release --artifacts-path artifacts/build
-../../tools/dotnet/dotnet.exe publish ScannerHelper/ScannerHelper.csproj -c Release --artifacts-path artifacts/build -o artifacts/win-x64
+& $Dotnet build ScannerHelper.Tests/ScannerHelper.Tests.csproj -c Release --artifacts-path artifacts/build
+& $Dotnet publish ScannerHelper/ScannerHelper.csproj -c Release --artifacts-path artifacts/build -o artifacts/win-x64
 artifacts/build/bin/ScannerHelper.Tests/release_win-x64/ScannerHelper.Tests.exe
 powershell -File tests/Verify-PublishedHardening.ps1
 node ../electron/scanner-broker.test.cjs

@@ -1,34 +1,34 @@
 {
   "python": {
-    "version": "3.13.15",
-    "filename": "python-3.13.15-embed-amd64.zip",
-    "url": "https://www.python.org/ftp/python/3.13.15/python-3.13.15-embed-amd64.zip",
-    "sha256": "d1f04d990aee1253d8569e8e5104e30fa9f5fa830899f14843448872d936a2cf"
+    "version": "3.13.16",
+    "filename": "python-3.13.16-embeddable-amd64.zip",
+    "url": "https://www.python.org/ftp/python/3.13.16/python-3.13.16-embeddable-amd64.zip",
+    "sha256": "589dc1e9d02549ca5f680710307ff9b77f6e3ffc4aa3efccd7fa54eeeafac94b"
   },
   "ffmpeg": {
-    "version": "9.0.1",
-    "filename": "ffmpeg-9.0.1-essentials_build.zip",
-    "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip",
-    "sha256": "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9"
+    "version": "9.0.2",
+    "filename": "ffmpeg-9.0.2-essentials_build.zip",
+    "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip",
+    "sha256": "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba"
   },
   "ffmpeg_source": {
-    "version": "9.0.1",
-    "commit": "bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa",
-    "filename": "ffmpeg-9.0.1.tar.xz",
-    "url": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz",
-    "sha256": "cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635"
+    "version": "9.0.2",
+    "commit": "946fcce07b6dcd0331c8cc609192aeff5e1924f8",
+    "filename": "ffmpeg-9.0.2.tar.xz",
+    "url": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+    "sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e"
   },
   "deno": {
-    "version": "2.9.5",
-    "filename": "deno-2.9.5-x86_64-pc-windows-msvc.zip",
-    "url": "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip",
-    "sha256": "171efab55ac6b9881fd53ee4c20f8bf3bb1340ffc618483746909014db12216a"
+    "version": "2.9.7",
+    "filename": "deno-2.9.7-x86_64-pc-windows-msvc.zip",
+    "url": "https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-pc-windows-msvc.zip",
+    "sha256": "a0c3101b4158d1dfb7d6a78a7bf0f3de80c96bb423c152beec8beb22786f2238"
   },
   "jdk": {
-    "version": "21.0.12",
-    "filename": "OpenJDK21U-jdk_x64_windows_hotspot_21.0.12_8.zip",
-    "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jdk_x64_windows_hotspot_21.0.12_8.zip",
-    "sha256": "9ba963ee2371874a74185d18bc7bb2ab9407df7683300855ed7606e0662321d0"
+    "version": "21.0.12.1",
+    "filename": "OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip",
+    "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip",
+    "sha256": "f9d6e191ab098c0d416e7d588a24420a8621cd2f4720dab2459b8b7b2d2d8b4e"
   },
   "jsymphonic": {
     "repository": "JbawbyJ/jsymphonic",
