@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { playable, transferable } from '../playback.js'
 import { fmtBytes } from '../format.js'
+import { metadataSourceLabel } from '../mediaImport.js'
 import '../music-manager.css'
 
 const label = track => track.title || track.name || `Track ${track.id}`
@@ -106,8 +107,23 @@ export default function MusicManager({ opener, onClose, onChanged, product, item
 
 function MetadataEditor({ item, disabled, onCancel, onSave }) {
   const keys = ['title', 'artist', 'album', 'genre', 'year', 'track']
-  const [draft, setDraft] = useState(Object.fromEntries(keys.map(key => [key, item[key] ?? ''])))
-  return <form className="manager-editor" onSubmit={e => { e.preventDefault(); onSave(draft) }}><h3>Edit music details</h3><p>{item.name}</p>{keys.map(key => <label key={key}>{({ track: 'Track number', year: 'Year' })[key] || key[0].toUpperCase() + key.slice(1)}<input value={draft[key]} maxLength={key === 'year' ? 4 : key === 'track' ? 9 : 512} inputMode={key === 'year' ? 'numeric' : 'text'} onChange={e => setDraft({ ...draft, [key]: e.target.value })} disabled={disabled} /></label>)}<div className="manager-actions"><button className="primary" disabled={disabled}>Save details</button><button type="button" onClick={onCancel}>Cancel</button></div></form>
+  const sourceId = useId()
+  const initial = Object.fromEntries(keys.map(key => [key, item.metadata_provenance?.[key] === 'missing' ? '' : String(item[key] ?? '')]))
+  const [draft, setDraft] = useState(initial)
+  const changes = Object.fromEntries(keys.filter(key => draft[key] !== initial[key]).map(key => [key, draft[key]]))
+  const changed = Object.keys(changes).length > 0
+  return <form className="manager-editor" onSubmit={e => { e.preventDefault(); if (!disabled && changed) onSave(changes) }}>
+    <h3>Edit music details</h3><p>{item.name}</p>
+    {keys.map(key => {
+      const name = ({ track: 'Track number', year: 'Year' })[key] || key[0].toUpperCase() + key.slice(1)
+      const descriptionId = `${sourceId}-${key}`
+      return <label key={key}>{name}
+        <input aria-label={name} aria-describedby={descriptionId} value={draft[key]} placeholder={item.metadata_provenance?.[key] === 'missing' ? 'Not supplied' : undefined} maxLength={key === 'year' ? 4 : key === 'track' ? 9 : 512} inputMode={key === 'year' ? 'numeric' : 'text'} onChange={e => setDraft({ ...draft, [key]: e.target.value })} disabled={disabled} />
+        <small id={descriptionId}>{draft[key] !== initial[key] ? 'Your edit (unsaved)' : metadataSourceLabel(item.metadata_provenance?.[key])}</small>
+      </label>
+    })}
+    <div className="manager-actions"><button className="primary" disabled={disabled || !changed}>Save details</button><button type="button" onClick={onCancel}>Cancel</button></div>
+  </form>
 }
 
 function PlaylistEditor({ playlist, ids, tracks, disabled, native, onRename, onSave, onDelete, onPlay, onStage }) {

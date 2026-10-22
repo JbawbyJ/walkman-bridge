@@ -1,6 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { artworkUrl, linkImportUrl, supplementalMetadata } from './mediaImport.js'
+import { artworkUrl, linkImportUrl, supplementalMetadata, metadataSourceLabel, artworkSourceLabel } from './mediaImport.js'
+
+test('metadata and artwork provenance distinguish source fields from user edits and placeholders', () => {
+  assert.equal(metadataSourceLabel('embedded'), 'Embedded file tags')
+  assert.equal(metadataSourceLabel('provider.youtube.artist'), 'YouTube metadata')
+  assert.equal(metadataSourceLabel('user_edit'), 'Your edit')
+  assert.equal(metadataSourceLabel('missing'), 'Not supplied by the source')
+  assert.equal(artworkSourceLabel({ artwork_provenance:'provider.youtube.thumbnail' }), 'YouTube thumbnail')
+  assert.equal(artworkSourceLabel({ artwork_provenance:'provider.soundcloud.artwork_url' }), 'SoundCloud track artwork')
+  assert.equal(artworkSourceLabel({ artwork_provenance:'embedded' }), 'Embedded artwork')
+})
 import { api } from './api.js'
 
 test('link submission uses the authenticated same-origin JSON API', async () => {

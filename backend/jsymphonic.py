@@ -451,6 +451,7 @@ def list_tracks(mount: Path) -> list[dict]:
                 "title": event.get("title") or "",
                 "artist": event.get("artist") or "",
                 "album": event.get("album") or "",
+                "genre": event.get("genre") or "",
                 "duration_seconds": event.get("durationSeconds"),
             })
     count = events[-1].get("count")

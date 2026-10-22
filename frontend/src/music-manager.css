@@ -30,6 +30,7 @@
 .manager-editor { min-width:0; align-self:start; padding:14px; border:1px solid #66463c; border-radius:6px; }
 .manager-editor h3 { margin:0; }.manager-editor p { overflow-wrap:anywhere; font-size:.8rem; }
 .manager-editor>label { display:grid; gap:5px; margin:12px 0; font-size:.8rem; }
+.manager-editor>label small { font-size:.75rem; line-height:1.4; }
 .manager-playlist-layout { display:grid; grid-template-columns:minmax(150px,220px) minmax(0,1fr); gap:20px; }
 .manager-playlist-layout aside { display:flex; flex-direction:column; gap:8px; min-width:0; }
 .manager-playlist-layout aside button { display:grid; text-align:left; gap:6px; overflow-wrap:anywhere; }

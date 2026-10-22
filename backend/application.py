@@ -27,7 +27,20 @@ from jobs import JobStore, JobStatus
 from media_service import MediaService
 import scan
 
-VERSION = '0.4.1'
+def application_version(root: Path | None = None) -> str:
+    root = root or Path(__file__).resolve().parent.parent
+    # stage.py copies the canonical package version into this packaged manifest.
+    metadata = root / ('runtime-manifest.json' if (root / 'product.json').is_file() else 'package.json')
+    try:
+        version = json.loads(metadata.read_text(encoding='utf-8'))['version']
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(f'Cannot read application version from {metadata}') from exc
+    if not isinstance(version, str) or not re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?', version):
+        raise RuntimeError(f'Invalid application version in {metadata}')
+    return version
+
+
+VERSION = application_version()
 
 class OrderBody(BaseModel):
     # Import batches are capped, but the persistent queue spans many batches.
@@ -358,6 +371,7 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
                 info = current['artifacts'].get('artwork')
                 source = current['artifacts']['source']
                 return (current.get('artwork_status') != 'ready' or info is None or info.get('purged')
+                        or current['artifacts'].get('artwork_source', {}).get('purged')
                         or source.get('purged') or (source.get('scan') or {}).get('reason_code') == 'defender_threat')
             with store.lease(media_id) as record:
                 if refused(record):

@@ -70,6 +70,36 @@ def normalize_metadata(tags: Mapping | None, original_name: str) -> dict:
     return result
 
 
+def supplied_metadata(tags: Mapping | None) -> dict:
+    """Normalize only actual supplied tags; never promote a display fallback."""
+    raw = {TAG_ALIASES.get(str(k).casefold(), str(k).casefold()): v
+           for k, v in (tags or {}).items() if _text(v)}
+    normalized = normalize_metadata(raw, '')
+    keys = set(raw)
+    if 'date' in keys or 'year' in keys:
+        keys.update(('date', 'year'))
+    return {k: v for k, v in normalized.items() if k in keys}
+
+
+def resolve_metadata(embedded, hints, overrides, original_name, hint_sources=None):
+    """User edits > embedded tags > provider fields > honest display fallback."""
+    embedded, hints = supplied_metadata(embedded), supplied_metadata(hints)
+    overrides = {k: v for k, v in (overrides or {}).items() if k in TRANSFER_TAGS}
+    values = normalize_metadata({**hints, **embedded, **overrides}, original_name)
+    provenance = {}
+    for key in set(values) | set(overrides):
+        if key in overrides:
+            provenance[key] = 'user_edit'
+        elif key in embedded:
+            provenance[key] = 'embedded'
+        elif key in hints:
+            label = (hint_sources or {}).get(key, 'provider_legacy')
+            provenance[key] = label if isinstance(label, str) and re.fullmatch(r'[a-zA-Z0-9_.]{1,100}', label) else 'provider'
+        else:
+            provenance[key] = 'filename' if key == 'title' else 'missing'
+    return values, provenance
+
+
 def parse_ffmetadata(text: str, *, include_audio_stream: bool = False) -> dict:
     """Parse bounded global tags and optionally the explicitly mapped audio stream.
 

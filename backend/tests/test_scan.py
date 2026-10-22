@@ -74,6 +74,28 @@ def test_defender_receives_absolute_path(monkeypatch, tmp_path: Path):
     assert seen[0].is_absolute()
 
 
+@pytest.mark.parametrize(('extension','data'), [('.jpg',b'\xff\xd8\xff'+b'j'*20+b'\xff\xd9'),
+    ('.png',b'\x89PNG\r\n\x1a\n'+b'p'*20),('.webp',b'RIFF'+b'\x20\x00\x00\x00'+b'WEBP'+b'w'*20)])
+def test_provider_artwork_requires_defender_and_never_counts_as_audio(tmp_path, monkeypatch, extension, data):
+    path=tmp_path/('artwork-source'+extension);path.write_bytes(data)
+    assert scan.scan_artwork_source(path).ok
+    assert not scan.scan_audio(path).ok
+    assert not scan.scan_artwork(path).ok
+    monkeypatch.setattr(scan,'_invoke_defender',lambda p:SimpleNamespace(returncode=2,stdout='found 1 threats',stderr=''))
+    blocked=scan.scan_artwork_source(path)
+    assert not blocked.ok and blocked.reason_code=='defender_threat'
+
+
+def test_provider_artwork_rejects_spoofed_format_before_defender(tmp_path, monkeypatch):
+    called=[]
+    monkeypatch.setattr(scan,'_invoke_defender',lambda p:called.append(p))
+    path=tmp_path/'artwork-source.jpg';path.write_bytes(b'<svg>'+b'x'*20)
+    assert scan.scan_artwork_source(path).reason_code=='invalid_artwork_format'
+    path.write_bytes(b'\xff\xd8\xff'+b'x'*(4*1024*1024))
+    assert scan.scan_artwork_source(path).reason_code=='invalid_artwork_format'
+    assert not called
+
+
 @pytest.mark.parametrize(
     ("outcome", "state", "code", "defender_status"),
     [

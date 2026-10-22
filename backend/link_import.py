@@ -15,6 +15,7 @@ import queue
 import re
 import socket
 import ssl
+import stat
 import subprocess
 import sys
 import threading
@@ -31,6 +32,7 @@ MAX_SECONDS = 10 * 60
 MAX_REDIRECTS = 5
 MAX_REQUESTS = 128
 MAX_METADATA_BYTES = 16 * 1024 * 1024
+MAX_ARTWORK_BYTES = 4 * 1024 * 1024
 _VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _SLUG = re.compile(r"^[A-Za-z0-9_-]+$")
 _SAFE_EXTENSIONS = {"m4a", "mp3", "ogg"}
@@ -74,6 +76,7 @@ class DownloadedMedia:
     path: Path
     name: str
     metadata: dict[str, Any]
+    artwork_path: Path | None = None
 
 
 def validate_url(url: str) -> str:
@@ -251,7 +254,7 @@ def _request_value(request: Any, name: str, default: Any = None) -> Any:
     return value() if callable(value) else value
 
 
-def _open_https(request: Any, *, budget: _TransportBudget):
+def _open_https(request: Any, *, budget: _TransportBudget, media: bool | None = None):
     from yt_dlp.networking import Response
     from yt_dlp.networking.exceptions import HTTPError
 
@@ -284,8 +287,8 @@ def _open_https(request: Any, *, budget: _TransportBudget):
                 method, body = "GET", None
             continue
         length = response.headers.get("Content-Length")
-        media = _is_media_url(url)
-        response_limit = budget.max_media_bytes - budget.media_bytes if media else MAX_METADATA_BYTES - budget.metadata_bytes
+        is_media = _is_media_url(url) if media is None else media
+        response_limit = budget.max_media_bytes - budget.media_bytes if is_media else MAX_METADATA_BYTES - budget.metadata_bytes
         if length:
             try:
                 parsed_length = int(length)
@@ -298,7 +301,7 @@ def _open_https(request: Any, *, budget: _TransportBudget):
                 connection.close()
                 raise LinkImportError("The provider returned an invalid response size.") from exc
         wrapped = Response(
-            _BoundedReader(response, connection, budget, media),
+            _BoundedReader(response, connection, budget, is_media),
             url=url,
             headers=dict(response.headers.items()),
             status=response.status,
@@ -313,6 +316,77 @@ def _open_https(request: Any, *, budget: _TransportBudget):
 def _safe_name(title: str, extension: str) -> str:
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title).strip(" .")[:180] or "Imported track"
     return f"{cleaned}.{extension}"
+
+
+def _download_artwork(info: dict[str, Any], directory: Path, budget: _TransportBudget,
+                      provider: str) -> tuple[Path | None, dict[str, str]]:
+    """Save opaque track-image bytes only; the caller must scan before decoding."""
+    from yt_dlp.networking import Request
+    from yt_dlp.networking.exceptions import RequestError
+
+    if provider == "soundcloud" and info.get("_nightops_track_artwork") is not True:
+        return None, {"artwork_status": "missing", "artwork_reason": "no_confirmed_track_artwork"}
+
+    url, field = info.get("thumbnail"), "thumbnail"
+    if not isinstance(url, str) or not url:
+        url = None
+        thumbnails = info.get("thumbnails")
+        if isinstance(thumbnails, list):
+            for thumbnail in reversed(thumbnails[:64]):
+                candidate = thumbnail.get("url") if isinstance(thumbnail, dict) else None
+                if isinstance(candidate, str) and candidate:
+                    url, field = candidate, "thumbnails"
+                    break
+    if not url:
+        return None, {"artwork_status": "missing"}
+    unavailable = {"artwork_status": "unavailable", "artwork_reason": "thumbnail_download_failed"}
+    if len(url) > 8192:
+        return None, {**unavailable, "artwork_reason": "thumbnail_url_invalid"}
+    path = None
+    owned = False
+    response = None
+    try:
+        # Images count against the same media-byte, request and time budget even
+        # on metadata CDN hosts; redirects keep this classification.
+        response = _open_https(Request(url), budget=budget, media=True)
+        content = bytearray()
+        while True:
+            chunk = response.read(min(64 * 1024, MAX_ARTWORK_BYTES + 1 - len(content)))
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > MAX_ARTWORK_BYTES:
+                return None, {**unavailable, "artwork_reason": "thumbnail_too_large"}
+        if content.startswith(b"\xff\xd8\xff"):
+            extension = "jpg"
+        elif content.startswith(b"\x89PNG\r\n\x1a\n"):
+            extension = "png"
+        elif content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+            extension = "webp"
+        else:
+            return None, {**unavailable, "artwork_reason": "thumbnail_format_unsupported"}
+        path = directory / f"thumbnail.{extension}"
+        with path.open("xb") as output:
+            owned = True
+            output.write(content)
+        source_field = "artwork_url" if provider == "soundcloud" else field
+        return path, {"artwork_status": "downloaded", "artwork_provenance": f"provider.{provider}.{source_field}"}
+    except (LinkImportError, RequestError, OSError, ValueError, http.client.HTTPException) as exc:
+        # HTTPError owns its response even when _open_https never returned it.
+        if response is None:
+            response = getattr(exc, "response", None)
+        if owned and path is not None:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        return None, unavailable
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except OSError:
+                pass
 
 
 def _cleanup(directory: Path, before: set[Path]) -> None:
@@ -370,6 +444,41 @@ def _secure_ydl_class(base, budget: _TransportBudget, module_open):
             return info
 
     return SecureYoutubeDL
+
+
+def _track_artwork_soundcloud_class(base):
+    """Gate the pinned extractor's avatar fallback on original track artwork.
+
+    yt-dlp's private _extract_thumbnails seam is covered by fixture tests against
+    our pinned dependency. A missing/changed seam leaves the explicit flag false,
+    so normalized thumbnails cannot become artwork while audio still imports.
+    """
+    class TrackArtworkSoundcloudIE(base):
+        @classmethod
+        def ie_key(cls):
+            return "Soundcloud"
+
+        def _extract_thumbnails(self, info):
+            from yt_dlp.utils import url_or_none
+
+            original = getattr(super(), "_extract_thumbnails", None)
+            artwork = url_or_none(info.get("artwork_url")) if isinstance(info, dict) else None
+            if not artwork or not callable(original):
+                return []
+            # Match the extractor's URL acceptance and remove its avatar source,
+            # so malformed track artwork cannot be relabelled as a profile image.
+            thumbnails = original({**info, "artwork_url": artwork, "user": {}})
+            self._nightops_track_artwork = bool(thumbnails)
+            return thumbnails
+
+        def _real_extract(self, url):
+            self._nightops_track_artwork = False
+            result = super()._real_extract(url)
+            if isinstance(result, dict):
+                result["_nightops_track_artwork"] = self._nightops_track_artwork
+            return result
+
+    return TrackArtworkSoundcloudIE
 
 
 def _download_link_inprocess(
@@ -450,6 +559,9 @@ def _download_link_inprocess(
         runtime_guard = _restricted_deno_environment() if is_youtube else nullcontext()
         with runtime_guard:
             with SecureYoutubeDL(options) as ydl:
+                if not is_youtube:
+                    from yt_dlp.extractor.soundcloud import SoundcloudIE
+                    ydl.add_info_extractor(_track_artwork_soundcloud_class(SoundcloudIE)())
                 info = ydl.extract_info(canonical, download=True)
                 if not isinstance(info, dict) or info.get("_type") in {"playlist", "multi_video"}:
                     raise LinkImportError("The link did not resolve to one track.")
@@ -478,30 +590,66 @@ def _download_link_inprocess(
     extension = path.suffix.lower().lstrip(".")
     provider = "youtube" if is_youtube else "soundcloud"
     def bounded(value: Any, limit: int = 512) -> str:
-        return str(value or "")[:limit]
+        return value.strip()[:limit] if isinstance(value, str) else ""
+
+    def bounded_number(value: Any, maximum: int = 9999) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            return None
+        if isinstance(value, float) and not value.is_integer():
+            return None
+        try:
+            number = int(value)
+            return number if 0 < number <= maximum else None
+        except (ValueError, OverflowError):
+            return None
+
+    provenance: dict[str, str] = {}
+    def text_field(canonical_field: str, fields: tuple[str, ...], limit: int = 512) -> str:
+        for field in fields:
+            value = bounded(info.get(field), limit)
+            if value:
+                provenance[canonical_field] = f"provider.{provider}.{field}"
+                return value
+        return ""
+
+    artist = text_field("artist", ("artist",))
+    if not artist and isinstance(info.get("artists"), list):
+        artist = "; ".join(value for raw in info["artists"][:16] if (value := bounded(raw)))[:512]
+        if artist:
+            provenance["artist"] = f"provider.{provider}.artists"
 
     release_year_raw = info.get("release_year") or bounded(info.get("release_date"), 8)[:4]
-    try:
-        release_year = int(release_year_raw) if release_year_raw else None
-    except (TypeError, ValueError):
-        release_year = None
+    release_year = bounded_number(release_year_raw)
+    if release_year:
+        provenance["year"] = f"provider.{provider}.{'release_year' if info.get('release_year') else 'release_date'}"
+    track, disc = bounded_number(info.get("track_number")), bounded_number(info.get("disc_number"))
+    for field, value, source in (("track", track, "track_number"), ("disc", disc, "disc_number")):
+        if value:
+            provenance[field] = f"provider.{provider}.{source}"
+    duration = info.get("duration")
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not 0 <= duration <= 1 << 40:
+        duration = None
     metadata = {
         "provider": provider,
         "source_url": canonical,
         "id": bounded(info.get("id"), 128),
-        "title": bounded(info.get("track") or info.get("title") or "Imported track"),
-        "artist": bounded(info.get("artist") or info.get("creator")),
+        "title": text_field("title", ("track", "title")),
+        "artist": artist,
         "uploader": bounded(info.get("uploader")),
-        "album": bounded(info.get("album")),
-        "album_artist": bounded(info.get("album_artist")),
-        "genre": bounded(info.get("genre"), 128),
+        "album": text_field("album", ("album",)),
+        "album_artist": text_field("album_artist", ("album_artist",)),
+        "genre": text_field("genre", ("genre",), 128),
         "year": release_year,
-        "track": info.get("track_number"),
-        "disc": info.get("disc_number"),
-        "duration": info.get("duration"),
+        "track": track,
+        "disc": disc,
+        "duration": duration,
         "extension": extension,
+        "metadata_provenance": provenance,
     }
-    return DownloadedMedia(path=path, name=_safe_name(metadata["title"], extension), metadata=metadata)
+    artwork_path, artwork_metadata = _download_artwork(info, resolved_directory, budget, provider)
+    metadata.update(artwork_metadata)
+    return DownloadedMedia(path=path, name=_safe_name(metadata["title"], extension), metadata=metadata,
+                           artwork_path=artwork_path)
 
 
 class _ProcessContainment:
@@ -614,7 +762,9 @@ def download_link(
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
         process = subprocess.Popen(
-            [sys.executable, "-I", "-B", str(worker)],
+            # -I ignores PYTHONUTF8/PYTHONIOENCODING, so make the JSONL encoding
+            # explicit even when isolated Windows Python defaults to cp1252.
+            [sys.executable, "-I", "-X", "utf8", "-B", str(worker)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -697,4 +847,20 @@ def download_link(
     path = Path(result["path"]).resolve(strict=True)
     if path.parent != directory:
         raise LinkImportError("The isolated worker returned a file outside the managed cache.")
-    return DownloadedMedia(path=path, name=str(result["name"])[:256], metadata=dict(result["metadata"]))
+    artwork_path = None
+    if result.get("artwork_path") is not None:
+        try:
+            candidate = Path(result["artwork_path"])
+            attributes = candidate.lstat()
+            artwork_path = candidate.resolve(strict=True)
+            if (candidate.is_symlink() or not stat.S_ISREG(attributes.st_mode)
+                    or getattr(attributes, "st_file_attributes", 0) & 0x400
+                    or artwork_path.parent != directory
+                    or candidate.name not in {"thumbnail.jpg", "thumbnail.png", "thumbnail.webp"}
+                    or not 0 < attributes.st_size <= MAX_ARTWORK_BYTES
+                    or path.stat().st_size + attributes.st_size > max_bytes):
+                raise ValueError("invalid artwork")
+        except (OSError, TypeError, ValueError):
+            raise LinkImportError("The isolated worker returned invalid artwork outside the cache or size limit.") from None
+    return DownloadedMedia(path=path, name=str(result["name"])[:256], metadata=dict(result["metadata"]),
+                           artwork_path=artwork_path)

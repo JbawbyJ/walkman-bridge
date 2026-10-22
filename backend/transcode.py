@@ -16,7 +16,7 @@ import threading
 from pathlib import Path
 from collections.abc import Mapping
 
-from metadata import METADATA_LIMIT, TRANSFER_TAGS, normalize_metadata, parse_ffmetadata
+from metadata import METADATA_LIMIT, TRANSFER_TAGS, normalize_metadata, supplied_metadata, parse_ffmetadata
 
 
 class AudioError(RuntimeError):
@@ -145,7 +145,7 @@ def _run_bounded(cmd, *, timeout=600, output_limit=8 * 1024**2, stdout_limit=0):
 
 
 def convert_managed(src: Path, out: Path, kind: str, max_bytes: int,
-                    metadata: Mapping | None = None) -> Path:
+                    metadata: Mapping | None = None, artwork: Path | None = None) -> Path:
     """Called only while a cleared source lease is held by MediaService.
 
     No resampling or lossy codec in the playback compatibility derivative.
@@ -158,13 +158,17 @@ def convert_managed(src: Path, out: Path, kind: str, max_bytes: int,
                 '-ac', '2', '-id3v2_version', '3'])
     tags = []
     if metadata is not None:
-        normalized = normalize_metadata(metadata, '')
+        normalized = supplied_metadata(metadata)
         for key in TRANSFER_TAGS:
             # Explicit empty values remove malformed inherited numeric tags.
             tags.extend(['-metadata', f'{key}={normalized.get(key, "")}'])
+    image_input = ['-protocol_whitelist', 'file,pipe', '-i', str(artwork)] if artwork is not None else []
+    image_output = (['-map', '1:v:0', '-c:v', 'copy', '-disposition:v:0', 'attached_pic',
+                     '-metadata:s:v:0', 'title=Cover artwork', '-metadata:s:v:0', 'comment=Cover (front)']
+                    if artwork is not None else ['-vn'])
     cmd = [_ensure_ffmpeg(), '-nostdin', '-v', 'error', '-y',
            '-protocol_whitelist', 'file,pipe', '-max_alloc', '67108864',
-           '-i', str(src), '-map', '0:a:0', '-vn', '-map_metadata', '0',
+           '-i', str(src), *image_input, '-map', '0:a:0', *image_output, '-map_metadata', '0',
            *tags, *options, '-fs', str(max_bytes), str(out)]
     try:
         result = _run_bounded(cmd)
@@ -216,7 +220,8 @@ def analyze_cleared_audio(src: Path) -> dict:
     return result
 
 
-def extract_cleared_artwork(src: Path, out: Path, max_bytes: int = 1024 * 1024) -> Path | None:
+def extract_cleared_artwork(src: Path, out: Path, max_bytes: int = 1024 * 1024,
+                            *, standalone: bool = False) -> Path | None:
     """Extract one embedded cover from a cleared source into a bounded JPEG.
 
     The caller holds the source lease and must scan this new derivative before
@@ -230,7 +235,7 @@ def extract_cleared_artwork(src: Path, out: Path, max_bytes: int = 1024 * 1024) 
     cmd = [_ensure_ffmpeg(), '-hide_banner', '-nostdin', '-nostats', '-v', 'error', '-y',
            '-protocol_whitelist', 'file,pipe', '-max_alloc', '67108864', '-threads', '1',
            '-max_pixels', '16777216', '-filter_threads', '1',
-           '-i', str(src), '-map', '0:v:disp:attached_pic:0', '-an', '-sn', '-dn',
+           '-i', str(src), '-map', '0:v:0' if standalone else '0:v:disp:attached_pic:0', '-an', '-sn', '-dn',
            '-map_metadata', '-1', '-map_chapters', '-1', '-frames:v', '1',
            '-vf', "scale=w='min(512,iw)':h='min(512,ih)':force_original_aspect_ratio=decrease,setsar=1",
            '-threads', '1', '-c:v', 'mjpeg', '-q:v', '3', '-pix_fmt', 'yuvj420p',

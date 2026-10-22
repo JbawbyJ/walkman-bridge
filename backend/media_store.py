@@ -19,7 +19,7 @@ MAX_BATCH = 2 * 1024**3
 MAX_FILES = 200
 CACHE_LIMIT = 10 * 1024**3
 MIMES = {'.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.flac': 'audio/flac',
-         '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.ogg': 'audio/ogg',
+         '.m4a': 'audio/mp4', '.mp4': 'video/mp4', '.aac': 'audio/aac', '.ogg': 'audio/ogg',
          '.opus': 'audio/ogg', '.wma': 'audio/x-ms-wma', '.aif': 'audio/aiff', '.aiff': 'audio/aiff'}
 
 def public_scan(record):
@@ -167,7 +167,8 @@ class MediaStore:
                 shutil.rmtree(folder)
                 continue
             retained = {value['name'] for value in known[folder.name]['artifacts'].values()}
-            for name in ('playback.flac', 'transfer.mp3', 'artwork.jpg'):
+            for name in ('playback.flac', 'transfer.mp3', 'artwork.jpg',
+                         'artwork-source.jpg', 'artwork-source.png', 'artwork-source.webp'):
                 path = folder / name
                 if name not in retained and path.exists():
                     no_links(path, self.root)
@@ -396,6 +397,41 @@ class MediaStore:
             self._db.commit()
             return record
 
+    def import_artwork_source(self, media_id, extension, stream):
+        """Retain opaque image bytes; callers must scan before decoding/serving."""
+        if extension not in ('.jpg', '.png', '.webp'):
+            raise MediaError('Unsupported provider artwork format')
+        stream.seek(0, 2)
+        size = stream.tell()
+        stream.seek(0)
+        if not 0 < size <= 4 * 1024 * 1024:
+            raise MediaError('Provider artwork exceeds 4 MiB')
+        record = self.get(media_id)
+        path = self.path(record).parent / ('artwork-source' + extension)
+        with self.reserve(size):
+            created = False
+            try:
+                digest, count = hashlib.sha256(), 0
+                with path.open('xb') as target:
+                    created = True
+                    while chunk := stream.read(65536):
+                        count += len(chunk)
+                        if count > size:
+                            raise MediaError('Provider artwork changed during copy')
+                        digest.update(chunk)
+                        target.write(chunk)
+                    target.flush()
+                    os.fsync(target.fileno())
+                if count != size:
+                    raise MediaError('Incomplete provider artwork copy')
+                record['artifacts']['artwork_source'] = dict(name=path.name, size_bytes=size,
+                                                            sha256=digest.hexdigest(), scan=None)
+                return self.update(media_id, artifacts=record['artifacts'])
+            except BaseException:
+                if created:
+                    path.unlink(missing_ok=True)
+                raise
+
     def reorder(self, ids):
         with self._lock:
             current = [r['id'] for r in self.queue()]
@@ -451,10 +487,11 @@ class MediaStore:
                 self._cleanup(media_id)
 
     def public(self, record):
-        result = {k: v for k, v in record.items() if k not in ('artifacts', 'playback', 'metadata_hints', 'metadata_overrides')}
+        result = {k: v for k, v in record.items() if k not in ('artifacts', 'playback', 'metadata_hints', 'metadata_overrides', 'metadata_hint_provenance')}
         result['scan'] = public_scan(result.get('scan'))
         artifacts = record.get('artifacts') or {}
         refused = (artifacts.get('source', {}).get('purged') or artifacts.get('artwork', {}).get('purged')
+                   or artifacts.get('artwork_source', {}).get('purged')
                    or (artifacts.get('source', {}).get('scan') or {}).get('reason_code') == 'defender_threat')
         if record.get('artwork_status') == 'ready' and not refused:
             result['artwork_url'] = f'/api/media/{record["id"]}/artwork'
@@ -561,10 +598,15 @@ class MediaStore:
                 raise MediaError('Track number must be positive, optionally followed by a total such as 2/10')
             keys = set(changes) | ({'date'} if 'year' in changes else set())
             values = {key: normalized.get(key) for key in keys}
-            overrides = {**record.get('metadata_overrides', {}), **values}
+            override_values = dict(values)
+            for key in keys:
+                if not str(merged.get(key) or '').strip():
+                    override_values[key] = None
+            overrides = {**record.get('metadata_overrides', {}), **override_values}
             if all(record.get(key) == value for key, value in values.items()) and overrides == record.get('metadata_overrides', {}):
                 return record
-            return self.update(media_id, **values, metadata_overrides=overrides,
+            provenance = {**record.get('metadata_provenance', {}), **{key: 'user_edit' for key in keys}}
+            return self.update(media_id, **values, metadata_overrides=overrides, metadata_provenance=provenance,
                 metadata_revision=record.get('metadata_revision', 0) + 1)
 
     def playback_state(self, changes=None):

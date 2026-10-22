@@ -236,7 +236,7 @@ function Workspace({ product, version, session, appearance }) {
   return <div className={`nightops-app ${isBridge ? 'bridge-composition' : 'player-composition'}`}>
     <a className="skip-link" href="#workspace">Skip to content</a>
     <Brand product={product} version={version} />
-    <input ref={fileInput} aria-label="Choose audio files" type="file" multiple accept="audio/*,.mp3,.flac,.wav,.m4a,.aac,.ogg,.opus" hidden onChange={e => { importFiles(e.target.files); e.target.value = '' }} />
+    <input ref={fileInput} aria-label="Choose audio or MP4 files" type="file" multiple accept="audio/*,.mp4,.mp3,.flac,.wav,.m4a,.aac,.ogg,.opus" hidden onChange={e => { importFiles(e.target.files); e.target.value = '' }} />
     {surface.strip && <div className={`notice-strip ${surface.errorStyle ? 'error' : ''}`} role={surface.role}><span>{surface.strip}</span><button type="button" aria-label="Dismiss notification" onClick={dismissNotice}>{pollError && !error && !notice ? 'Reconnecting…' : '×'}</button></div>}
     {operations.draining && <div className="notice-strip" role="status">Finishing admitted operations before closing… Playback has stopped.</div>}
     <div className="workspace-shell">

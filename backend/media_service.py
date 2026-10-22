@@ -6,10 +6,10 @@ from pathlib import Path
 from jobs import JobStatus
 from media_store import MAX_FILE, BlockedBytesRemoved, MediaError, locked_read, no_links
 from transcode import convert_managed, analyze_cleared_audio, extract_cleared_artwork
-from metadata import normalize_metadata, TRANSFER_TAGS
+from metadata import normalize_metadata, supplied_metadata, resolve_metadata, TRANSFER_TAGS
 from scan_bridge import ELEVATION_WAIT_SECONDS
 
-METADATA_POLICY = 3
+METADATA_POLICY = 4
 
 
 class MediaService:
@@ -40,6 +40,8 @@ class MediaService:
         path = self.store.path(record, artifact)  # raises BlockedBytesRemoved for purged threat bytes
         previous = record['artifacts'][artifact].get('scan')
         if previous and self.scanner.clearance_valid(path, previous):
+            if artifact == 'artwork_source':
+                return previous
             if artifact == 'artwork':
                 self.store.update(media_id, artwork_status='ready')
                 return previous
@@ -47,19 +49,20 @@ class MediaService:
             if job:
                 job.update_file(media_id, state='ready', scan=previous, detail='Cleared')
             return previous
-        if artifact == 'artwork':
+        if artifact in ('artwork', 'artwork_source'):
             self.store.update(media_id, artwork_status='scanning')
         else:
             self.store.update(media_id, status='scanning')
         if job:
             job.set_phase('scanning')
             job.update_file(media_id, state='scanning')
-        scan_file = self.scanner.scan_artwork if artifact == 'artwork' else self.scanner.scan_audio
+        scan_file = (self.scanner.scan_artwork_source if artifact == 'artwork_source' else
+                     self.scanner.scan_artwork if artifact == 'artwork' else self.scanner.scan_audio)
         result = scan_file(path).to_dict()
         trusted_status = None
         if result.get('reason_code') == 'defender_elevation_required':
             request = self.bridge.request(media_id, path, result['sha256'], result['size_bytes'], batch_id=batch_id)
-            if artifact == 'artwork':
+            if artifact in ('artwork', 'artwork_source'):
                 self.store.update(media_id, artwork_status='awaiting_permission')
             else:
                 self.store.update(media_id, status='awaiting_permission', scan=result)
@@ -85,14 +88,18 @@ class MediaService:
         record = self.store.get(media_id)
         record['artifacts'][artifact]['scan'] = result
         status = 'ready' if valid else ('blocked' if result.get('state') in ('THREAT', 'BLOCKED', 'REJECTED') else 'failed')
-        if artifact == 'artwork':
+        if artifact in ('artwork', 'artwork_source'):
+            if artifact == 'artwork_source' and valid:
+                status = 'pending'
             self.store.update(media_id, artifacts=record['artifacts'], artwork_status=status)
         else:
             self.store.update(media_id, artifacts=record['artifacts'], status=status, scan=result)
         if result.get('reason_code') == 'defender_threat':
             # Refuse the bytes the moment Defender reports, before the rest of the batch is processed;
             # purge_threats deletes them once every read lock has been released.
-            self.store.refuse_artifacts(media_id, None if artifact == 'source' else [artifact])
+            refused = (['artwork_source', 'artwork', 'playback', 'transfer'] if artifact == 'artwork_source'
+                       else ['artwork', 'playback', 'transfer'] if artifact == 'artwork' else [artifact])
+            self.store.refuse_artifacts(media_id, None if artifact == 'source' else refused)
         if job:
             job.update_file(media_id, state=status, scan=result,
                             reason_code=result.get('reason_code'), detail=result.get('reason', ''))
@@ -175,8 +182,18 @@ class MediaService:
         with locked_read(source, self.store.root):
             self.clear(media_id, job=job)
             self.prepare_metadata(media_id)
+            self.prepare_artwork(media_id)
             record = self.store.get(media_id)
+            artwork_sha = (record['artifacts'].get('artwork', {}).get('sha256')
+                           if record.get('artwork_status') == 'ready' else None)
             existing = record['artifacts'].get(kind)
+            if existing and not existing.get('purged'):
+                try:
+                    self.store.path(record, kind)
+                except FileNotFoundError:
+                    record['artifacts'].pop(kind)
+                    self.store.update(media_id, artifacts=record['artifacts'])
+                    existing = None
             if existing and existing.get('purged'):
                 # The source is clean; a refused derivative whose unlink a reader held is removed now
                 # and regenerated, instead of reporting the item as blocked.
@@ -185,8 +202,9 @@ class MediaService:
                 except OSError as exc:
                     raise MediaError(f'The previous {kind} file is still in use; retry shortly') from exc
                 existing = record['artifacts'].get(kind)
-            if existing and kind == 'transfer' and (existing.get('metadata_policy') != METADATA_POLICY
-                    or existing.get('metadata_revision', 0) != record.get('metadata_revision', 0)):
+            if existing and (existing.get('metadata_policy') != METADATA_POLICY
+                    or existing.get('metadata_revision', 0) != record.get('metadata_revision', 0)
+                    or existing.get('artwork_sha256') != artwork_sha):
                 # A previous release's untagged transfer.mp3 must not retain cache labels.
                 self.store.path(record, kind).unlink()
                 record['artifacts'].pop(kind)
@@ -203,13 +221,22 @@ class MediaService:
             out = source.parent / ('playback.flac' if kind == 'playback' else 'transfer.mp3')
             with self.store.reserve(MAX_FILE):
                 try:
-                    convert_managed(source, out, kind, MAX_FILE,
-                                    metadata=normalize_metadata(record, record['name']))
+                    with ExitStack() as artwork_lock:
+                        options = {}
+                        if record.get('artwork_status') == 'ready':
+                            image = self.store.path(record, 'artwork')
+                            artwork_lock.enter_context(locked_read(image, self.store.root))
+                            self.clear(media_id, 'artwork')
+                            options['artwork'] = image
+                        convert_managed(source, out, kind, MAX_FILE,
+                            metadata={key: record.get('metadata_overrides', {}).get(key, record.get(key)) for key in TRANSFER_TAGS
+                                      if record.get('metadata_provenance', {}).get(key) != 'missing'}, **options)
                     with locked_read(out, self.store.root) as stream:
                         digest = hashlib.file_digest(stream, 'sha256').hexdigest()
                         record = self.store.get(media_id)
                         record['artifacts'][kind] = dict(name=out.name, size_bytes=out.stat().st_size,
                                                         sha256=digest, scan=None, metadata_policy=METADATA_POLICY,
+                                                        artwork_sha256=artwork_sha,
                                                         metadata_revision=record.get('metadata_revision', 0))
                         self.store.update(media_id, artifacts=record['artifacts'])
                         if scan_output:
@@ -229,31 +256,53 @@ class MediaService:
         if record.get('metadata_policy') == METADATA_POLICY:
             return record
         measured = analyze_cleared_audio(self.store.path(record))
-        hints = record.get('metadata_hints') or {}
+        hints = dict(record.get('metadata_hints') or {})
+        # Older link records stored normalized display labels as provider hints.
+        if not record.get('metadata_hint_provenance'):
+            for key, fallback in (('artist', 'Unknown artist'), ('album', 'Unknown album')):
+                if hints.get(key) == fallback:
+                    hints.pop(key)
         embedded = {key: value for key, value in measured.items()
                     if value is not None and (not isinstance(value, str) or value.strip())}
-        tags = normalize_metadata({**hints, **embedded, **(record.get('metadata_overrides') or {})}, record['name'])
+        tags, provenance = resolve_metadata(embedded, hints, record.get('metadata_overrides'),
+                                            record['name'], record.get('metadata_hint_provenance'))
         # Clear previously stored malformed optional tags instead of restoring raw decoder text.
         values = {key: tags.get(key) for key in TRANSFER_TAGS}
         values.update({key: measured[key] for key in ('duration_seconds', 'integrated_lufs', 'has_artwork')
                        if key in measured})
-        return self.store.update(media_id, **values, analyzed=True, metadata_policy=METADATA_POLICY)
+        return self.store.update(media_id, **values, metadata_provenance=provenance,
+                                 analyzed=True, metadata_policy=METADATA_POLICY)
 
     def prepare_artwork(self, media_id):
         record = self.store.get(media_id)
-        if not record.get('has_artwork'):
+        if not record.get('has_artwork') and 'artwork_source' not in record['artifacts']:
             return
         out = self.store.path(record).parent / 'artwork.jpg'
         with locked_read(self.store.path(record), self.store.root):
             # Source clearance failure fails the import even when artwork is optional.
             self.clear(media_id)
             try:
+                if 'artwork' in record['artifacts'] and not record['artifacts']['artwork'].get('purged'):
+                    try:
+                        self.store.path(record, 'artwork')
+                    except FileNotFoundError:
+                        record['artifacts'].pop('artwork')
+                        self.store.update(media_id, artifacts=record['artifacts'])
                 if record['artifacts'].get('artwork', {}).get('purged'):
                     # Retry a held removal; still held raises OSError and leaves the artwork failed.
                     record = self.store.purge_artifact(media_id, 'artwork')
                 if 'artwork' not in record['artifacts']:
                     with self.store.reserve(1024 * 1024):
-                        generated = extract_cleared_artwork(self.store.path(record), out)
+                        with ExitStack() as image_lock:
+                            # A genuine embedded cover takes priority over a provider thumbnail.
+                            source = self.store.path(record)
+                            options, provenance = {}, 'embedded'
+                            if not record.get('has_artwork'):
+                                source = self.store.path(record, 'artwork_source')
+                                image_lock.enter_context(locked_read(source, self.store.root))
+                                self.clear(media_id, 'artwork_source')
+                                options, provenance = {'standalone': True}, record.get('provider_artwork_provenance', 'provider_thumbnail')
+                            generated = extract_cleared_artwork(source, out, **options)
                         if generated is None:
                             self.store.update(media_id, artwork_status='none')
                             return
@@ -262,7 +311,7 @@ class MediaService:
                             record = self.store.get(media_id)
                             record['artifacts']['artwork'] = dict(name=out.name,
                                 size_bytes=out.stat().st_size, sha256=digest, scan=None)
-                            self.store.update(media_id, artifacts=record['artifacts'])
+                            self.store.update(media_id, artifacts=record['artifacts'], artwork_provenance=provenance)
                 with locked_read(out, self.store.root):
                     self.clear(media_id, 'artwork')
             except Exception:
@@ -292,8 +341,21 @@ class MediaService:
                     record = self.store.import_file(downloaded.name, stream, media_id=media_id)
                 leases = self.hold([media_id])
                 # Provider metadata is text, never instructions/HTML or a filesystem path.
-                hints = normalize_metadata(downloaded.metadata, record['name'])
-                self.store.update(media_id, metadata_hints=hints, import_source='link')
+                hints = supplied_metadata(downloaded.metadata)
+                self.store.update(media_id, metadata_hints=hints,
+                    metadata_hint_provenance=downloaded.metadata.get('metadata_provenance', {}), import_source='link')
+                artwork = getattr(downloaded, 'artwork_path', None)
+                if artwork is not None:
+                    artwork = Path(artwork)
+                    no_links(artwork, folder)
+                    with locked_read(artwork, self.store.root) as image:
+                        self.store.import_artwork_source(media_id, artwork.suffix.lower(), image)
+                    label = downloaded.metadata.get('artwork_provenance', 'provider_thumbnail')
+                    if label not in ('provider.youtube.thumbnail', 'provider.youtube.thumbnails', 'provider.soundcloud.artwork_url'):
+                        label = 'provider_thumbnail'
+                    self.store.update(media_id, provider_artwork_provenance=label)
+                elif downloaded.metadata.get('artwork_status') in ('missing', 'unavailable'):
+                    self.store.update(media_id, artwork_status=downloaded.metadata['artwork_status'])
                 job.update_file(media_id, name=record['name'], state='queued', detail='Downloaded; awaiting Defender clearance')
             delegated = True
             self.run(job_id, [media_id], ticket, leases, kind='import')

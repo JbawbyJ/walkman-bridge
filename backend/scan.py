@@ -161,6 +161,15 @@ def scan_artwork(path: Path) -> ScanResult:
     return result
 
 
+def scan_artwork_source(path: Path) -> ScanResult:
+    """Scan bounded opaque provider image bytes before any image decoder runs."""
+    path = Path(os.path.abspath(path))
+    pid = begin(str(path))
+    result = _scan(path, pid, artwork_source=True)
+    update(pid, result.state, result.reason_code)
+    return result
+
+
 def _result(pid: str, *, ok: bool, state: str, reason: str, reason_code: str,
             defender_status: str = "not_scanned", fingerprint: tuple[str, int] = ("", 0),
             status: dict[str, Any] | None = None) -> ScanResult:
@@ -175,7 +184,7 @@ def _result(pid: str, *, ok: bool, state: str, reason: str, reason_code: str,
     )
 
 
-def _scan(path: Path, pid: str, *, artwork=False) -> ScanResult:
+def _scan(path: Path, pid: str, *, artwork=False, artwork_source=False) -> ScanResult:
     try:
         if _has_reparse_component(path):
             return _result(pid, ok=False, state="BLOCKED", reason="reparse paths are not scannable", reason_code="reparse_path")
@@ -185,10 +194,11 @@ def _scan(path: Path, pid: str, *, artwork=False) -> ScanResult:
     if fingerprint[1] <= 0 or fingerprint[1] > MAX_BYTES:
         return _result(pid, ok=False, state="BLOCKED", reason="file size is outside policy", reason_code="invalid_size", fingerprint=fingerprint)
 
-    format_error = _validate_artwork_format(path, fingerprint[1]) if artwork else _validate_audio_format(path, fingerprint[1])
+    format_error = (_validate_artwork_source_format(path, fingerprint[1]) if artwork_source else
+                    _validate_artwork_format(path, fingerprint[1]) if artwork else _validate_audio_format(path, fingerprint[1]))
     if format_error:
         return _result(pid, ok=False, state="BLOCKED", reason=format_error,
-                       reason_code="invalid_artwork_format" if artwork else "invalid_audio_format", fingerprint=fingerprint)
+                       reason_code="invalid_artwork_format" if artwork or artwork_source else "invalid_audio_format", fingerprint=fingerprint)
 
     try:
         invocation = _invoke_defender(path)
@@ -371,6 +381,20 @@ def _validate_artwork_format(path: Path, size: int) -> str | None:
     if start != b'\xff\xd8\xff' or end != b'\xff\xd9':
         return 'Artwork JPEG signature is invalid'
     return None
+
+
+def _validate_artwork_source_format(path: Path, size: int) -> str | None:
+    if path.name not in {'artwork-source.jpg', 'artwork-source.png', 'artwork-source.webp'} or not 12 <= size <= 4 * 1024 * 1024:
+        return 'Provider artwork must be a managed image no larger than 4 MiB'
+    try:
+        with path.open('rb') as stream:
+            header = stream.read(12)
+    except OSError:
+        return 'Provider artwork could not be read'
+    valid = {'.jpg': header.startswith(b'\xff\xd8\xff'),
+             '.png': header.startswith(b'\x89PNG\r\n\x1a\n'),
+             '.webp': header[:4] == b'RIFF' and header[8:12] == b'WEBP'}
+    return None if valid.get(path.suffix) else 'Provider artwork signature does not match its format'
 
 
 def _validate_id3(tag: bytes) -> bool:

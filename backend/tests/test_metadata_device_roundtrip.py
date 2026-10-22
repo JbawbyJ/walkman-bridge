@@ -103,6 +103,7 @@ def real_context(tmp_path, monkeypatch):
     (mount / 'OMGAUDIO').mkdir(parents=True)
     scanner = Scanner()
     scanner.scan_artwork = scanner.scan_audio
+    scanner.scan_artwork_source = scanner.scan_audio
     checked_calls = []
 
     def assert_cleared(path):
@@ -122,15 +123,17 @@ def real_context(tmp_path, monkeypatch):
         checked_calls.append('real_analysis_after_clearance')
         return analyze(path)
 
-    def checked_convert(src, out, kind, max_bytes, metadata=None):
+    def checked_convert(src, out, kind, max_bytes, metadata=None, artwork=None):
         assert_cleared(src)
         checked_calls.append('real_conversion_after_clearance')
-        return convert(src, out, kind, max_bytes, metadata=metadata)
+        if artwork is not None:
+            assert_cleared(artwork)
+        return convert(src, out, kind, max_bytes, metadata=metadata, artwork=artwork)
 
-    def checked_extract(src, out):
+    def checked_extract(src, out, **options):
         assert_cleared(src)
         checked_calls.append('real_artwork_extraction_after_clearance')
-        return extract(src, out)
+        return extract(src, out, **options)
 
     def checked_add(target, paths, callback):
         assert target == mount
@@ -195,7 +198,7 @@ def test_real_tagged_metadata_reaches_walkman_oma(real_context, evidence):
     assert {key: item[key] for key in tags} == tags
     assert item['year'] == 2024
     track, transfer, oma = _transfer(context, media_id)
-    for key in ('title', 'artist', 'album'):
+    for key in ('title', 'artist', 'album', 'genre'):
         assert track[key] == tags[key]
     mp3, device_tags = _text_frames(transfer), _text_frames(oma)
     for frame, key in [('TIT2', 'title'), ('TPE1', 'artist'), ('TALB', 'album'), ('TCON', 'genre')]:
@@ -216,10 +219,12 @@ def test_real_untagged_original_name_reaches_walkman(real_context, evidence):
     expected = {'title': 'Evening rehearsal', 'artist': 'Unknown artist', 'album': 'Unknown album'}
     assert {key: item[key] for key in expected} == expected
     track, transfer, oma = _transfer(context, media_id)
-    assert {key: track[key] for key in expected} == expected
+    assert {key: track[key] for key in expected} == {**expected, 'artist': '', 'album': ''}
     mp3, device_tags = _text_frames(transfer), _text_frames(oma)
-    for frame, key in [('TIT2', 'title'), ('TPE1', 'artist'), ('TALB', 'album')]:
-        assert mp3[frame] == device_tags[frame] == [expected[key]]
+    assert mp3['TIT2'] == device_tags['TIT2'] == [expected['title']]
+    for frame in ('TPE1', 'TALB', 'TCON'):
+        assert frame not in mp3
+        assert device_tags.get(frame, ['']) == ['']
     assert media_id not in json.dumps(device_tags)
     evidence.append({'test': 'untagged_original_filename', 'passed': True,
         'expected': expected, 'mp3_frames': mp3, 'oma_frames': device_tags,
@@ -247,12 +252,12 @@ def test_legacy_transfer_cache_is_regenerated_before_java(real_context, evidence
     new_hash = hashlib.sha256(transfer.read_bytes()).hexdigest()
     assert new_hash != previous_hash
     assert context.checked_calls.count('real_conversion_after_clearance') == before_conversions + 1
-    expected = {'title': 'Recovered session', 'artist': 'Unknown artist', 'album': 'Unknown album'}
+    expected = {'title': 'Recovered session', 'artist': '', 'album': ''}
     assert {key: track[key] for key in expected} == expected
     device_tags = _text_frames(oma)
     assert device_tags['TIT2'] == ['Recovered session']
-    assert device_tags['TPE1'] == ['Unknown artist']
-    assert device_tags['TALB'] == ['Unknown album']
+    assert device_tags['TPE1'] == ['']
+    assert device_tags['TALB'] == ['']
     assert media_id not in json.dumps(device_tags)
     refreshed = store.get(media_id)
     assert refreshed['artifacts']['transfer']['scan']['sha256'] == new_hash

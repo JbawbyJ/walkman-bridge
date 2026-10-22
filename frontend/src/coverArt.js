@@ -1,5 +1,5 @@
 import { createElement } from 'react'
-import { artworkUrl } from './mediaImport.js'
+import { artworkUrl, artworkSourceLabel } from './mediaImport.js'
 
 // Listening deck and transfer-row thumbnails share one square frame.
 // The cleared JPEG is already bounded to 512px on its long side, so these
@@ -12,6 +12,11 @@ export const COVER_FRAME = Object.freeze({
 const label = value => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : ''
 
 export function coverAltText(item) {
+  if (item?.artwork_provenance?.startsWith('provider.')) {
+    const source = artworkSourceLabel(item)
+    const name = [item?.title, item?.name].map(label).find(Boolean)
+    return name ? `${source} for ${name.slice(0, 180)}` : source
+  }
   const name = [item?.album, item?.title, item?.name].map(label).find(Boolean)
   return name ? `Cover for ${name.slice(0, 180)}` : 'Album cover'
 }
@@ -49,6 +54,7 @@ export function CoverArtView({ item, variant = 'deck', decorative = false, faile
       className: `cover-media${shown ? ' is-shown' : ''}`,
       src: presentation.src,
       alt: presentation.alt,
+      title: artworkSourceLabel(item),
       width: frame.width,
       height: frame.height,
       loading: presentation.loading,

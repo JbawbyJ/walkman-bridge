@@ -33,9 +33,9 @@
   "jsymphonic": {
     "repository": "JbawbyJ/jsymphonic",
     "commit": "37958266b44e4e0f214a3457edf81a6aa8928a2f",
-    "source_archive": "sources/jsymphonic-37958266b44e-src.zip",
-    "sha256": "38a8730df478238e74ae8e12083b0a0116e6fab0846caf393abf05fdc7515ecf",
-    "source_revision": "37958266b44e4e0f214a3457edf81a6aa8928a2f",
-    "source_description": "Exact tracked source from the immutable UTF-16 metadata repair commit; archive SHA-256 identifies the complete source."
+    "source_archive": "sources/jsymphonic-metadata-guard-0.4.3-20261019-src.zip",
+    "sha256": "fca4deeb238ec892591b4ecad626c00286840a14abbb719e82fab96081479660",
+    "source_revision": "metadata-guard-0.4.3-20261019",
+    "source_description": "Release snapshot including local changes on the recorded base commit; archive SHA-256 identifies the complete source."
   }
 }

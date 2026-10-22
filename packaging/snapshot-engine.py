@@ -23,7 +23,11 @@ def main():
     with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for source in sorted(args.source.rglob("*")):
             relative = source.relative_to(args.source)
-            allowed = relative.parts[0] in {"src", "docs"} or relative.as_posix() in {"pom.xml", "LICENSE", "README.md", "INSTALLING-FFMPEG.md", "NATIVE-PLAYLISTS.md"}
+            allowed = (relative.parts[0] in {"src", "docs"}
+                       or relative.parts[:2] == (".github", "workflows")
+                       or relative.as_posix() in {"pom.xml", "LICENSE", "README.md",
+                           "INSTALLING-FFMPEG.md", "NATIVE-PLAYLISTS.md", "JACKET.md",
+                           "METADATA-EXPORT.md", "RECOVERY-REVIEW.md"})
             if source.is_file() and allowed:
                 entry = zipfile.ZipInfo(relative.as_posix(), date_time=(2026, 1, 1, 0, 0, 0))
                 entry.compress_type = zipfile.ZIP_DEFLATED

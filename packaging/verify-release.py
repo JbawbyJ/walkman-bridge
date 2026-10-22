@@ -28,9 +28,10 @@ HISTORICAL_INSTALLERS = {
     'player/Red-Lotus-Player-Setup-0.4.0-x64.exe':
         '393dad9bfb124d4e34760ead3ebf610f5eb37d4ebadbd863d7cd4101443f1b47',
 }
-# Independently reviewed native-playlist engine; update only with new engine
-# review evidence, independently of the desktop product's version/branding.
-REVIEWED_ENGINE_SHA256 = '556cf46b7453620ae391dd04a983a687df35cf9b5eadd9d5df934d40afdc0997'
+# Independently reviewed metadata engine with all-GINF artwork preservation
+# (156 tests, including native artwork guard checks). Update only with fresh
+# engine review evidence, independently of desktop version/branding.
+REVIEWED_ENGINE_SHA256 = 'eaec932e5bb4f1d3997cffe322d3c3a4e6222d096b179ab5681fb49ade8771b4'
 DEVICE_MODULES = {'device.py', 'jsymphonic.py', 'reconciliation.py'}
 BUILDER_RESOURCE_FILES = {'runtime-manifest.json', 'app.asar', 'elevate.exe'}
 

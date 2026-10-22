@@ -152,7 +152,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           & $java -version
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python -m pytest backend/tests/test_analysis.py backend/tests/test_metadata.py backend/tests/test_real_mock.py backend/tests/test_real_recovery.py backend/tests/test_metadata_device_roundtrip.py -q -p no:cacheprovider -rs
+          python -m pytest backend/tests/test_analysis.py backend/tests/test_metadata.py backend/tests/test_real_mock.py backend/tests/test_real_recovery.py backend/tests/test_metadata_device_roundtrip.py backend/tests/test_mp4_metadata_artwork.py -q -p no:cacheprovider -rs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Audit runtime dependencies
         run: |
@@ -182,7 +182,7 @@ jobs:
           if (-not (Test-Path -LiteralPath $env:WALKMAN_BRIDGE_JAVA)) { throw "staged java missing: $env:WALKMAN_BRIDGE_JAVA" }
           New-Item -ItemType Directory -Force deno | Out-Null
           Copy-Item -LiteralPath packaging/build/redlotus/player/deno/deno.exe -Destination deno/deno.exe
-          python -m pytest backend/tests/test_real_mock.py backend/tests/test_real_recovery.py backend/tests/test_metadata.py backend/tests/test_metadata_device_roundtrip.py backend/tests/test_analysis.py backend/tests/test_link_import.py -q -p no:cacheprovider -rs
+          python -m pytest backend/tests/test_real_mock.py backend/tests/test_real_recovery.py backend/tests/test_metadata.py backend/tests/test_metadata_device_roundtrip.py backend/tests/test_mp4_metadata_artwork.py backend/tests/test_analysis.py backend/tests/test_link_import.py -q -p no:cacheprovider -rs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Installed-smoke hang cleanup test
         timeout-minutes: 5

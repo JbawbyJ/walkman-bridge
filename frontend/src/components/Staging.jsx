@@ -135,6 +135,7 @@ function TransferProfile({ onBackup, backupBusy, scanOnline, scanBeforeTransfer,
       <span className="font-display text-[9px] tracking-widest text-muted">TRANSFER PROFILE</span>
       <Fact label="Bitrate" value="192 kbps CBR · device default" />
       <Fact label="Container" value="MP3 · 44.1 kHz · stereo · ID3v2.3" />
+      <p className="text-xs text-muted">Title, artist, album and genre are transferred when available. Artwork is kept in your library; Sony jacket display from this app is not yet verified.</p>
       <Switch
         checked={!!scanBeforeTransfer}
         disabled={!scanOnline}
@@ -182,7 +183,7 @@ export default function Staging({
         ref={fileInputRef}
         type="file"
         multiple
-        accept="audio/*,.flac,.m4a,.ogg,.wav,.aac,.opus,.mp3"
+        accept="audio/*,.mp4,.flac,.m4a,.ogg,.wav,.aac,.opus,.mp3"
         className="hidden"
         disabled={jobBusy}
         onChange={onFilesPicked}

@@ -12,7 +12,7 @@ from link_import import LinkImportError, _download_link_inprocess
 
 
 def emit(value: dict) -> None:
-    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+    sys.stdout.write(json.dumps(value, separators=(",", ":"), ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
 
@@ -65,7 +65,8 @@ def main() -> int:
         media = _download_link_inprocess(
             request["url"], Path(request["directory"]), int(request["max_bytes"]), progress=ProgressEmitter()
         )
-        emit({"type": "result", "path": str(media.path), "name": media.name, "metadata": media.metadata})
+        emit({"type": "result", "path": str(media.path), "name": media.name, "metadata": media.metadata,
+              "artwork_path": str(media.artwork_path) if media.artwork_path is not None else None})
         return 0
     except (LinkImportError, KeyError, TypeError, ValueError):
         emit({"type": "error", "message": "The isolated worker could not import this public track."})

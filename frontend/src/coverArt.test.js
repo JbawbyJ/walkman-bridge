@@ -19,6 +19,16 @@ const ready = {
 const markup = props => renderToStaticMarkup(createElement(CoverArtView, { lotusSrc: '/lotus.png', ...props }))
 const frameOf = html => html.match(/data-cover-frame="(\d+)"/)[1]
 
+test('provider thumbnails identify their actual source instead of claiming to be album covers', () => {
+  const youtube = { ...ready, artwork_provenance: 'provider.youtube.thumbnail' }
+  assert.equal(coverPresentation(youtube).alt, 'YouTube thumbnail for Blue in Green')
+  assert.match(markup({ item: youtube }), /title="YouTube thumbnail"/)
+  const soundcloud = { ...ready, artwork_provenance: 'provider.soundcloud.artwork_url' }
+  assert.equal(coverPresentation(soundcloud).alt, 'SoundCloud track artwork for Blue in Green')
+  assert.equal(coverPresentation(youtube, { variant: 'thumb' }).alt, '')
+  assert.equal(coverPresentation({ ...youtube, title: '', name: '' }).alt, 'YouTube thumbnail')
+})
+
 test('missing artwork and a failed load use the lotus fallback in the same square frame', () => {
   for (const variant of ['deck', 'thumb']) {
     const missing = coverPresentation(null, { variant })

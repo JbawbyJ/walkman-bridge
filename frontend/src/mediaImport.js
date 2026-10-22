@@ -2,6 +2,24 @@ import { playable } from './playback.js'
 
 const LINK_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be', 'soundcloud.com', 'www.soundcloud.com', 'm.soundcloud.com'])
 
+export function metadataSourceLabel(source) {
+  if (source === 'user_edit') return 'Your edit'
+  if (source === 'embedded') return 'Embedded file tags'
+  if (source === 'filename') return 'Original filename'
+  if (source === 'missing') return 'Not supplied by the source'
+  if (typeof source === 'string' && source.startsWith('provider.youtube.')) return 'YouTube metadata'
+  if (typeof source === 'string' && source.startsWith('provider.soundcloud.')) return 'SoundCloud metadata'
+  return 'Source not recorded'
+}
+
+export function artworkSourceLabel(item) {
+  const source = item?.artwork_provenance
+  if (source === 'embedded') return 'Embedded artwork'
+  if (source === 'provider.soundcloud.artwork_url') return 'SoundCloud track artwork'
+  if (source === 'provider.youtube.thumbnail' || source === 'provider.youtube.thumbnails') return 'YouTube thumbnail'
+  return 'Artwork'
+}
+
 // This is form feedback only. The backend owns provider, redirect, and network
 // validation and never asks the renderer to contact a provider directly.
 export function linkImportUrl(input) {

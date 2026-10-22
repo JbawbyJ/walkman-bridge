@@ -25,8 +25,8 @@ def test_transfer_writes_filename_fallback_instead_of_cache_labels(context, monk
     response = context.client.post('/api/transfers', json={'media_ids': [media_id]})
     assert response.status_code == 200
     assert supplied[0]['title'] == 'My recording'
-    assert supplied[0]['artist'] == 'Unknown artist'
-    assert supplied[0]['album'] == 'Unknown album'
+    assert 'artist' not in supplied[0]  # Display fallback is not an actual tag.
+    assert 'album' not in supplied[0]
 
 
 def test_link_import_uses_scan_gate_and_keeps_provider_metadata(context, monkeypatch):
