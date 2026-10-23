@@ -1,6 +1,7 @@
 """Scan-before-consume orchestration. Jobs retain input identity through every phase."""
 from __future__ import annotations
 import hashlib
+import os
 from contextlib import ExitStack
 from pathlib import Path
 from jobs import JobStatus
@@ -277,11 +278,12 @@ class MediaService:
             job.set_status(JobStatus.RUNNING, 'Downloading audio')
             job.set_phase('downloading')
             job.update_file(media_id, state='downloading', detail='Downloading audio')
+            reported = {}
             def progress(snapshot):
                 # Persist bounded progress independently from any downloader log text.
                 downloaded, total = snapshot.get('downloaded_bytes', 0), snapshot.get('total_bytes')
-                job.update_file(media_id, downloaded_bytes=max(0, int(downloaded)),
-                                total_bytes=int(total) if total else None)
+                reported.update(downloaded_bytes=max(0, int(downloaded)), total_bytes=int(total) if total else None)
+                job.update_file(media_id, **reported)
             with self.store.download_workspace(job_id) as folder:
                 downloaded = link_import.download_link(url, folder, MAX_FILE, progress=progress)
                 path = Path(downloaded.path)
@@ -294,6 +296,14 @@ class MediaService:
                 # Provider metadata is text, never instructions/HTML or a filesystem path.
                 hints = normalize_metadata(downloaded.metadata, record['name'])
                 self.store.update(media_id, metadata_hints=hints, import_source='link')
+                # The downloader's counters are only a claim; the job never shows more bytes than exist.
+                size = record['size_bytes']
+                job.update_file(media_id, downloaded_bytes=size, total_bytes=size)
+                total, received = reported.get('total_bytes'), reported.get('downloaded_bytes', 0)
+                if (total is not None and total != size) or received > size:
+                    # A short file is never queued for clearance as a complete import.
+                    self.store.update(media_id, status='failed')
+                    raise MediaError('The download ended before the expected size; retry the link')
                 job.update_file(media_id, name=record['name'], state='queued', detail='Downloaded; awaiting Defender clearance')
             delegated = True
             self.run(job_id, [media_id], ticket, leases, kind='import')
@@ -354,8 +364,10 @@ class MediaService:
             self.purge_threats(job, ids)
             rows = job.to_dict()['files']
             good = sum(row['state'] in ('ready', 'transferred') for row in rows)
-            unknown = any(row['state'] == 'unknown' for row in rows)
-            status = JobStatus.DONE if good == len(ids) else JobStatus.PARTIAL if good else JobStatus.FAILED
+            # An unconfirmed device write is never success, however the rows read.
+            unknown = job.needs_reconcile or any(row['state'] == 'unknown' for row in rows)
+            status = (JobStatus.DONE if good == len(ids) and not unknown
+                      else JobStatus.PARTIAL if good else JobStatus.FAILED)
             message = 'Verify device state before retrying' if unknown else f'Completed {good} of {len(ids)} files'
             job.progress = 1
             job.set_phase('finished')
@@ -373,13 +385,14 @@ class MediaService:
     def write_device(self, job, ready, ticket):
         if not self.device_api:
             raise MediaError('This product has no device engine')
-        writing = False
+        writing, changed = False, set()
         try:
             with self.coordinator.device_session(ticket) as mount, ExitStack() as stack:
+                streams = {}
                 for media_id, path in ready:
                     if self.store.get(media_id).get('needs_reconcile'):
                         raise MediaError('Verify device state before another transfer of this track')
-                    stack.enter_context(locked_read(path, self.store.root))
+                    streams[media_id] = stack.enter_context(locked_read(path, self.store.root))
                     self.clear(media_id, 'transfer', job)
                 admitted = {media_id for media_id, _ in ready}
                 rows = job.to_dict()['files']
@@ -391,16 +404,38 @@ class MediaService:
                 writing = True
                 result = self.device_api.add_tracks(mount, [p for _, p in ready],
                     lambda event: job.log(str(event.get('message') or event.get('event') or 'Device progress')))
+                # Only the Windows share-read lock keeps cleared bytes immutable during the write, so the
+                # held handles are re-read: device content is verified only when they still match.
+                for media_id, _ in ready:
+                    stream = streams[media_id]
+                    stream.seek(0)
+                    digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                    size = os.fstat(stream.fileno()).st_size
+                    record = self.store.get(media_id)
+                    artifact = record['artifacts']['transfer']
+                    if (digest, size) != (artifact['sha256'], artifact['size_bytes']):
+                        # The previous clearance no longer binds to these bytes.
+                        record['artifacts']['transfer'] = dict(artifact, size_bytes=size, sha256=digest, scan=None)
+                        self.store.update(media_id, artifacts=record['artifacts'])
+                        changed.add(media_id)
             # Publish only after the coordinator's post-write identity check succeeded.
-            job.needs_reconcile = bool(result.needs_reconcile)
+            job.needs_reconcile = bool(result.needs_reconcile) or bool(changed)
             if len(result.files) != len(ready):
                 raise MediaError('Incomplete device result')
             for outcome in result.files:
                 media_id, expected = ready[outcome.input_index]
                 if outcome.path != str(expected):
                     raise MediaError('Device result did not match the admitted file')
-                job.update_file(media_id, state=outcome.state, detail=outcome.detail, reason_code=outcome.reason_code)
-                if result.needs_reconcile or outcome.state == 'unknown':
+                state, detail, reason_code = outcome.state, outcome.detail, outcome.reason_code
+                if media_id in changed:
+                    state, reason_code = 'unknown', 'transfer_bytes_changed'
+                    detail = 'The staged bytes changed during the device write; the device content is unverified'
+                elif result.needs_reconcile and state == 'transferred':
+                    # An unconfirmed device write is never success.
+                    state, reason_code = 'unknown', 'verify_device_state'
+                    detail = f'{outcome.detail}; the device write is unconfirmed'
+                job.update_file(media_id, state=state, detail=detail, reason_code=reason_code)
+                if result.needs_reconcile or state == 'unknown':
                     self.store.update(media_id, needs_reconcile=True)
         except Exception as exc:
             from jsymphonic import fatal_code_of, fatal_path_of, fatal_probe_path_of, job_needs_reconcile, recovery_action_for

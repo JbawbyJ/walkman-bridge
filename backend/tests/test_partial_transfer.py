@@ -213,12 +213,6 @@ def test_cancelled_conversion_removes_the_partial_derivative(tmp_path, monkeypat
         assert client.get(f'/api/media/{media_id}/stream').content == b'original-bytes'
 
 
-@pytest.mark.xfail(reason=(
-    'BUG: write_device publishes state transferred and MediaService.run marks the job done '
-    'without re-checking the transfer artifact after the device write. A checksum and size '
-    'change during add_tracks is still reported as success '
-    '(test_checksum_mismatch_during_device_write_is_not_success).'
-))
 def test_checksum_mismatch_during_device_write_is_not_success(tmp_path, monkeypatch):
     monkeypatch.setattr(media_service, 'analyze_cleared_audio', lambda path: {})
 
@@ -251,11 +245,6 @@ def test_checksum_mismatch_during_device_write_is_not_success(tmp_path, monkeypa
         assert recorded['size_bytes'] == path.stat().st_size
 
 
-@pytest.mark.xfail(reason=(
-    'BUG: an AddResult with needs_reconcile=True and per-file state transferred is stored as '
-    'job status done and message "Completed 1 of 1 files". An unconfirmed device write is '
-    'reported as success (test_unconfirmed_device_result_is_not_reported_done).'
-))
 def test_unconfirmed_device_result_is_not_reported_done(tmp_path, monkeypatch):
     monkeypatch.setattr(media_service, 'analyze_cleared_audio', lambda path: {})
     monkeypatch.setattr(
@@ -280,12 +269,6 @@ def test_unconfirmed_device_result_is_not_reported_done(tmp_path, monkeypatch):
         assert 'Completed 1 of 1' not in result['message']
 
 
-@pytest.mark.xfail(reason=(
-    'BUG: link import keeps the downloader byte counters and can mark the job done even when '
-    'the file on disk is shorter than downloaded_bytes/total_bytes. A 5-byte file reported as '
-    '100/100 is stored as a completed import '
-    '(test_short_download_is_not_marked_complete).'
-))
 def test_short_download_is_not_marked_complete(tmp_path, monkeypatch):
     monkeypatch.setattr(media_service, 'analyze_cleared_audio', lambda path: {})
 
