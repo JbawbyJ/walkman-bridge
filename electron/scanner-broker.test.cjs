@@ -14,6 +14,15 @@ function response(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, async json() { return body }, async text() { return JSON.stringify(body) } }
 }
 
+// Resolves like a backend route that answers after ms, and rejects on abort as fetch does.
+function answerAfter(ms, signal, value) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason); return }
+    const timer = setTimeout(resolve, ms, value)
+    signal.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason) }, { once: true })
+  })
+}
+
 test('start polls immediately and stop clears recurring poll', async () => {
   let fetched = 0
   let scheduled
@@ -138,6 +147,54 @@ test('malformed batch cancels all files before forwarding any clean result', asy
   assert.equal(paths.filter(url => url.endsWith('/cancel')).length, 2)
 })
 
+// Both tests wait out a real 5.5 s backend answer, so they run side by side.
+test.describe('backend routes that wait behind a whole-file re-hash', { concurrency: true }, () => {
+  const SLOW_HASH_MS = 5500
+
+  test('a result POST taking longer than 5 s does not cancel the rest of its batch', async () => {
+    const large = { ...REQUEST, request_id: 'large', media_id: 'f'.repeat(32), path: `C:\\cache\\${'f'.repeat(32)}\\large.flac`, size_bytes: 500 * 1024 * 1024 }
+    const requests = [large, { ...REQUEST, request_id: 'sibling-1' }, { ...REQUEST, request_id: 'sibling-2' }]
+    const accepted = [], cancelled = []
+    const broker = createScannerBroker({
+      baseUrl: 'http://127.0.0.1:8123', token: 'native-secret', helperPath: 'C:\\app\\helper.exe', cacheRoot: 'C:\\cache',
+      fetchImpl: async (url, init) => {
+        if (url.endsWith('/pending')) return response(requests)
+        if (url.endsWith('/claim')) return response({})
+        const body = JSON.parse(init.body)
+        if (url.endsWith('/cancel')) { cancelled.push(body.request_id); return response({}) }
+        const answer = body.request_id === 'large' ? await answerAfter(SLOW_HASH_MS, init.signal, response(body)) : response(body)
+        accepted.push(body.request_id)
+        return answer
+      },
+      launchHelper: async () => ({ pid: 4321 }),
+      exchangePipe: async ({ requests: batch }) => ({ results: batch.map(request => ({
+        ...request, helper_pid: 4321, ok: true, state: 'CLEAN', reason_code: 'clean', defender_status: 'clean',
+        defender_engine_version: '1', defender_signature_version: '2', defender_platform_version: '3', exit_code: 0, scanned_at: 200,
+      })) }),
+    })
+    await broker.pollOnce()
+    assert.deepEqual(accepted, ['large', 'sibling-1', 'sibling-2'])
+    assert.deepEqual(cancelled, [])
+  })
+
+  test('a cancel POST taking longer than 5 s still reaches the backend', async () => {
+    const cancelled = [], logs = []
+    const broker = createScannerBroker({
+      baseUrl: 'http://127.0.0.1:8123', token: 'native-secret', helperPath: 'C:\\app\\helper.exe', cacheRoot: 'C:\\cache', log: line => logs.push(line),
+      fetchImpl: async (url, init) => {
+        if (url.endsWith('/pending')) return response([REQUEST])
+        const answer = await answerAfter(SLOW_HASH_MS, init.signal, response({}))
+        cancelled.push(JSON.parse(init.body).request_id)
+        return answer
+      },
+      launchHelper: async () => { const error = new Error('The operation was canceled by the user'); error.code = 1223; throw error },
+    })
+    await broker.pollOnce()
+    assert.deepEqual(cancelled, ['req-1'])
+    assert.equal(logs.some(line => line.startsWith('scanner cancel failed')), false)
+  })
+})
+
 test('launch environment strips every runtime hook/profiler prefix and module injection', () => {
   const result = sanitizedEnvironment({ Path: 'normal', DOTNET_STARTUP_HOOKS: 'evil.dll', dotnet_root: 'evil', COMPlus_ReadyToRun: '0', CORECLR_PROFILER_PATH: 'evil.dll', COR_PROFILER: 'evil', PSModulePath: 'evil', SystemRoot: 'C:\\Windows' })
   assert.equal(Object.values(result).includes('evil.dll'), false)
@@ -159,7 +216,7 @@ test('default transport refuses a launcher without an authenticated native excha
   assert.equal(paths.filter(url => url.endsWith('/cancel')).length, 1)
 })
 
-for (const stage of ['pending', 'helper', 'claim', 'exchange']) {
+for (const stage of ['pending', 'helper', 'claim', 'exchange', 'result']) {
   test(`stop invalidates an in-flight ${stage} continuation without further IPC or HTTP`, async () => {
     let release, reached
     const paused = new Promise(resolve => { reached = resolve })
@@ -171,7 +228,7 @@ for (const stage of ['pending', 'helper', 'claim', 'exchange']) {
       fetchImpl: async (url, init) => {
         paths.push(url); signal = init.signal
         if (url.endsWith('/pending')) return stage === 'pending' ? pause(response([REQUEST])) : response([REQUEST])
-        return stage === 'claim' && url.endsWith('/claim') ? pause(response({})) : response({})
+        return url.endsWith(`/${stage}`) ? pause(response({})) : response({})
       },
       launchHelper: async () => { launches++; const helper = { pid: 4321, close() { closed++ } }; return stage === 'helper' ? pause(helper) : helper },
       exchangePipe: async () => { exchanges++; const result = { ...REQUEST, helper_pid: 4321, ok: false, state: 'ERROR' }; return stage === 'exchange' ? pause(result) : result },
@@ -186,7 +243,7 @@ for (const stage of ['pending', 'helper', 'claim', 'exchange']) {
     await broker.pollOnce()
     assert.equal(paths.length, countAtStop)
     assert.equal(launches, stage === 'pending' ? 0 : 1)
-    assert.equal(exchanges, stage === 'exchange' ? 1 : 0)
+    assert.equal(exchanges, ['exchange', 'result'].includes(stage) ? 1 : 0)
     assert.equal(closed, stage === 'pending' ? 0 : 1)
   })
 }

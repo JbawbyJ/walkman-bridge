@@ -7,6 +7,10 @@ const path = require('node:path')
 const PATHS = Object.freeze({ pending: '/api/internal/scanner/pending', claim: '/api/internal/scanner/claim', result: '/api/internal/scanner/result', cancel: '/api/internal/scanner/cancel' })
 const MAX_BATCH = 200
 const MAX_MESSAGE = 2 * 1024 * 1024
+// The backend re-hashes the whole file under its bridge lock before it answers a
+// result, and a cancel can queue behind that lock. 500 MiB read at a pessimistic
+// 5 MB/s takes about 100 s. Polls and claims keep the short default.
+const HASH_WAIT_TIMEOUT_MS = 120000
 
 function createScannerBroker(options) {
   if (!options || typeof options !== 'object') throw new TypeError('scanner broker options are required')
@@ -29,9 +33,9 @@ function createScannerBroker(options) {
     if (lifetime.signal.aborted || !isBackendAlive()) throw new Error('scanner broker backend connection is closed')
   }
 
-  async function api(method, route, body) {
+  async function api(method, route, body, timeoutMs = 5000) {
     requireActive()
-    const init = { method, headers: { 'X-NightOps-Token': options.token, Accept: 'application/json' }, signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(5000)]) }
+    const init = { method, headers: { 'X-NightOps-Token': options.token, Accept: 'application/json' }, signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(timeoutMs)]) }
     if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body) }
     const response = await fetchImpl(new URL(route, backend).toString(), init)
     requireActive()
@@ -41,7 +45,7 @@ function createScannerBroker(options) {
     return result
   }
   async function cancel(request, reasonCode, detail) {
-    try { await api('POST', PATHS.cancel, { request_id: request.request_id, nonce: request.nonce, reason_code: reasonCode, detail: String(detail || '').slice(0, 500) }) }
+    try { await api('POST', PATHS.cancel, { request_id: request.request_id, nonce: request.nonce, reason_code: reasonCode, detail: String(detail || '').slice(0, 500) }, HASH_WAIT_TIMEOUT_MS) }
     catch (error) { log(`scanner cancel failed for ${request.request_id}: ${error.message}`) }
   }
   async function handleBatch(requests) {
@@ -69,7 +73,7 @@ function createScannerBroker(options) {
       if (byId.size !== admitted.length) throw new Error('helper batch repeats a request identity')
       // Validate the entire batch before admitting any claimed clean result.
       for (const request of admitted) validateResult(request, byId.get(request.request_id), helper.pid)
-      for (const request of admitted) await api('POST', PATHS.result, byId.get(request.request_id))
+      for (const request of admitted) await api('POST', PATHS.result, byId.get(request.request_id), HASH_WAIT_TIMEOUT_MS)
     } catch (error) {
       const cancelled = error && (error.code === 1223 || /elevation_cancelled|cancel(?:led|ed) by the user/i.test(error.message || ''))
       for (const request of admitted) await cancel(request, cancelled ? 'elevation_cancelled' : 'elevation_failed', error?.message)
