@@ -409,3 +409,30 @@ def test_busy_commit_does_not_make_the_next_write_look_stale(tmp_path):
     finally:
         reader.close()
         _close(store)
+
+
+def test_superseded_writer_whose_refusal_commit_fails_stays_refused(tmp_path):
+    db = tmp_path / 'jobs.sqlite'
+    original = JobStore(db)
+    job = original.create('job', 1, kind='transfer')
+    job.set_status(JobStatus.RUNNING, 'Scanning')
+    job.set_files([{'file_id': 'f', 'media_id': 'f', 'name': 'a.mp3', 'state': 'scanning'}], phase='scanning')
+    restarted = JobStore(db)
+    reader = sqlite3.connect(db)
+    try:
+        assert restarted.recover_interrupted() == 1
+        recovered = _recovered_row(db, 'job')
+        original._conn.execute('PRAGMA busy_timeout = 50')
+        reader.execute('BEGIN')
+        reader.execute('SELECT * FROM jobs').fetchall()  # the refusal's COMMIT fails with SQLITE_BUSY
+        with pytest.raises(sqlite3.OperationalError):
+            job.log('progress')
+        reader.rollback()
+        with pytest.raises(JobSuperseded):
+            job.set_files([{'file_id': 'f', 'media_id': 'f', 'name': 'a.mp3', 'state': 'transferring'}],
+                          phase='device_writing')
+        assert _recovered_row(db, 'job') == recovered
+    finally:
+        reader.close()
+        _close(restarted)
+        _close(original)

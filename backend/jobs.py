@@ -390,6 +390,10 @@ class JobStore:
             stale = row is not None
             if stale:
                 self._reload(job, row)
+                if not adopt:
+                    # Flag before the commit below: a COMMIT refused with SQLITE_BUSY must not leave
+                    # this job holding the adopted revision unflagged, or its next write would land.
+                    job._superseded = True
             else:
                 self._conn.execute(
                     """
@@ -412,7 +416,6 @@ class JobStore:
                 raise
         if stale:
             if not adopt:
-                job._superseded = True
                 raise JobSuperseded(f"Job {job.job_id} was recovered by another process")
             return False
         # Only once committed, so a failed commit leaves memory matching the row.
