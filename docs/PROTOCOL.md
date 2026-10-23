@@ -18,6 +18,37 @@ nonzero = failure (a `fatal` event precedes a nonzero exit whenever possible).
   explicit classname, so the same jar serves both technical (GUI) and non-technical
   (dashboard) users.
 
+### Windows: paths outside the ANSI code page
+
+The Windows Java launcher converts its command line to the ANSI code page
+(`CP_ACP`) with `WC_NO_BEST_FIT_CHARS`, so a character the code page cannot
+represent reaches Java as `?`. It also locates its own runtime through the ANSI
+module path. A per-user install keeps the JRE, the jar, and the managed cache
+under `%LOCALAPPDATA%`, so a profile folder name outside the code page (a
+Cyrillic or CJK account name on cp1252 Windows) affects all three. Systems that
+use the "Beta: Use Unicode UTF-8 for worldwide language support" setting
+(code page 65001) are unaffected.
+
+On Windows the backend applies these rules to every launch. An element "fits"
+when it round-trips through Python's strict `mbcs` codec, which uses the same
+conversion.
+
+- `--device <mount>` becomes `--device-base64 <b64>`, and an `add` input becomes
+  `--file-base64 <b64>`, when the path does not fit. `<b64>` is standard base64 of
+  the path's UTF-8 bytes, like `--name-base64`. Paths that fit stay plain, and
+  encoded and plain inputs keep their order.
+- `java.exe` and the jar use their 8.3 short path when the long path does not fit.
+  A short name is the only way the launcher can start a JRE from such a folder.
+- Any element that still does not fit (no 8.3 name on that volume, or text that is
+  not valid Unicode) raises `JSymphonicError` with `needs_reconcile=False`
+  before a process starts. The message names the path and says nothing was
+  written to the Walkman. A mangled path would otherwise make `add` report
+  "File not found", a fatal with no `code`, which marks every admitted track for
+  reconciliation.
+
+An `@argfile` does not avoid the conversion. The launcher reads argument files in
+the system default encoding, which is the ANSI code page here.
+
 ## Commands
 
 ### `info --device <mount>`
@@ -40,7 +71,12 @@ after every mutation, never persisted).
 
 ### `add --device <mount> <file> [<file> ...]`
 Imports the given audio files (already-normalized MP3s) and commits the DB in **one**
-`applyChanges()` cycle. Events, in order:
+`applyChanges()` cycle. `--file-base64 <b64>` may replace any `<file>`, and
+`--device-base64 <b64>` may replace `--device <mount>` on every command (see
+[Windows: paths outside the ANSI code page](#windows-paths-outside-the-ansi-code-page)).
+Malformed base64 or UTF-8, an empty path, or a NUL character is a `fatal` with no
+`code` before the device is opened. `--file-base64` on another command is a usage
+error. Events, in order:
 
 ```json
 {"event":"scan","files":0}

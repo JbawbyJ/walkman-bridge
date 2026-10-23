@@ -14,6 +14,7 @@ from __future__ import annotations
 import enum
 import json
 import base64
+import locale
 import logging
 import os
 import re
@@ -236,10 +237,100 @@ def _ensure_jar() -> Path:
     return JAR_PATH
 
 
+def _ansi_round_trips(text: str) -> bool:
+    """True when Windows java.exe passes `text` to Java unchanged.
+
+    The JDK launcher converts its command line to the ANSI code page with
+    WC_NO_BEST_FIT_CHARS, so an unmappable character reaches Java as '?'.
+    Python's strict 'mbcs' codec applies the same rule. Windows only.
+    """
+    try:
+        return text.encode("mbcs", "strict").decode("mbcs", "strict") == text
+    except UnicodeError:
+        return False
+
+
+def _windows_short_path(path: str) -> str | None:
+    """The 8.3 form of an existing path, or None. Windows only.
+
+    A component without a short name (8.3 creation disabled) stays long.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    get_short = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+    get_short.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+    get_short.restype = wintypes.DWORD
+    size = get_short(path, None, 0)
+    if not size:
+        return None
+    buffer = ctypes.create_unicode_buffer(size)
+    length = get_short(path, buffer, size)
+    return buffer.value if 0 < length < size else None
+
+
+def _code_page_error(problem: str) -> JSymphonicError:
+    # Raised before any process starts, so the device is untouched.
+    return JSymphonicError(
+        f"{problem} Java receives command-line text in the Windows ANSI code page "
+        f"({locale.getencoding()}), which cannot represent some characters in that path. Nothing was "
+        "written to the Walkman. Install Walkman Bridge in a folder whose path uses only those "
+        "characters, or turn on \"Beta: Use Unicode UTF-8 for worldwide language support\" in "
+        "Windows region settings.",
+        needs_reconcile=False,
+    )
+
+
+def _launcher_path(path: str, subject: str) -> str:
+    """`path`, else its 8.3 form, when java.exe receives it intact. Windows only.
+
+    java.exe also finds its own runtime through the ANSI module path, so a JRE
+    under a folder outside the code page cannot start from its long path.
+    """
+    if _ansi_round_trips(path):
+        return path
+    short = _windows_short_path(path)
+    if short is not None and _ansi_round_trips(short):
+        return short
+    raise _code_page_error(f"The Walkman engine cannot start its {subject} from {path}.")
+
+
+def _base64_if_mangled(text: str) -> str | None:
+    """UTF-8 base64 of a path Windows java.exe would mangle, else None.
+
+    Text that is not valid Unicode stays plain, and `_build_cmd` rejects it.
+    """
+    if os.name != "nt" or _ansi_round_trips(text):
+        return None
+    try:
+        return base64.b64encode(text.encode("utf-8")).decode("ascii")
+    except UnicodeEncodeError:
+        return None
+
+
+def _device_args(mount) -> list[str]:
+    encoded = _base64_if_mangled(str(mount))
+    return ["--device", str(mount)] if encoded is None else ["--device-base64", encoded]
+
+
+def _file_args(path) -> list[str]:
+    encoded = _base64_if_mangled(str(path))
+    return [str(path)] if encoded is None else ["--file-base64", encoded]
+
+
 def _build_cmd(args: list[str]) -> list[str]:
     if SHIM_CMD_PREFIX is not None:
         return [*SHIM_CMD_PREFIX, *args]
-    return [_ensure_java(), "-cp", str(_ensure_jar()), SHIM_MAIN, *args]
+    java, jar = _ensure_java(), str(_ensure_jar())
+    if os.name == "nt":
+        # Fail before launch: a mangled path makes the shim report a missing
+        # file, which would otherwise leave every admitted track uncertain.
+        java = _launcher_path(java, "Java runtime")
+        jar = _launcher_path(jar, "engine file")
+        for arg in args:
+            if not _ansi_round_trips(arg):
+                raise _code_page_error(f"Windows cannot pass {arg} to the Walkman engine.")
+    return [java, "-cp", jar, SHIM_MAIN, *args]
 
 
 def _command_mutates(args: list[str]) -> bool:
@@ -429,7 +520,7 @@ def _with_probe_warnings(payload, events):
 
 def device_details(mount: Path) -> dict:
     """Validate the mount via the shim and return its `device` event."""
-    events = _run(["info", "--device", str(mount)], INFO_TIMEOUT)
+    events = _run(["info", *_device_args(mount)], INFO_TIMEOUT)
     _require_terminal(events, "device")
     for event in events:
         if event.get("event") == "device":
@@ -441,7 +532,7 @@ def device_details(mount: Path) -> dict:
 
 def list_tracks(mount: Path) -> list[dict]:
     """Enumerate tracks on the device. Ids are opaque — never persist them."""
-    events = _run(["list", "--device", str(mount)], LIST_TIMEOUT)
+    events = _run(["list", *_device_args(mount)], LIST_TIMEOUT)
     _require_terminal(events, "listEnd")
     tracks: list[dict] = []
     for event in events:
@@ -467,7 +558,7 @@ def add_tracks(
         return AddResult(())
     try:
         events = _run(
-            ["add", "--device", str(mount), *(str(f) for f in files)],
+            ["add", *_device_args(mount), *(arg for f in files for arg in _file_args(f))],
             ADD_TIMEOUT,
             on_event,
         )
@@ -488,7 +579,7 @@ def add_tracks(
 
 
 def remove_track(mount: Path, track_id: str) -> None:
-    events = _run(["del", "--device", str(mount), "--id", track_id], DEL_TIMEOUT)
+    events = _run(["del", *_device_args(mount), "--id", track_id], DEL_TIMEOUT)
     _require_terminal(events, "done", mutating=True)
 
 
@@ -502,7 +593,7 @@ def _playlist_row(event, events, *, mutating=False):
 
 
 def list_playlists(mount: Path) -> list[dict]:
-    events = _run(['playlists', '--device', str(mount)], LIST_TIMEOUT)
+    events = _run(['playlists', *_device_args(mount)], LIST_TIMEOUT)
     _require_terminal(events, 'playlistsEnd')
     rows = [_playlist_row(event, events) for event in events if event.get('event') == 'playlist']
     count = events[-1].get('count')
@@ -538,13 +629,13 @@ def create_playlist(mount: Path, name: str, track_ids: list[str]) -> dict:
     from media_store import playlist_name
     # Windows Java's launcher can replace non-ANSI argv characters before main().
     encoded = base64.b64encode(playlist_name(name).encode('utf-8')).decode('ascii')
-    return _playlist_mutation(['playlist-create', '--device', str(mount), '--name-base64',
+    return _playlist_mutation(['playlist-create', *_device_args(mount), '--name-base64',
         encoded, *_device_playlist_tracks(track_ids)])
 
 
 def update_playlist(mount: Path, playlist_id: str, name: str | None = None, track_ids: list[str] | None = None) -> dict:
     from media_store import playlist_name
-    args = ['playlist-update', '--device', str(mount), '--id', _device_playlist_id(playlist_id)]
+    args = ['playlist-update', *_device_args(mount), '--id', _device_playlist_id(playlist_id)]
     if name is not None:
         args.extend(['--name-base64', base64.b64encode(playlist_name(name).encode('utf-8')).decode('ascii')])
     if track_ids is not None:
@@ -558,7 +649,7 @@ def update_playlist(mount: Path, playlist_id: str, name: str | None = None, trac
 
 
 def delete_playlist(mount: Path, playlist_id: str) -> None:
-    events = _run(['playlist-delete', '--device', str(mount), '--id', _device_playlist_id(playlist_id)], DEL_TIMEOUT)
+    events = _run(['playlist-delete', *_device_args(mount), '--id', _device_playlist_id(playlist_id)], DEL_TIMEOUT)
     _require_terminal(events, 'done', mutating=True)
 
 
@@ -626,7 +717,7 @@ def inspect_playlist_journal(mount: Path) -> dict:
     `state` is read only from the `playlistJournal` event (jsymphonic #4
     @ 5763643). Missing or unknown summaries fail closed.
     """
-    events = _run(["playlist-recover", "--device", str(mount), "--inspect"], INFO_TIMEOUT)
+    events = _run(["playlist-recover", *_device_args(mount), "--inspect"], INFO_TIMEOUT)
     _require_terminal(events, "done", mutating=False)
     journal = _last_event(events, "playlistJournal")
     state = _enum_field(journal, "state", _JOURNAL_STATES)
@@ -652,7 +743,7 @@ def recover_playlist_journal(mount: Path) -> dict:
     `outcome` is the top-level field on the `playlistJournal` event, not on
     `done` and not message text. Values: rolled_forward, discarded, none.
     """
-    events = _run(["playlist-recover", "--device", str(mount)], DEL_TIMEOUT)
+    events = _run(["playlist-recover", *_device_args(mount)], DEL_TIMEOUT)
     _require_terminal(events, "done", mutating=True)
     outcome = _enum_field(_last_event(events, "playlistJournal"), "outcome", _RECOVER_OUTCOMES)
     if outcome is None:
@@ -669,7 +760,7 @@ def repair_playlists(mount: Path) -> dict:
     returned as strings. An empty mount is the fatal code
     `PLAYLIST_LIBRARY_NOT_LOADED`, raised by `_run`.
     """
-    events = _run(["playlist-repair", "--device", str(mount)], DEL_TIMEOUT)
+    events = _run(["playlist-repair", *_device_args(mount)], DEL_TIMEOUT)
     _require_terminal(events, "done", mutating=True)
     summary = _last_event(events, "playlistRepair") or {}
     count = summary.get("prunedCount") if summary else None

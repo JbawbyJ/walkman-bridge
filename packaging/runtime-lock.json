@@ -32,10 +32,10 @@
   },
   "jsymphonic": {
     "repository": "JbawbyJ/jsymphonic",
-    "commit": "37958266b44e4e0f214a3457edf81a6aa8928a2f",
-    "source_archive": "sources/jsymphonic-37958266b44e-src.zip",
-    "sha256": "38a8730df478238e74ae8e12083b0a0116e6fab0846caf393abf05fdc7515ecf",
-    "source_revision": "37958266b44e4e0f214a3457edf81a6aa8928a2f",
-    "source_description": "Exact tracked source from the immutable UTF-16 metadata repair commit; archive SHA-256 identifies the complete source."
+    "commit": "f1a5b37aa533b104b3a3e8d0f625d3d7bd913d68",
+    "source_archive": "sources/jsymphonic-f1a5b37aa533-src.zip",
+    "sha256": "698ed543b740ff68d9b2afc7d555e6a44bc17192211f45e6619e2ee3b5eae518",
+    "source_revision": "f1a5b37aa533b104b3a3e8d0f625d3d7bd913d68",
+    "source_description": "Exact tracked source from the immutable UTF-8 path transport commit; archive SHA-256 identifies the complete source."
   }
 }

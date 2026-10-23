@@ -1,3 +1,4 @@
+import base64
 import importlib.util
 import hashlib
 import json
@@ -44,10 +45,31 @@ raise SystemExit('Stale engine accepted under optimization')
     def test_recovery_contract_probe_is_confined_to_disposable_empty_device(self):
         observed = []
         def run(command, **kwargs):
-            mount = Path(command[command.index('--device') + 1])
+            if '--device-base64' in command:
+                mount = Path(base64.b64decode(command[command.index('--device-base64') + 1]).decode('utf-8'))
+            else:
+                mount = Path(command[command.index('--device') + 1])
             self.assertTrue((mount / 'OMGAUDIO').is_dir())
             self.assertEqual(list((mount / 'OMGAUDIO').iterdir()), [])
             observed.append(mount)
+            if 'playlist-repair' in command:
+                events, code = [{'event': 'fatal', 'code': 'PLAYLIST_LIBRARY_NOT_LOADED'}], 1
+            elif 'info' in command:
+                events, code = [{'event': 'device', 'ok': True}], 0
+            else:
+                events, code = [{'event': 'playlistJournal', 'state': 'none', 'files': [],
+                                 'outcome': 'none', 'library_fingerprint': 'a' * 64}, {'event': 'done'}], 0
+            return SimpleNamespace(returncode=code, stdout='\n'.join(json.dumps(e) for e in events))
+        with patch.object(stage.subprocess, 'run', side_effect=run):
+            stage.verify_engine_contract(Path('java.exe'), Path('candidate.jar'))
+        self.assertEqual(len(observed), 4)
+        self.assertEqual(len(set(observed)), 1)
+        self.assertFalse(observed[0].exists())
+
+    def test_engine_without_path_transport_cannot_be_staged(self):
+        def run(command, **kwargs):
+            if '--device-base64' in command:
+                return SimpleNamespace(returncode=2, stdout='')
             if 'playlist-repair' in command:
                 events, code = [{'event': 'fatal', 'code': 'PLAYLIST_LIBRARY_NOT_LOADED'}], 1
             else:
@@ -55,9 +77,8 @@ raise SystemExit('Stale engine accepted under optimization')
                                  'outcome': 'none', 'library_fingerprint': 'a' * 64}, {'event': 'done'}], 0
             return SimpleNamespace(returncode=code, stdout='\n'.join(json.dumps(e) for e in events))
         with patch.object(stage.subprocess, 'run', side_effect=run):
-            stage.verify_engine_contract(Path('java.exe'), Path('candidate.jar'))
-        self.assertEqual(len(observed), 3)
-        self.assertFalse(observed[0].exists())
+            with self.assertRaisesRegex(ValueError, 'UTF-8 path transport'):
+                stage.verify_engine_contract(Path('java.exe'), Path('old.jar'))
 
     def test_vendored_deno_notice_bytes_match_recorded_provenance(self):
         directory = stage.PACKAGING / 'notices/deno'

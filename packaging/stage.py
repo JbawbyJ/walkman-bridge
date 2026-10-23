@@ -6,6 +6,7 @@ directly into the isolated CPython embeddable distribution as Python recommends.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -157,6 +158,17 @@ def verify_engine_contract(java: Path, jar: Path):
                         require(journal.get('outcome') == 'none')
             except (ValueError, StopIteration, IndexError, TypeError) as exc:
                 raise ValueError(f'Packaged engine lacks the required recovery contract: {command}') from exc
+        # Windows paths outside the ANSI code page reach the engine only as UTF-8 base64.
+        encoded = base64.b64encode(str(mount).encode('utf-8')).decode('ascii')
+        result = subprocess.run([*prefix, 'info', '--device-base64', encoded],
+            capture_output=True, text=True, encoding='utf-8', errors='strict', timeout=45,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        try:
+            events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+            require(result.returncode == 0 and any(isinstance(e, dict) and e.get('event') == 'device'
+                                                   and e.get('ok') is True for e in events))
+        except ValueError as exc:
+            raise ValueError('Packaged engine lacks the UTF-8 path transport') from exc
 
 
 def verify_requirements(wheels):

@@ -189,6 +189,132 @@ def test_java_env_override(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Windows java.exe argv (ANSI code page)
+# --------------------------------------------------------------------------- #
+
+NON_ANSI = "Профиль 用户"  # outside cp1252, so java.exe would turn it into '?'
+
+
+@pytest.fixture
+def windows_launcher(monkeypatch, tmp_path):
+    """Real-launcher path with a cp1252-like code page: ASCII round-trips, nothing else does.
+
+    `os.name` is set by `windows()` around the call only, so pathlib and
+    pytest keep their POSIX behavior outside it.
+    """
+    jar = tmp_path / "vendor" / "jsymphonic.jar"
+    jar.parent.mkdir()
+    jar.write_bytes(b"")
+    monkeypatch.setattr(jsymphonic, "SHIM_CMD_PREFIX", None)
+    monkeypatch.setattr(jsymphonic, "JAR_PATH", jar)
+    monkeypatch.setenv("WALKMAN_BRIDGE_JAVA", r"C:\runtime\java.exe")
+    monkeypatch.setattr(jsymphonic, "_ansi_round_trips", str.isascii)
+    monkeypatch.setattr(jsymphonic, "_windows_short_path", lambda path: None)
+
+    def no_launch(*args, **kwargs):
+        raise AssertionError("java.exe must not start with an argument it would mangle")
+
+    monkeypatch.setattr(jsymphonic.subprocess, "Popen", no_launch)
+
+    def windows(call, *args):
+        with monkeypatch.context() as patch:
+            patch.setattr(jsymphonic.os, "name", "nt")
+            return call(*args)
+
+    return windows
+
+
+def _decoded(value):
+    import base64
+    return base64.b64decode(value).decode("utf-8")
+
+
+def test_windows_unencodable_argument_fails_fast_without_reconcile(windows_launcher, tmp_path):
+    # A lone surrogate has no UTF-8 form, so no transport applies and the guard rejects it.
+    track = tmp_path / "cache" / "bad\udcff.mp3"
+    with pytest.raises(JSymphonicError) as error:
+        windows_launcher(jsymphonic.add_tracks, tmp_path, [track], lambda _: None)
+    assert error.value.needs_reconcile is False
+    assert jsymphonic.job_needs_reconcile(error.value, writing=True) is False
+    assert "Nothing was written to the Walkman" in str(error.value)
+    assert [(row.state, row.reason_code) for row in error.value.result.files] == [("failed", "shim_unavailable")]
+
+
+def test_windows_runtime_outside_code_page_fails_fast_without_reconcile(windows_launcher, monkeypatch, tmp_path):
+    java = rf"C:\Users\{NON_ANSI}\AppData\Local\Programs\Walkman Bridge\resources\jre\bin\java.exe"
+    monkeypatch.setenv("WALKMAN_BRIDGE_JAVA", java)
+    with pytest.raises(JSymphonicError) as error:
+        windows_launcher(jsymphonic.add_tracks, tmp_path, [tmp_path / "a.mp3"], lambda _: None)
+    assert error.value.needs_reconcile is False
+    assert jsymphonic.job_needs_reconcile(error.value, writing=True) is False
+    assert java in str(error.value)
+    assert error.value.result.files[0].state == "failed"
+
+
+def test_windows_short_path_keeps_a_non_ansi_install_launchable(windows_launcher, monkeypatch, tmp_path):
+    java = rf"C:\Users\{NON_ANSI}\jre\bin\java.exe"
+    jar = tmp_path / NON_ANSI / "jsymphonic.jar"
+    jar.parent.mkdir()
+    jar.write_bytes(b"")
+    monkeypatch.setenv("WALKMAN_BRIDGE_JAVA", java)
+    monkeypatch.setattr(jsymphonic, "JAR_PATH", jar)
+    short = {java: r"C:\Users\D0A5~1\jre\bin\java.exe", str(jar): r"C:\Temp\WALKMA~1\JSYMPH~1.JAR"}
+    monkeypatch.setattr(jsymphonic, "_windows_short_path", short.get)
+    cmd = windows_launcher(jsymphonic._build_cmd, ["info", "--device", "E:\\"])
+    assert cmd[:4] == [short[java], "-cp", short[str(jar)], jsymphonic.SHIM_MAIN]
+
+
+def test_windows_short_path_still_outside_code_page_fails_fast(windows_launcher, monkeypatch):
+    java = rf"C:\Users\{NON_ANSI}\java.exe"
+    monkeypatch.setenv("WALKMAN_BRIDGE_JAVA", java)
+    # 8.3 creation disabled: Windows returns the long component unchanged.
+    monkeypatch.setattr(jsymphonic, "_windows_short_path", lambda path: path)
+    with pytest.raises(JSymphonicError) as error:
+        windows_launcher(jsymphonic._build_cmd, ["info", "--device", "E:\\"])
+    assert error.value.needs_reconcile is False
+
+
+def test_windows_paths_outside_code_page_use_utf8_base64(windows_launcher, monkeypatch, tmp_path):
+    calls = []
+
+    def run(args, timeout, on_event=None):
+        calls.append(args)
+        return [{"event": "done"}]
+
+    monkeypatch.setattr(jsymphonic, "_run", run)
+    mount = tmp_path / NON_ANSI / "mount"
+    files = [tmp_path / NON_ANSI / "one.mp3", tmp_path / "two.mp3", tmp_path / NON_ANSI / "three.mp3"]
+    result = windows_launcher(jsymphonic.add_tracks, mount, files, lambda _: None)
+    args = calls[0]
+    assert args[0] == "add"
+    assert args[1] == "--device-base64" and _decoded(args[2]) == str(mount)
+    # Encoded and plain inputs keep their order, so input_index still matches.
+    assert args[3] == "--file-base64" and _decoded(args[4]) == str(files[0])
+    assert args[5] == str(files[1])
+    assert args[6] == "--file-base64" and _decoded(args[7]) == str(files[2])
+    assert len(args) == 8
+    assert all(arg.isascii() for arg in args)
+    assert [row.path for row in result.files] == [str(path) for path in files]
+
+    windows_launcher(jsymphonic.remove_track, mount, "7")
+    assert calls[1][:3] == ["del", "--device-base64", calls[0][2]]
+
+
+def test_ansi_paths_and_other_platforms_pass_paths_unchanged(windows_launcher, monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(jsymphonic, "_run", lambda args, timeout, on_event=None: calls.append(args) or [{"event": "done"}])
+    windows_launcher(jsymphonic.add_tracks, Path("E:/"), [tmp_path / "a.mp3"], lambda _: None)
+    mount, files = tmp_path / NON_ANSI, [tmp_path / NON_ANSI / "a.mp3"]
+    with monkeypatch.context() as patch:
+        patch.setattr(jsymphonic.os, "name", "posix")
+        jsymphonic.add_tracks(mount, files, lambda _: None)
+    assert calls == [
+        ["add", "--device", str(Path("E:/")), str(tmp_path / "a.mp3")],
+        ["add", "--device", str(tmp_path / NON_ANSI), str(tmp_path / NON_ANSI / "a.mp3")],
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # Single-flight lock
 # --------------------------------------------------------------------------- #
 

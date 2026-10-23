@@ -152,7 +152,12 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           & $java -version
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python -m pytest backend/tests/test_analysis.py backend/tests/test_metadata.py backend/tests/test_real_mock.py backend/tests/test_real_recovery.py backend/tests/test_metadata_device_roundtrip.py -q -p no:cacheprovider -rs
+          python -m pytest backend/tests/test_analysis.py backend/tests/test_metadata.py backend/tests/test_real_mock.py backend/tests/test_real_recovery.py backend/tests/test_metadata_device_roundtrip.py backend/tests/test_windows_unicode_paths.py -q -p no:cacheprovider -rs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Record java.exe behavior for paths outside the ANSI code page
+        run: |
+          # Evidence only: TEMP is on C: and RUNNER_TEMP on D:, which can differ in 8.3 short names.
+          python packaging/probe-unicode-launcher.py --java "$env:JAVA_HOME/bin/java.exe" --jar backend/vendor/jsymphonic.jar --base $env:TEMP --base $env:RUNNER_TEMP --output packaging/build/unicode-launcher-probe.json
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Audit runtime dependencies
         run: |
@@ -204,6 +209,7 @@ jobs:
             dist_electron/*/SHA256SUMS.txt
             packaging/build/runtime-audit.json
             packaging/build/*-resources-probe.json
+            packaging/build/unicode-launcher-probe.json
             packaging/build/redlotus/*/runtime-manifest.json
             packaging/build/install-smoke/*/result.json
             packaging/build/install-smoke/*/local-data/*/redlotus.log
