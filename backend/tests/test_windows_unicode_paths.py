@@ -45,10 +45,10 @@ def _mount(root):
     return mount
 
 
-def _launchable(path):
-    """java.exe gets `path` intact, as is or through its 8.3 form."""
-    short = jsymphonic._windows_short_path(path)
-    return jsymphonic._ansi_round_trips(path) or (short is not None and jsymphonic._ansi_round_trips(short))
+def _loadable(jar):
+    """java.exe gets the jar path intact, as is or through its 8.3 form."""
+    short = jsymphonic._windows_short_path(jar)
+    return jsymphonic._ansi_round_trips(jar) or (short is not None and jsymphonic._ansi_round_trips(short))
 
 
 def _assert_definite_failure(error):
@@ -92,7 +92,7 @@ def test_engine_jar_in_a_folder_outside_the_code_page(non_ansi, monkeypatch):
     shutil.copyfile(jsymphonic.JAR_PATH, jar)
     monkeypatch.setattr(jsymphonic, 'JAR_PATH', jar)
     mount = _mount(non_ansi)
-    if _launchable(str(jar)):
+    if _loadable(str(jar)):
         assert jsymphonic.device_details(mount)['ok'] is True
         assert list(jsymphonic.list_tracks(mount)) == []
     else:
@@ -102,18 +102,19 @@ def test_engine_jar_in_a_folder_outside_the_code_page(non_ansi, monkeypatch):
 
 
 def test_java_runtime_in_a_folder_outside_the_code_page(non_ansi, monkeypatch):
+    # Started from its 8.3 path, the JVM still looks for lib\modules under the
+    # mangled long path and exits with a LinkageError and no fatal event. The
+    # backend must refuse before launch, so an add is not left uncertain.
     import _winapi
     runtime = non_ansi / 'jre'
     _winapi.CreateJunction(str(os.path.realpath(os.path.join(os.path.dirname(JAVA), '..'))), str(runtime))
     try:
-        java = str(runtime / 'bin' / 'java.exe')
-        monkeypatch.setenv('WALKMAN_BRIDGE_JAVA', java)
+        monkeypatch.setenv('WALKMAN_BRIDGE_JAVA', str(runtime / 'bin' / 'java.exe'))
         mount = _mount(non_ansi)
-        if _launchable(java):
-            assert jsymphonic.device_details(mount)['ok'] is True
-        else:
+        for call, args in ((jsymphonic.device_details, (mount,)),
+                           (jsymphonic.add_tracks, (mount, [non_ansi / 'song.mp3'], lambda _: None))):
             with pytest.raises(jsymphonic.JSymphonicError) as error:
-                jsymphonic.add_tracks(mount, [non_ansi / 'song.mp3'], lambda _: None)
+                call(*args)
             _assert_definite_failure(error.value)
     finally:
         os.rmdir(runtime)  # Removes the junction only, never the JDK behind it.

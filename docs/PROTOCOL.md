@@ -22,12 +22,12 @@ nonzero = failure (a `fatal` event precedes a nonzero exit whenever possible).
 
 The Windows Java launcher converts its command line to the ANSI code page
 (`CP_ACP`) with `WC_NO_BEST_FIT_CHARS`, so a character the code page cannot
-represent reaches Java as `?`. It also locates its own runtime through the ANSI
-module path. A per-user install keeps the JRE, the jar, and the managed cache
-under `%LOCALAPPDATA%`, so a profile folder name outside the code page (a
-Cyrillic or CJK account name on cp1252 Windows) affects all three. Systems that
-use the "Beta: Use Unicode UTF-8 for worldwide language support" setting
-(code page 65001) are unaffected.
+represent reaches Java as `?`. The JVM also finds its own runtime files through
+the ANSI form of its module path. A per-user install keeps the JRE, the jar, and
+the managed cache under `%LOCALAPPDATA%`, so a profile folder name outside the
+code page (a Cyrillic or CJK account name on cp1252 Windows) affects all three.
+Systems that use the "Beta: Use Unicode UTF-8 for worldwide language support"
+setting (code page 65001) are unaffected.
 
 On Windows the backend applies these rules to every launch. An element "fits"
 when it round-trips through Python's strict `mbcs` codec, which uses the same
@@ -37,10 +37,15 @@ conversion.
   `--file-base64 <b64>`, when the path does not fit. `<b64>` is standard base64 of
   the path's UTF-8 bytes, like `--name-base64`. Paths that fit stay plain, and
   encoded and plain inputs keep their order.
-- `java.exe` and the jar use their 8.3 short path when the long path does not fit.
-  A short name is the only way the launcher can start a JRE from such a folder.
-- Any element that still does not fit (no 8.3 name on that volume, or text that is
-  not valid Unicode) raises `JSymphonicError` with `needs_reconcile=False`
+- The jar uses its 8.3 short path when the long path does not fit.
+- `java.exe` has no such fallback. Started from its 8.3 path, the JVM still reads
+  `jvm.dll`'s location in long form, looks for `lib\modules` under the mangled
+  path, and exits with a `LinkageError` and no `fatal` event (Windows CI,
+  Temurin 21.0.12). A JRE in such a folder cannot run the engine, so the backend
+  refuses before launch. Installing Walkman Bridge to a folder inside the code
+  page, or the UTF-8 code page setting, avoids it.
+- Any element that still does not fit (the `java.exe` path, a jar with no 8.3
+  name on that volume, or text that is not valid Unicode) raises `JSymphonicError` with `needs_reconcile=False`
   before a process starts. The message names the path and says nothing was
   written to the Walkman. A mangled path would otherwise make `add` report
   "File not found", a fatal with no `code`, which marks every admitted track for

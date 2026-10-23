@@ -243,6 +243,8 @@ def test_windows_unencodable_argument_fails_fast_without_reconcile(windows_launc
 def test_windows_runtime_outside_code_page_fails_fast_without_reconcile(windows_launcher, monkeypatch, tmp_path):
     java = rf"C:\Users\{NON_ANSI}\AppData\Local\Programs\Walkman Bridge\resources\jre\bin\java.exe"
     monkeypatch.setenv("WALKMAN_BRIDGE_JAVA", java)
+    # An 8.3 path does not help: the JVM still finds its files through the long path.
+    monkeypatch.setattr(jsymphonic, "_windows_short_path", lambda path: r"C:\Users\D0A5~1\jre\bin\java.exe")
     with pytest.raises(JSymphonicError) as error:
         windows_launcher(jsymphonic.add_tracks, tmp_path, [tmp_path / "a.mp3"], lambda _: None)
     assert error.value.needs_reconcile is False
@@ -251,27 +253,28 @@ def test_windows_runtime_outside_code_page_fails_fast_without_reconcile(windows_
     assert error.value.result.files[0].state == "failed"
 
 
-def test_windows_short_path_keeps_a_non_ansi_install_launchable(windows_launcher, monkeypatch, tmp_path):
-    java = rf"C:\Users\{NON_ANSI}\jre\bin\java.exe"
+def test_windows_short_path_keeps_a_non_ansi_engine_file_loadable(windows_launcher, monkeypatch, tmp_path):
     jar = tmp_path / NON_ANSI / "jsymphonic.jar"
     jar.parent.mkdir()
     jar.write_bytes(b"")
-    monkeypatch.setenv("WALKMAN_BRIDGE_JAVA", java)
     monkeypatch.setattr(jsymphonic, "JAR_PATH", jar)
-    short = {java: r"C:\Users\D0A5~1\jre\bin\java.exe", str(jar): r"C:\Temp\WALKMA~1\JSYMPH~1.JAR"}
-    monkeypatch.setattr(jsymphonic, "_windows_short_path", short.get)
+    short = r"C:\Temp\WALKMA~1\JSYMPH~1.JAR"
+    monkeypatch.setattr(jsymphonic, "_windows_short_path", {str(jar): short}.get)
     cmd = windows_launcher(jsymphonic._build_cmd, ["info", "--device", "E:\\"])
-    assert cmd[:4] == [short[java], "-cp", short[str(jar)], jsymphonic.SHIM_MAIN]
+    assert cmd[:4] == [r"C:\runtime\java.exe", "-cp", short, jsymphonic.SHIM_MAIN]
 
 
-def test_windows_short_path_still_outside_code_page_fails_fast(windows_launcher, monkeypatch):
-    java = rf"C:\Users\{NON_ANSI}\java.exe"
-    monkeypatch.setenv("WALKMAN_BRIDGE_JAVA", java)
+def test_windows_engine_file_without_short_name_fails_fast(windows_launcher, monkeypatch, tmp_path):
+    jar = tmp_path / NON_ANSI / "jsymphonic.jar"
+    jar.parent.mkdir()
+    jar.write_bytes(b"")
+    monkeypatch.setattr(jsymphonic, "JAR_PATH", jar)
     # 8.3 creation disabled: Windows returns the long component unchanged.
     monkeypatch.setattr(jsymphonic, "_windows_short_path", lambda path: path)
     with pytest.raises(JSymphonicError) as error:
         windows_launcher(jsymphonic._build_cmd, ["info", "--device", "E:\\"])
     assert error.value.needs_reconcile is False
+    assert str(jar) in str(error.value)
 
 
 def test_windows_paths_outside_code_page_use_utf8_base64(windows_launcher, monkeypatch, tmp_path):

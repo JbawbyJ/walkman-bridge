@@ -281,18 +281,14 @@ def _code_page_error(problem: str) -> JSymphonicError:
     )
 
 
-def _launcher_path(path: str, subject: str) -> str:
-    """`path`, else its 8.3 form, when java.exe receives it intact. Windows only.
-
-    java.exe also finds its own runtime through the ANSI module path, so a JRE
-    under a folder outside the code page cannot start from its long path.
-    """
-    if _ansi_round_trips(path):
-        return path
-    short = _windows_short_path(path)
+def _classpath(jar: str) -> str:
+    """The jar path, else its 8.3 form, when java.exe passes it intact. Windows only."""
+    if _ansi_round_trips(jar):
+        return jar
+    short = _windows_short_path(jar)
     if short is not None and _ansi_round_trips(short):
         return short
-    raise _code_page_error(f"The Walkman engine cannot start its {subject} from {path}.")
+    raise _code_page_error(f"The Walkman engine cannot load its engine file from {jar}.")
 
 
 def _base64_if_mangled(text: str) -> str | None:
@@ -325,8 +321,12 @@ def _build_cmd(args: list[str]) -> list[str]:
     if os.name == "nt":
         # Fail before launch: a mangled path makes the shim report a missing
         # file, which would otherwise leave every admitted track uncertain.
-        java = _launcher_path(java, "Java runtime")
-        jar = _launcher_path(jar, "engine file")
+        if not _ansi_round_trips(java):
+            # The JVM finds its own files through the ANSI path of jvm.dll, which
+            # Windows reports in long form even when java.exe starts from its 8.3
+            # path. That run dies with a LinkageError, so there is no fallback.
+            raise _code_page_error(f"The Walkman engine cannot start its Java runtime from {java}.")
+        jar = _classpath(jar)
         for arg in args:
             if not _ansi_round_trips(arg):
                 raise _code_page_error(f"Windows cannot pass {arg} to the Walkman engine.")
