@@ -37,22 +37,31 @@ conversion.
   `--file-base64 <b64>`, when the path does not fit. `<b64>` is standard base64 of
   the path's UTF-8 bytes, like `--name-base64`. Paths that fit stay plain, and
   encoded and plain inputs keep their order.
-- The jar uses its 8.3 short path when the long path does not fit.
-- `java.exe` has no such fallback. Started from its 8.3 path, the JVM still reads
-  `jvm.dll`'s location in long form, looks for `lib\modules` under the mangled
-  path, and exits with a `LinkageError` and no `fatal` event (Windows CI,
-  Temurin 21.0.12). A JRE in such a folder cannot run the engine, so the backend
-  refuses before launch. Installing Walkman Bridge to a folder inside the code
-  page, or the UTF-8 code page setting, avoids it.
+- The jar uses its 8.3 short path when the long path does not fit. That works
+  only on a volume that creates 8.3 names.
+- `java.exe` has no such fallback. From its long path the launcher stops with
+  "could not find java.dll". From its 8.3 path `java -version` succeeds, but
+  loading the engine fails: the JVM reads `jvm.dll`'s location in long form,
+  looks for `lib\modules` and `net.dll` under the mangled path, and exits with
+  a `LinkageError` and no `fatal` event. A JRE in such a folder cannot run the
+  engine, so the backend refuses before launch. Installing Walkman Bridge to a
+  folder inside the code page, or the UTF-8 code page setting, avoids it.
 - Any element that still does not fit (the `java.exe` path, a jar with no 8.3
-  name on that volume, or text that is not valid Unicode) raises `JSymphonicError` with `needs_reconcile=False`
-  before a process starts. The message names the path and says nothing was
+  name on that volume, or text that is not valid Unicode) raises
+  `JSymphonicError` with `needs_reconcile=False` before a process starts. The message names the path and says nothing was
   written to the Walkman. A mangled path would otherwise make `add` report
   "File not found", a fatal with no `code`, which marks every admitted track for
   reconciliation.
 
 An `@argfile` does not avoid the conversion. The launcher reads argument files in
-the system default encoding, which is the ANSI code page here.
+the system default encoding, which is the ANSI code page here. `-cp jsymphonic.jar`
+with the working directory set to the jar's folder does work, with or without 8.3
+names; the backend does not use it because a packaged jar shares its folder
+prefix with `java.exe`, which cannot start from there anyway.
+
+Evidence: `packaging/probe-unicode-launcher.py` runs each case on the Windows CI
+runner (cp1252, Temurin 21.0.12) and writes
+`packaging/build/unicode-launcher-probe.json`.
 
 ## Commands
 

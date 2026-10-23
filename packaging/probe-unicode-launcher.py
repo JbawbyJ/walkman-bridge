@@ -85,8 +85,10 @@ def probe(base, java, jar):
             'classpath_short': run([java, '-cp', short_path(unicode_jar), MAIN]),
             'classpath_relative_cwd': run([java, '-cp', unicode_jar.name, MAIN], cwd=root),
             'classpath_argfile_utf8': run([java, '@' + str(argfile), MAIN]),
-            'runtime_long': run([runtime_java, '-version']),
-            'runtime_short': run([runtime_java and short_path(runtime_java), '-version']),
+            # The engine class, not -version: from an 8.3 path -version succeeds
+            # while loading the engine still fails (Windows CI, Temurin 21.0.12).
+            'runtime_long': run([runtime_java, '-cp', jar, MAIN]),
+            'runtime_short': run([runtime_java and short_path(runtime_java), '-cp', jar, MAIN]),
             'argument_long': run([*engine, 'add', '--device', mount, unicode_input]),
             'argument_base64': run([*engine, 'add', '--device', mount, '--file-base64',
                                     base64.b64encode(str(unicode_input).encode('utf-8')).decode('ascii')]),
