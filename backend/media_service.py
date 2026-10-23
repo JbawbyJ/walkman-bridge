@@ -36,21 +36,30 @@ class MediaService:
                             detail='', reason_code=None, scan=None) for media_id in ids])
         return job
 
+    @staticmethod
+    def decides_status(record, artifact):
+        """Record status/scan describe only what playability rests on: the source and the derivative
+        the stream route serves. Other verdicts stay on their artifact entry and job row, so a failed
+        transfer.mp3 or unserved playback.flac never relabels a cleared item."""
+        return artifact == 'source' or artifact == record.get('playback')
+
     def clear(self, media_id, artifact='source', job=None, batch_id=None):
         record = self.store.get(media_id)
         path = self.store.path(record, artifact)  # raises BlockedBytesRemoved for purged threat bytes
         previous = record['artifacts'][artifact].get('scan')
+        decides = self.decides_status(record, artifact)
         if previous and self.scanner.clearance_valid(path, previous):
             if artifact == 'artwork':
                 self.store.update(media_id, artwork_status='ready')
                 return previous
-            self.store.update(media_id, status='ready', scan=previous)
+            if decides:
+                self.store.update(media_id, status='ready', scan=previous)
             if job:
                 job.update_file(media_id, state='ready', scan=previous, detail='Cleared')
             return previous
         if artifact == 'artwork':
             self.store.update(media_id, artwork_status='scanning')
-        else:
+        elif decides:
             self.store.update(media_id, status='scanning')
         if job:
             job.set_phase('scanning')
@@ -62,7 +71,7 @@ class MediaService:
             request = self.bridge.request(media_id, path, result['sha256'], result['size_bytes'], batch_id=batch_id)
             if artifact == 'artwork':
                 self.store.update(media_id, artwork_status='awaiting_permission')
-            else:
+            elif decides:
                 self.store.update(media_id, status='awaiting_permission', scan=result)
             if job:
                 job.update_file(media_id, state='awaiting_permission', scan=result,
@@ -88,8 +97,10 @@ class MediaService:
         status = 'ready' if valid else ('blocked' if result.get('state') in ('THREAT', 'BLOCKED', 'REJECTED') else 'failed')
         if artifact == 'artwork':
             self.store.update(media_id, artifacts=record['artifacts'], artwork_status=status)
-        else:
+        elif self.decides_status(record, artifact):
             self.store.update(media_id, artifacts=record['artifacts'], status=status, scan=result)
+        else:
+            self.store.update(media_id, artifacts=record['artifacts'])
         if result.get('reason_code') == 'defender_threat':
             # Refuse the bytes the moment Defender reports, before the rest of the batch is processed;
             # purge_threats deletes them once every read lock has been released.
@@ -117,7 +128,7 @@ class MediaService:
                         else:
                             ready.append(media_id)
                     except Exception as exc:
-                        self.scan_failure(job, media_id, exc)
+                        self.scan_failure(job, media_id, exc, artifact)
                 self.bridge.release_batch(batch_id)
                 for media_id, request in pending:
                     try:
@@ -129,18 +140,19 @@ class MediaService:
                         self.accept_scan(media_id, artifact, result, job, trusted)
                         ready.append(media_id)
                     except Exception as exc:
-                        self.scan_failure(job, media_id, exc)
+                        self.scan_failure(job, media_id, exc, artifact)
             return [media_id for media_id in ids if media_id in ready]
         finally:
             self.bridge.cancel_batch(batch_id)
 
-    def scan_failure(self, job, media_id, exc):
+    def scan_failure(self, job, media_id, exc, artifact='source'):
         row = next(row for row in job.to_dict()['files'] if row['file_id'] == media_id)
         if row['state'] not in ('blocked', 'failed'):
             blocked = isinstance(exc, BlockedBytesRemoved)
             job.update_file(media_id, state='blocked' if blocked else 'failed', detail=str(exc),
                             reason_code='defender_threat' if blocked else 'scan_failed')
-            self.store.update(media_id, status='blocked' if blocked else 'failed')
+            if self.decides_status(self.store.get(media_id), artifact):
+                self.store.update(media_id, status='blocked' if blocked else 'failed')
 
     def purge_threats(self, job, ids):
         """Delete managed bytes Defender reported as threats, once every read lock has been released.
@@ -186,12 +198,22 @@ class MediaService:
                 except OSError as exc:
                     raise MediaError(f'The previous {kind} file is still in use; retry shortly') from exc
                 existing = record['artifacts'].get(kind)
+            if existing and not os.path.lexists(self.store.root / media_id / self.store._artifact_name(existing)):
+                # An entry whose file a crash or an out-of-band delete removed cannot be resolved by
+                # store.path(); drop it and regenerate. A link stays present and is refused by no_links.
+                changes = self.store._source_playback(record) if record.get('playback') == kind else {}
+                record['artifacts'].pop(kind)
+                record = self.store.update(media_id, artifacts=record['artifacts'], **changes)
+                existing = None
             if existing and kind == 'transfer' and (existing.get('metadata_policy') != METADATA_POLICY
                     or existing.get('metadata_revision', 0) != record.get('metadata_revision', 0)):
-                # A previous release's untagged transfer.mp3 must not retain cache labels.
-                self.store.path(record, kind).unlink()
+                # A previous release's untagged transfer.mp3 must not retain cache labels. The entry is
+                # committed away before the unlink: a crash in between leaves only an unreferenced file,
+                # which startup removes, never an entry without its file.
+                path = self.store.path(record, kind)
                 record['artifacts'].pop(kind)
                 self.store.update(media_id, artifacts=record['artifacts'])
+                path.unlink()
                 existing = None
             if existing:
                 path = self.store.path(record, kind)
@@ -306,7 +328,6 @@ class MediaService:
                     raise MediaError('The download ended before the expected size; retry the link')
                 job.update_file(media_id, name=record['name'], state='queued', detail='Downloaded; awaiting Defender clearance')
             delegated = True
-            self.run(job_id, [media_id], ticket, leases, kind='import')
         except Exception as exc:
             # Do not expose download URLs, tokens or provider diagnostics from an unknown exception.
             detail = str(exc) if isinstance(exc, (MediaError, link_import.LinkImportError)) else 'Link import failed before playback; retry the link'
@@ -315,14 +336,21 @@ class MediaService:
             job.set_phase('finished')
         finally:
             if not delegated:
-                if leases:
-                    leases.close()
-                self.coordinator.finish(ticket)
+                try:
+                    if leases:
+                        leases.close()
+                finally:
+                    self.coordinator.finish(ticket)
+        if delegated:
+            # Outside the handler: run() owns the outcome, leases and ticket, and an error it raises
+            # after recording that outcome must not relabel the job as a failed download.
+            self.run(job_id, [media_id], ticket, leases, kind='import')
 
     def run(self, job_id, ids, ticket, leases, kind='import'):
         job = self.jobs.get(job_id)
-        job.set_status(JobStatus.RUNNING, 'Processing managed audio')
         try:
+            # Inside the try: a job-store failure here still releases the leases and the ticket.
+            job.set_status(JobStatus.RUNNING, 'Processing managed audio')
             ready = []
             cleared = self.clear_group(ids, 'source', job)
             for index, media_id in enumerate(cleared):
@@ -380,8 +408,11 @@ class MediaService:
                     job.update_file(row['file_id'], state='failed', detail=str(exc), reason_code='job_failed')
             job.set_status(JobStatus.FAILED, 'Verify device state' if job.needs_reconcile else str(exc))
         finally:
-            leases.close()
-            self.coordinator.finish(ticket)
+            try:
+                leases.close()
+            finally:
+                # A failing lease release (rmtree on Windows) must never keep the ticket admitted.
+                self.coordinator.finish(ticket)
 
     def write_device(self, job, ready, ticket):
         if not self.device_api:
