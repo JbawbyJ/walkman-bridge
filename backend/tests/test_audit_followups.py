@@ -172,3 +172,38 @@ def test_windows_discovery_never_probes_network_optical_or_unassigned_letters(mo
     monkeypatch.undo()
     assert candidates == [Path('D:\\'), Path('C:\\')]
     assert sorted(probed) == ['C:\\', 'D:\\']
+
+
+def _bridge_with(tmp_path, **overrides):
+    volume = tmp_path / 'device'
+    (volume / 'OMGAUDIO').mkdir(parents=True)
+    api = fake_device(volume, lambda m: [], lambda *a: None)
+    for name, value in overrides.items():
+        setattr(api, name, value)
+    return application.create_app(product='bridge', data_dir=tmp_path / 'state', token=TOKEN,
+                                  origin=ORIGIN, scanner=HashScanner(), device_api=api)
+
+
+def test_device_swapped_before_capture_is_a_structured_409(tmp_path):
+    def unplugged(mount):
+        raise device.DeviceChangedError('Walkman volume is no longer available')
+
+    app = _bridge_with(tmp_path, capture_device_identity=unplugged)
+    with TestClient(app, base_url=ORIGIN, headers={'X-NightOps-Token': TOKEN}) as client:
+        for response in (client.get('/api/tracks'), client.get('/api/device'), client.post('/api/backup')):
+            assert response.status_code == 409, response.text
+            assert response.json()['detail'] == 'Walkman volume is no longer available'
+        assert client.get('/api/engine-busy').json()['busy'] is False
+
+
+def test_device_unplugged_while_reading_info_is_a_structured_409(tmp_path):
+    def vanished(mount):
+        raise FileNotFoundError(2, 'No such file or directory', str(mount))
+
+    app = _bridge_with(tmp_path, device_info=vanished)
+    with TestClient(app, base_url=ORIGIN, headers={'X-NightOps-Token': TOKEN}) as client:
+        response = client.get('/api/device')
+        assert response.status_code == 409, response.text
+        assert 'disconnected' in response.json()['detail']
+        assert client.get('/api/engine-busy').json()['busy'] is False
+

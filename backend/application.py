@@ -517,6 +517,14 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
 
 def register_device_routes(app, device_api, identity, admit, coordinator, jobs, data_dir, cache,
                            import_files, schedule, store, service):
+    # Bridge-only: the player package excludes device.py. An unplug or volume swap between discovery
+    # and use reaches every identity() caller; answer it in the documented error shape, not a bare 500.
+    from device import DeviceChangedError
+
+    async def device_changed(request, exc):
+        return JSONResponse({'detail': str(exc) or 'The Walkman was disconnected or changed'}, status_code=409)
+    app.add_exception_handler(DeviceChangedError, device_changed)
+
     @app.post('/api/upload')
     async def upload(request: Request, background_tasks: BackgroundTasks):
         return await import_files(request, background_tasks, True)
@@ -544,7 +552,11 @@ def register_device_routes(app, device_api, identity, admit, coordinator, jobs, 
         ticket = admit('device_read', volume)
         def read():
             with coordinator.device_session(ticket) as verified:
-                return {'connected': True, 'mount_path': str(verified), **device_api.device_info(verified)}
+                try:
+                    info = device_api.device_info(verified)
+                except OSError as exc:  # the volume vanished after revalidation
+                    raise DeviceChangedError('The Walkman was disconnected while reading it') from exc
+                return {'connected': True, 'mount_path': str(verified), **info}
         try:
             return await asyncio.to_thread(read)
         finally:
