@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from scan import POLICY_VERSION
+
 PENDING_PATH = "/api/internal/scanner/pending"
 CLAIM_PATH = "/api/internal/scanner/claim"
 RESULT_PATH = "/api/internal/scanner/result"
@@ -132,7 +134,7 @@ class ElevationBridge:
 
             accepted = dict(result)
             accepted["accepted_at"] = time.time()
-            accepted["policy_version"] = "defender-strict-v1"
+            accepted["policy_version"] = POLICY_VERSION
             if accepted.get("ok"):
                 required = {
                     "state": "CLEAN", "reason_code": "clean",
@@ -247,7 +249,7 @@ class ElevationBridge:
             **entry.request, "ok": False, "state": "ERROR", "reason": reason,
             "reason_code": reason_code, "defender_status": "error",
             "helper_pid": entry.helper_pid or 0, "accepted_at": time.time(),
-            "policy_version": "defender-strict-v1",
+            "policy_version": POLICY_VERSION,
         }
         entry.ready.set()
         return entry.result

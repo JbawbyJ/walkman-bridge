@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Any
 
 ENGINE = "audio-guard"
-POLICY_VERSION = "defender-strict-v1"
+# Bump whenever _validate_audio_format, _validate_artwork_format, the ID3 checks or Defender verdict
+# parsing change what is accepted: clearance_valid rejects other versions, so every stored clearance is
+# re-validated by a fresh scan instead of outliving the gate that issued it.
+POLICY_VERSION = "defender-strict-v2"
 CLEARANCE_SECONDS = 24 * 60 * 60
 MAX_BYTES = 500 * 1024 * 1024
 MAX_TAG_BYTES = 2 * 1024 * 1024

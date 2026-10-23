@@ -11,6 +11,7 @@ import glob
 import hashlib
 import os
 import platform
+import re
 import shutil
 import stat
 from dataclasses import dataclass
@@ -97,14 +98,17 @@ def _candidates() -> list[Path]:
         # Removable drives first: the Walkman is USB mass storage, and a
         # drive-root backup of it on a fixed disk must not win the scan.
         # A:/B: are legacy floppy letters — probing them can stall.
-        DRIVE_REMOVABLE = 2
+        DRIVE_REMOVABLE, DRIVE_FIXED = 2, 3
         removable: list[Path] = []
         fixed: list[Path] = []
         for d in string.ascii_uppercase[2:]:
             root = f"{d}:\\"
-            if not Path(root).exists():
-                continue
+            # The type comes from the drive map without touching the media. A Walkman is never a
+            # network, optical or RAM disk, and stat()ing a disconnected mapped share can stall
+            # every device poll on an SMB reconnect.
             kind = ctypes.windll.kernel32.GetDriveTypeW(root)
+            if kind not in (DRIVE_REMOVABLE, DRIVE_FIXED) or not Path(root).exists():
+                continue
             (removable if kind == DRIVE_REMOVABLE else fixed).append(Path(root))
         return removable + fixed
     return []
@@ -171,6 +175,20 @@ def _reject_copy_links(directory, names):
     return []
 
 
+_PARTIAL_BACKUP = re.compile(r"\.\d{4}-\d{2}-\d{2}-\d{6}-[0-9a-f]{32}\.partial")
+
+
+def _remove_partial(path: Path) -> None:
+    """Best effort: copy2 can carry the read-only attribute, and a leftover is swept next time."""
+    def writable_retry(function, target, _exc):
+        os.chmod(target, stat.S_IWRITE)
+        function(target)
+    try:
+        shutil.rmtree(path, onexc=writable_retry)
+    except OSError:
+        pass
+
+
 def backup_device(mount: Path, dest_root: Path | None = None) -> Path:
     """Copy the mount (including OMGAUDIO) to a dated local folder.
 
@@ -190,13 +208,19 @@ def backup_device(mount: Path, dest_root: Path | None = None) -> Path:
     else:
         raise BackupError("backup destination must not be on the Walkman")
 
+    partial = None
     try:
         identity = capture_device_identity(mount)
         before = _tree_manifest(mount)
         dest_root.mkdir(parents=True, exist_ok=True)
+        # Backups run one at a time under the device gate, so any partial tree here was left by a
+        # crash or power loss. Only names this function creates are touched; published backups never.
+        for leftover in dest_root.iterdir():
+            if _PARTIAL_BACKUP.fullmatch(leftover.name) and leftover.is_dir() and not leftover.is_symlink():
+                _remove_partial(leftover)
         stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
         partial = dest_root / f".{stamp}-{uuid4().hex}.partial"
-        # A failed copy stays visibly partial; only a verified tree is published.
+        # Only a verified tree is published; an unverified copy is removed rather than kept.
         shutil.copytree(mount, partial, symlinks=True, ignore=_reject_copy_links)
         revalidate_device(identity)
         if _tree_manifest(partial) != before or _tree_manifest(mount) != before:
@@ -211,6 +235,10 @@ def backup_device(mount: Path, dest_root: Path | None = None) -> Path:
         return dest
     except (OSError, shutil.Error, DeviceChangedError) as exc:
         raise BackupError(f"Backup failed: {exc}") from exc
+    finally:
+        # After the rename the partial name no longer exists, so a published backup is never touched.
+        if partial is not None and os.path.lexists(partial):
+            _remove_partial(partial)
 
 
 def device_info(mount: Path) -> dict:

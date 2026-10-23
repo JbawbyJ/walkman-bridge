@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -105,8 +106,15 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
     legacy = Path(__file__).parent / 'walkman-jobs.sqlite'
     if product == 'bridge' and not db_path.exists() and legacy.is_file():
         import sqlite3
-        with sqlite3.connect(str(legacy)) as source, sqlite3.connect(str(db_path)) as dest:
+        from contextlib import closing
+        # Copy into a staging file and publish it whole: an interrupted first copy must not leave an
+        # empty nightops.sqlite that disables the migration and drops terminal history for good.
+        staging = db_path.with_name(db_path.name + '.migrating')
+        for leftover in (staging, staging.with_name(staging.name + '-journal')):
+            leftover.unlink(missing_ok=True)
+        with closing(sqlite3.connect(str(legacy))) as source, closing(sqlite3.connect(str(staging))) as dest:
             source.backup(dest)
+        os.replace(staging, db_path)
     jobs = JobStore(db_path)
     jobs.recover_interrupted()
     store = MediaStore(db_path, data_dir / 'cache')
@@ -176,6 +184,15 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
         async def error(request, exc, code=status):
             return JSONResponse({'detail': str(exc)}, status_code=code)
         app.add_exception_handler(exception, error)
+    async def invalid_request(request, exc):
+        # The renderer reads {detail: string | {code, message}}; FastAPI's default list (which also
+        # echoes the rejected input) would surface only as "Request failed (422)".
+        def field(loc):
+            parts = [str(part) for part in loc[1:]] if loc and loc[0] in ('body', 'query', 'path', 'header') else [str(part) for part in loc]
+            return '.'.join(parts) or 'request'
+        message = '; '.join(f"{field(error.get('loc') or ())}: {error.get('msg', 'invalid value')}" for error in exc.errors()[:3])
+        return JSONResponse({'detail': {'code': 'invalid_request', 'message': message or 'Invalid request'}}, status_code=422)
+    app.add_exception_handler(RequestValidationError, invalid_request)
 
     def admit(kind, identity=None, job_id=None):
         try:
@@ -453,8 +470,8 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
                 raise HTTPException(423, 'Defender clearance is required; rescan this item')
             if record['status'] != 'ready' and not record.get('analyzed'):
                 # Clearance outlives a failed analysis: an empty import keeps a valid scan of zero bytes.
-                # Every audio-artifact scan rewrites status, so a refused derivative leaves a clean,
-                # analyzed source streamable; only bytes that never decoded as audio are refused here.
+                # A verdict on the served derivative still rewrites status (a threat there falls playback
+                # back to the clean, analyzed source), so only bytes that never decoded as audio are refused.
                 raise NotReadyForPlayback
             size = path.stat().st_size
             start, end, status = parse_range(request.headers.get('range'), size)
