@@ -65,6 +65,7 @@ def test_platform_directories_require_version_names_and_numeric_order(monkeypatc
     assert scan._defender_exe() == platform / "10.0.0.0-0" / "MpCmdRun.exe"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows system directory and known-folder API")
 def test_scanner_child_environment_drops_injection_and_spoofed_roots(monkeypatch, tmp_path):
     for key in ("DOTNET_STARTUP_HOOKS", "COMPlus_ReadyToRun", "CORECLR_PROFILER_PATH", "COR_PROFILER", "PSModulePath", "ProgramFiles", "ProgramData", "SystemRoot", "WINDIR", "PATH"):
         monkeypatch.setenv(key, "untrusted")
