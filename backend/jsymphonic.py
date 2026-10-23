@@ -304,6 +304,11 @@ def _run(
 
         watchdog = threading.Timer(timeout, _kill)
         watchdog.start()
+        # A failing progress callback is local bookkeeping (e.g. the job store
+        # hit a full disk). Killing the sole OMGAUDIO writer for it would leave
+        # the device half-written, so stop reporting, keep draining until the
+        # shim exits on its own, and raise afterwards. Only the watchdog bounds it.
+        callback_error: Exception | None = None
         try:
             assert proc.stdout is not None
             for raw in proc.stdout:
@@ -320,7 +325,11 @@ def _run(
                     continue
                 events.append(event)
                 if on_event is not None:
-                    on_event(event)
+                    try:
+                        on_event(event)
+                    except Exception as exc:
+                        callback_error, on_event = exc, None
+                        logger.warning("shim: progress callback failed; letting the shim finish: %s", exc)
             proc.wait()
         except Exception as exc:
             raise JSymphonicError(
@@ -329,18 +338,19 @@ def _run(
             ) from exc
         finally:
             watchdog.cancel()
-            if proc.poll() is None:  # e.g. on_event raised mid-stream
+            if proc.poll() is None:  # only a failed pipe read leaves it running
                 proc.kill()
                 proc.wait()
             drainer.join(timeout=5)
             proc.stdout.close()
             proc.stderr.close()
 
+        # Exit classification wins; a callback failure is chained, never masks it.
         if timed_out.is_set() and proc.returncode != 0:
             raise JSymphonicError(
                 f"jsymphonic shim timed out after {timeout:.0f}s: {' '.join(args)}",
                 events=events, needs_reconcile=mutating,
-            )
+            ) from callback_error
         if proc.returncode != 0:
             for event in reversed(events):
                 if event.get("event") == "fatal":
@@ -349,12 +359,18 @@ def _run(
                         str(event.get("message") or "shim reported a fatal error"),
                         events=events, needs_reconcile=_fatal_needs_reconcile(mutating, code),
                         code=code, path=event.get("path"), probe_path=event.get("probe_path"),
-                    )
+                    ) from callback_error
             tail = "\n".join(list(stderr_lines)[-5:]).strip()
             raise JSymphonicError(
                 tail or f"jsymphonic shim exited with code {proc.returncode}",
                 events=events, needs_reconcile=mutating,
-            )
+            ) from callback_error
+        if callback_error is not None:
+            # A clean exit is unrecorded, not proven: a write stays uncertain.
+            raise JSymphonicError(
+                f"Device progress could not be recorded: {callback_error}",
+                events=events, needs_reconcile=mutating,
+            ) from callback_error
     return events
 
 
