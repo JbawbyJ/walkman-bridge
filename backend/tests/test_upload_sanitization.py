@@ -175,11 +175,6 @@ def test_client_mime_cannot_promote_a_disallowed_extension(tmp_path, monkeypatch
         assert_store_contained(store)
 
 
-@pytest.mark.xfail(reason=(
-    'BUG: MediaStore.import_file persists a filename containing a NUL byte instead of '
-    'raising MediaError. The managed bytes stay inside the cache, but the queue name '
-    'still contains the NUL (test_null_byte_filename_is_rejected).'
-))
 def test_null_byte_filename_is_rejected(tmp_path):
     store = _store(tmp_path)
     with pytest.raises(MediaError):

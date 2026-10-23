@@ -344,6 +344,11 @@ class MediaStore:
 
     def import_file(self, name, stream, *, media_id=None):
         name = (name or 'Untitled').replace('\\', '/').split('/')[-1][:240]
+        # The managed path never uses this name, but the queue name reaches JSON, the UI and
+        # metadata/transfer naming; NUL or any control there is refused before any folder,
+        # quota reservation or record exists.
+        if any(unicodedata.category(char) == 'Cc' for char in name):
+            raise MediaError('File name contains unsupported control characters')
         suffix = Path(name).suffix.lower()
         # Unknown types are persisted for a structured format rejection, never decoded.
         extension = suffix if suffix in MIMES else '.bin'
