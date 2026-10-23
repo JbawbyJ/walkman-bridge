@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from jobs import JobStatus, JobStore
+from jobs import JobStatus, JobStore, JobSuperseded
 
 
 def _close(store):
@@ -310,7 +310,8 @@ def test_stale_store_cannot_overwrite_crash_recovery(tmp_path):
         assert restarted.recover_interrupted() == 1
         assert restarted.get('job').status == JobStatus.INTERRUPTED
         assert restarted.get('job').files[0]['state'] == 'unknown'
-        original.get('job').touch()
+        with pytest.raises(JobSuperseded):
+            original.get('job').touch()
     finally:
         _close(restarted)
         _close(original)
@@ -322,3 +323,89 @@ def test_stale_store_cannot_overwrite_crash_recovery(tmp_path):
         assert recovered.files[0]['state'] == 'unknown'
     finally:
         _close(checked)
+
+
+def _recovered_row(db, job_id):
+    with sqlite3.connect(db) as conn:
+        return conn.execute('SELECT status, phase, needs_reconcile, files, revision FROM jobs WHERE job_id=?',
+                            (job_id,)).fetchone()
+
+
+def test_superseded_writer_stays_refused_and_cannot_start_a_device_write(tmp_path):
+    # The old process was still scanning when a restart recovered its job as plainly interrupted.
+    db = tmp_path / 'jobs.sqlite'
+    original = JobStore(db)
+    job = original.create('job', 1, kind='transfer')
+    job.set_status(JobStatus.RUNNING, 'Scanning')
+    job.set_files([{'file_id': 'f', 'media_id': 'f', 'name': 'a.mp3', 'state': 'scanning'}], phase='scanning')
+    restarted = JobStore(db)
+    try:
+        assert restarted.recover_interrupted() == 1
+        recovered = _recovered_row(db, 'job')
+        assert recovered[0] == 'interrupted' and recovered[2] == 0
+        with pytest.raises(JobSuperseded):
+            job.log('progress')
+        # Every later write, including the device-write marker, stays refused: the old process
+        # stops before add_tracks instead of writing under adopted, unflagged state.
+        with pytest.raises(JobSuperseded):
+            job.set_files([{'file_id': 'f', 'media_id': 'f', 'name': 'a.mp3', 'state': 'transferring'}],
+                          phase='device_writing')
+        job.needs_reconcile = False
+        with pytest.raises(JobSuperseded):
+            job.set_status(JobStatus.DONE, 'Completed 1 of 1 files')
+        assert _recovered_row(db, 'job') == recovered
+    finally:
+        _close(restarted)
+        _close(original)
+
+
+def test_superseded_device_writer_cannot_clear_recovered_uncertainty(tmp_path):
+    db = tmp_path / 'jobs.sqlite'
+    original = JobStore(db)
+    job = original.create('job', 1, kind='transfer')
+    job.set_status(JobStatus.RUNNING, 'Writing to Walkman')
+    job.set_files([{'file_id': 'f', 'media_id': 'f', 'name': 'a.mp3', 'state': 'transferring'}],
+                  phase='device_writing')
+    restarted = JobStore(db)
+    try:
+        assert restarted.recover_interrupted() == 1
+        for write in (lambda: job.log('Device progress'),
+                      lambda: job.update_file('f', state='transferred'),
+                      lambda: job.set_status(JobStatus.DONE, 'Completed 1 of 1 files')):
+            job.needs_reconcile = False
+            with pytest.raises(JobSuperseded):
+                write()
+    finally:
+        _close(restarted)
+        _close(original)
+    checked = JobStore(db)
+    try:
+        row = checked.get('job')
+        assert row.status == JobStatus.INTERRUPTED
+        assert row.needs_reconcile is True
+        assert row.files[0]['state'] == 'unknown'
+        assert checked.uncertain_media_ids() == {'f'}
+        # The restarted store's own writes are not superseded.
+        checked.get('job').log('Owner inspected the device')
+    finally:
+        _close(checked)
+
+
+def test_busy_commit_does_not_make_the_next_write_look_stale(tmp_path):
+    db = tmp_path / 'jobs.sqlite'
+    store = JobStore(db)
+    reader = sqlite3.connect(db)
+    try:
+        job = store.create('job', 1, kind='transfer')
+        store._conn.execute('PRAGMA busy_timeout = 50')
+        reader.execute('BEGIN')
+        reader.execute('SELECT * FROM jobs').fetchall()  # a SHARED lock blocks the writer's COMMIT
+        with pytest.raises(sqlite3.OperationalError):
+            job.set_status(JobStatus.RUNNING, 'Writing to Walkman')
+        reader.rollback()
+        job.needs_reconcile = True
+        job.set_status(JobStatus.FAILED, 'Verify device state')
+        assert _recovered_row(db, 'job')[:3] == ('failed', 'queued', 1)
+    finally:
+        reader.close()
+        _close(store)

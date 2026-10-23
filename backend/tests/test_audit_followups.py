@@ -207,3 +207,44 @@ def test_device_unplugged_while_reading_info_is_a_structured_409(tmp_path):
         assert 'disconnected' in response.json()['detail']
         assert client.get('/api/engine-busy').json()['busy'] is False
 
+
+def test_superseded_backend_never_starts_the_device_write(tmp_path, monkeypatch):
+    # A restart recovers the transfer while this (old) backend is still converting audio.
+    import media_service
+    from jobs import JobStore as Store
+
+    monkeypatch.setattr(media_service, 'analyze_cleared_audio', lambda path: {})
+    data_dir = tmp_path / 'state'
+    recovered = {}
+
+    def convert(src, out, kind, maximum, metadata=None):
+        out.write_bytes(b'transfer-bytes')
+        if kind == 'transfer':
+            restarted = Store(data_dir / 'nightops.sqlite')
+            try:
+                recovered['count'] = restarted.recover_interrupted()
+            finally:
+                restarted.close()
+        return out
+
+    monkeypatch.setattr(media_service, 'convert_managed', convert)
+    writes = []
+    volume = tmp_path / 'device'
+    (volume / 'OMGAUDIO').mkdir(parents=True)
+    api = fake_device(volume, lambda m: [], lambda mount, paths, callback: writes.append(paths))
+    app = application.create_app(product='bridge', data_dir=data_dir, token=TOKEN, origin=ORIGIN,
+                                 scanner=HashScanner(), device_api=api)
+    with TestClient(app, base_url=ORIGIN, headers={'X-NightOps-Token': TOKEN},
+                    raise_server_exceptions=False) as client:
+        imported = client.post('/api/media/import', files={'files': ('song.wav', b'RIFF-audio', 'audio/wav')})
+        media_id = client.get('/api/jobs/' + imported.json()['job_id']).json()['files'][0]['media_id']
+        job_id = client.post('/api/transfers', json={'media_ids': [media_id]}).json()['job_id']
+        assert recovered['count'] == 1
+        assert writes == []  # the device was never written without a persisted marker
+        assert client.get('/api/engine-busy').json()['busy'] is False
+    checked = Store(data_dir / 'nightops.sqlite')
+    try:
+        row = checked.get(job_id)
+        assert row.status == JobStatus.INTERRUPTED and row.phase == 'interrupted'
+    finally:
+        checked.close()

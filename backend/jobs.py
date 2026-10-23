@@ -19,6 +19,10 @@ from pathlib import Path
 from threading import RLock
 
 
+class JobSuperseded(RuntimeError):
+    """Another process recovered or changed this job; this process must stop acting on it."""
+
+
 class JobStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -52,6 +56,8 @@ class Job:
     _lock: RLock = field(default_factory=RLock, repr=False, compare=False)
     # Row revision this process last observed; a write must match it to land.
     _revision: int = field(default=0, repr=False, compare=False)
+    # Set once a write is refused because another process moved the row; never cleared.
+    _superseded: bool = field(default=False, repr=False, compare=False)
 
     def _guard(self):
         return self._store._lock if self._store is not None else self._lock
@@ -173,9 +179,23 @@ class JobStore:
             job = Job(job_id=job_id, total_files=total_files, kind=kind)
             job._store = self
             # Register only a persisted job: a closed store raises, and a row another
-            # process already owns must surface here rather than vanish on restart.
-            if not self._upsert(job):
-                raise ValueError("Job identity already exists")
+            # process already owns must surface here rather than be overwritten.
+            if self._conn is None:
+                raise RuntimeError("Job store is closed")
+            try:
+                self._conn.execute(
+                    "INSERT INTO jobs (job_id, total_files, status, progress, message, created_at, log, "
+                    "kind, phase, needs_reconcile, files, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                    (job.job_id, *self._values(job)),
+                )
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                self._conn.rollback()
+                raise ValueError("Job identity already exists") from None
+            except BaseException:
+                self._conn.rollback()
+                raise
+            job._revision = 1
             self._jobs[job_id] = job
             return job
 
@@ -209,7 +229,7 @@ class JobStore:
                     job.phase = "interrupted"
                     job.message = "Interrupted when the application stopped"
                     job._log.append(f"[{time.strftime('%H:%M:%S')}] {job.message}")
-                    if self._upsert(job, commit=False):
+                    if self._upsert(job, commit=False, adopt=True):
                         count += 1
             self._conn.commit()
         return count
@@ -259,7 +279,7 @@ class JobStore:
                         row['reconciliation'] = deepcopy(evidence)
                     job.message = 'Device inspected by owner; original outcome remains recorded. No automatic retry.'
                     job._log.append(f"[{time.strftime('%H:%M:%S')}] {job.message}")
-                    if not self._upsert(job, commit=False):
+                    if not self._upsert(job, commit=False, adopt=True):
                         # The reloaded row is the truth now; restoring the snapshot would re-stale it.
                         adopted = True
                         raise ValueError('Operation changed in another process; inspect the device again')
@@ -324,16 +344,9 @@ class JobStore:
         job.status, job.progress, job.message, job.phase = fresh.status, fresh.progress, fresh.message, fresh.phase
         job.needs_reconcile, job.files, job._log, job._revision = fresh.needs_reconcile, fresh.files, fresh._log, fresh._revision
 
-    def _upsert(self, job: Job, commit: bool = True) -> bool:
-        """Persist the job unless its row moved under us; return whether it was written.
-
-        The revision is a fence: a writer may only replace the row it last observed.
-        A superseded process (still finishing after a restart recovered its job)
-        therefore loses and adopts the recovered row instead of overwriting it.
-        """
-        if self._conn is None:
-            raise RuntimeError("Job store is closed")
-        values = (
+    @staticmethod
+    def _values(job: Job) -> tuple:
+        return (
             job.total_files,
             job.status.value,
             job.progress,
@@ -345,6 +358,22 @@ class JobStore:
             int(job.needs_reconcile),
             json.dumps(job.files, ensure_ascii=False),
         )
+
+    def _upsert(self, job: Job, commit: bool = True, *, adopt: bool = False) -> bool:
+        """Persist the job unless its row moved under us; return whether it was written.
+
+        The revision is a fence: a writer may only replace the row it last observed.
+        Startup recovery and owner acknowledgement own the row (adopt=True): they reload
+        a moved row and decide again. Any other writer is a superseded process still
+        finishing after a restart recovered its job. It adopts the persisted row for
+        display, and this write and every later one raise JobSuperseded, so it stops
+        before it can start a device write whose marker never persisted.
+        """
+        if self._conn is None:
+            raise RuntimeError("Job store is closed")
+        if job._superseded:
+            raise JobSuperseded(f"Job {job.job_id} was recovered by another process")
+        values = self._values(job)
         revision = job._revision + 1
         written = self._conn.execute(
             """
@@ -373,11 +402,22 @@ class JobStore:
                 )
         if commit:
             # Also after a refused write: the UPDATE opened a transaction whose lock must go.
-            self._conn.commit()
-        if not stale:
-            # Only once committed, so a failed commit leaves memory matching the row.
-            job._revision = revision
-        return not stale
+            try:
+                self._conn.commit()
+            except BaseException:
+                # A COMMIT refused with SQLITE_BUSY keeps its UPDATE pending, which the next write
+                # would mistake for another process's row. Drop it: memory keeps the new values at
+                # the committed revision, so that next write lands.
+                self._conn.rollback()
+                raise
+        if stale:
+            if not adopt:
+                job._superseded = True
+                raise JobSuperseded(f"Job {job.job_id} was recovered by another process")
+            return False
+        # Only once committed, so a failed commit leaves memory matching the row.
+        job._revision = revision
+        return True
 
 
 # Each application factory owns its store; importing this module never creates state.
