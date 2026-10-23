@@ -152,26 +152,38 @@ class MediaStore:
         """Recover incomplete managed copies without evicting any queued artifact."""
         known = {row['id']: json.loads(row['record']) for row in
                  self._db.execute('SELECT id,record FROM media')}
+        # Each deletion is retried by the next start: one file still held by an orphaned ffmpeg,
+        # the indexer or antivirus must not stop the product from starting. A reparse point is a
+        # MediaError, not an OSError, and stays fatal.
         for folder in self.root.iterdir():
             no_links(folder, self.root)
             if folder.is_dir() and re.fullmatch(r'download-[a-f0-9]{32}', folder.name):
-                for child in folder.rglob('*'):
-                    no_links(child, self.root)
-                shutil.rmtree(folder)
+                try:
+                    for child in folder.rglob('*'):
+                        no_links(child, self.root)
+                    shutil.rmtree(folder)
+                except OSError:
+                    pass
                 continue
             if not folder.is_dir() or not re.fullmatch(r'[a-f0-9]{32}', folder.name):
                 continue
             if folder.name not in known:
-                for child in folder.rglob('*'):
-                    no_links(child, self.root)
-                shutil.rmtree(folder)
+                try:
+                    for child in folder.rglob('*'):
+                        no_links(child, self.root)
+                    shutil.rmtree(folder)
+                except OSError:
+                    pass
                 continue
             retained = {value['name'] for value in known[folder.name]['artifacts'].values()}
             for name in ('playback.flac', 'transfer.mp3', 'artwork.jpg'):
                 path = folder / name
                 if name not in retained and path.exists():
-                    no_links(path, self.root)
-                    path.unlink()
+                    try:
+                        no_links(path, self.root)
+                        path.unlink()
+                    except OSError:
+                        pass
         for media_id, record in known.items():
             if any(info.get('purged') for info in record['artifacts'].values()):
                 try:
@@ -298,9 +310,12 @@ class MediaStore:
             # Account for interrupted copies and derivatives not yet committed to SQLite.
             total = 0
             for path in self.root.rglob('*'):
-                no_links(path, self.root)
-                if path.is_file():
-                    total += path.stat().st_size
+                try:
+                    no_links(path, self.root)
+                    if path.is_file():
+                        total += path.stat().st_size
+                except FileNotFoundError:
+                    continue  # workspace and failed-derivative removal run outside this lock
             return total
 
     @contextmanager
@@ -435,11 +450,16 @@ class MediaStore:
                 return
             folder = self.root / self._id(media_id)
             if folder.exists():
-                no_links(folder, self.root)
-                # Only this store creates artifact names. Reject unexpected links before recursive removal.
-                for child in folder.rglob('*'):
-                    no_links(child, self.root)
-                shutil.rmtree(folder)
+                try:
+                    no_links(folder, self.root)
+                    # Only this store creates artifact names. Reject unexpected links before recursive removal.
+                    for child in folder.rglob('*'):
+                        no_links(child, self.root)
+                    shutil.rmtree(folder)
+                except OSError:
+                    # The removal is already committed. A held file keeps the tombstone (and any
+                    # partly removed folder) so the next lease release or start retries.
+                    return
             self._db.execute('DELETE FROM media WHERE id=?', (media_id,))
             self._db.commit()
 
