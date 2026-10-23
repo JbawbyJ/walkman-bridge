@@ -230,3 +230,63 @@ def test_rescan_of_failed_zero_byte_import_stays_refused(tmp_path, monkeypatch):
         stream = client.get(f'/api/media/{media_id}/stream')
         assert stream.status_code != 200
         assert stream.content == b''
+
+
+def test_cp1252_mojibake_name_imports_with_its_batch(tmp_path, monkeypatch):
+    # U+0092 (a cp1252 apostrophe decoded as Latin-1) is a legal Windows file name character.
+    monkeypatch.setattr(media_service, 'analyze_cleared_audio', lambda path: {})
+    app = create_app(product='player', data_dir=tmp_path / 'state', token=TOKEN,
+                     origin=ORIGIN, scanner=HashScanner())
+    with TestClient(app, base_url=ORIGIN, headers={'X-NightOps-Token': TOKEN}) as client:
+        response = client.post('/api/media/import', files=[
+            ('files', ('Good.mp3', b'ID3-one', 'audio/mpeg')),
+            ('files', ('Don\u0092t Stop\u007f.mp3', b'ID3-two', 'audio/mpeg')),
+        ])
+        assert response.status_code == 200, response.text
+        job = client.get('/api/jobs/' + response.json()['job_id']).json()
+        names = sorted(app.state.store.get(row['media_id'])['name'] for row in job['files'])
+        assert names == ['Don_t Stop_.mp3', 'Good.mp3']
+        assert_store_contained(app.state.store)
+
+
+@pytest.mark.parametrize('name', ['track\x01.mp3', 'tab\tname.mp3', 'new\nline.mp3'])
+def test_c0_control_names_are_still_refused(tmp_path, name):
+    store = _store(tmp_path)
+    with pytest.raises(MediaError):
+        store.import_file(name, io.BytesIO(b'abcd'))
+    assert store.queue() == []
+
+
+@pytest.mark.parametrize('kind', ['prepare', 'upload'])
+def test_undecodable_bytes_stay_refused_after_any_job_kind(tmp_path, monkeypatch, kind):
+    # The bytes clear (as a valid header with a corrupt body would) but never decode as audio.
+    def reject(path):
+        raise AudioError('Audio format could not be decoded')
+
+    monkeypatch.setattr(media_service, 'analyze_cleared_audio', reject)
+    product = 'player' if kind == 'prepare' else 'bridge'
+    extra = {} if kind == 'prepare' else {'device_api': _fake_bridge_device(tmp_path)}
+    app = create_app(product=product, data_dir=tmp_path / 'state', token=TOKEN,
+                     origin=ORIGIN, scanner=HashScanner(), **extra)
+    with TestClient(app, base_url=ORIGIN, headers={'X-NightOps-Token': TOKEN}) as client:
+        if kind == 'prepare':
+            response = client.post('/api/media/import', files={'files': ('bad.wav', b'RIFF-junk', 'audio/wav')})
+            media_id = client.get('/api/jobs/' + response.json()['job_id']).json()['files'][0]['media_id']
+            assert app.state.store.get(media_id)['status'] == 'failed'
+            response = client.post(f'/api/media/{media_id}/prepare', json={'format': 'flac'})
+        else:
+            response = client.post('/api/upload', files={'files': ('bad.wav', b'RIFF-junk', 'audio/wav')})
+        assert response.status_code == 200, response.text
+        job = client.get('/api/jobs/' + response.json()['job_id']).json()
+        media_id = job['files'][0]['media_id']
+        assert job['status'] == 'failed'
+        record = app.state.store.get(media_id)
+        assert record['status'] == 'failed' and not record.get('analyzed')
+        assert client.get(f'/api/media/{media_id}/stream').status_code != 200
+
+
+def _fake_bridge_device(tmp_path):
+    from adversarial_helpers import fake_device
+    volume = tmp_path / 'device'
+    (volume / 'OMGAUDIO').mkdir(parents=True)
+    return fake_device(volume, lambda mount: [], lambda *args: None)

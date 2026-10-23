@@ -371,8 +371,9 @@ class MediaService:
                     row = next(x for x in job.to_dict()['files'] if x['file_id'] == media_id)
                     if row['state'] not in ('failed', 'blocked'):
                         job.update_file(media_id, state='failed', detail=str(exc), reason_code='processing_failed')
-                        if kind in ('import', 'rescan'):
-                            # clear() already republished 'ready'; bytes that never decoded stay unplayable.
+                        if kind in ('import', 'rescan') or not self.store.get(media_id).get('analyzed'):
+                            # clear() already republished 'ready'; bytes that never decoded stay unplayable,
+                            # whichever job (upload, prepare, transfer) first tried to decode them.
                             self.store.update(media_id, status='failed')
                 job.progress = (index + 1) / max(1, len(ids)) * (0.5 if kind in ('upload', 'transfer') else 1)
                 job.touch()
