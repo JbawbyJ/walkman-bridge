@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -213,6 +214,7 @@ def test_cancelled_conversion_removes_the_partial_derivative(tmp_path, monkeypat
         assert client.get(f'/api/media/{media_id}/stream').content == b'original-bytes'
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='the Windows share-read lock refuses this write; covered below')
 def test_checksum_mismatch_during_device_write_is_not_success(tmp_path, monkeypatch):
     monkeypatch.setattr(media_service, 'analyze_cleared_audio', lambda path: {})
 
@@ -241,8 +243,45 @@ def test_checksum_mismatch_during_device_write_is_not_success(tmp_path, monkeypa
         recorded = record['artifacts']['transfer']
         assert result['status'] != 'done'
         assert result['files'][0]['state'] != 'transferred'
+        assert result['files'][0]['reason_code'] == 'transfer_bytes_changed'
         assert recorded['sha256'] == hashlib.sha256(path.read_bytes()).hexdigest()
         assert recorded['size_bytes'] == path.stat().st_size
+
+
+def test_transfer_artifact_that_no_longer_matches_after_the_device_write_is_not_success(tmp_path, monkeypatch):
+    # Platform-neutral: on Windows the held share-read lock refuses any change to the staged bytes,
+    # so the mismatch is created on the record side. The re-hash after add_tracks must still catch it.
+    monkeypatch.setattr(media_service, 'analyze_cleared_audio', lambda path: {})
+    monkeypatch.setattr(media_service, 'convert_managed',
+                        lambda src, out, kind, maximum, metadata=None: out.write_bytes(b'complete-transfer-bytes') or out)
+    holder = {}
+
+    def add_tracks(mount, paths, callback):
+        store = holder['app'].state.store
+        for path in paths:
+            record = store.get(Path(path).parent.name)
+            record['artifacts']['transfer'] = dict(record['artifacts']['transfer'], sha256='0' * 64, size_bytes=1)
+            store.update(record['id'], artifacts=record['artifacts'])
+        return jsymphonic.AddResult(tuple(
+            jsymphonic.FileOutcome(index, str(path), 'transferred', 'Device database update completed')
+            for index, path in enumerate(paths)
+        ))
+
+    app = holder['app'] = _bridge(tmp_path, HashScanner(), fake_device(_volume(tmp_path), lambda mount: [], add_tracks))
+    with TestClient(app, base_url=ORIGIN, headers={'X-NightOps-Token': TOKEN}) as client:
+        media_id = _import(client, 'song.wav', b'RIFF-audio')
+        response = client.post('/api/transfers', json={'media_ids': [media_id]})
+        result = client.get('/api/jobs/' + response.json()['job_id']).json()
+        record = app.state.store.get(media_id)
+        path = app.state.store.path(record, 'transfer')
+        recorded = record['artifacts']['transfer']
+        assert result['status'] != 'done' and result['needs_reconcile'] is True
+        assert result['files'][0]['state'] == 'unknown'
+        assert result['files'][0]['reason_code'] == 'transfer_bytes_changed'
+        assert recorded['sha256'] == hashlib.sha256(path.read_bytes()).hexdigest()
+        assert recorded['size_bytes'] == path.stat().st_size
+        assert recorded['scan'] is None
+        assert record['needs_reconcile'] is True
 
 
 def test_unconfirmed_device_result_is_not_reported_done(tmp_path, monkeypatch):
