@@ -183,12 +183,6 @@ def test_null_byte_filename_is_rejected(tmp_path):
     assert_store_contained(store)
 
 
-@pytest.mark.xfail(reason=(
-    'BUG: a zero-byte import that fails analysis is still returned by the stream route '
-    'with HTTP 200. Scan clearance is left in place after status is set to failed, so '
-    'the empty file looks like a complete audio response '
-    '(test_zero_byte_import_is_not_served_as_complete).'
-))
 def test_zero_byte_import_is_not_served_as_complete(tmp_path, monkeypatch):
     def reject_empty(path):
         raise AudioError('Audio format could not be decoded')

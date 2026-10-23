@@ -277,11 +277,6 @@ def test_encoder_failure_under_a_tiny_cache_leaves_no_transfer_artifact(tmp_path
         jobs.close()
 
 
-@pytest.mark.xfail(reason=(
-    'BUG: the device track cache stores the list object returned by list_tracks. Mutating '
-    'that list during an in-flight transfer makes the next cached GET /api/tracks serve the '
-    'partial track without a refresh (test_track_cache_ignores_mutation_of_cached_list_during_transfer).'
-))
 def test_track_cache_ignores_mutation_of_cached_list_during_transfer(tmp_path, monkeypatch):
     monkeypatch.setattr(media_service, 'analyze_cleared_audio', lambda path: {})
     monkeypatch.setattr(

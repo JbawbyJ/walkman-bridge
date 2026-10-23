@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -80,6 +81,9 @@ def parse_range(value, size):
     if start > end or start >= size:
         raise bad
     return start, end, 206
+
+class NotReadyForPlayback(Exception):
+    """Stream refusal raised before any byte is read; it is answered without a body."""
 
 class LeasedStream(StreamingResponse):
     def __init__(self, *args, release, **kwargs):
@@ -433,6 +437,11 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
             if not clearance or not scanner.clearance_valid(path, clearance):
                 store.update(media_id, status='needs_scan')
                 raise HTTPException(423, 'Defender clearance is required; rescan this item')
+            if record['status'] != 'ready' and not record.get('analyzed'):
+                # Clearance outlives a failed analysis: an empty import keeps a valid scan of zero bytes.
+                # Every audio-artifact scan rewrites status, so a refused derivative leaves a clean,
+                # analyzed source streamable; only bytes that never decoded as audio are refused here.
+                raise NotReadyForPlayback
             size = path.stat().st_size
             start, end, status = parse_range(request.headers.get('range'), size)
             stream.seek(start)
@@ -454,6 +463,9 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
                         remaining -= len(chunk)
                         yield chunk
                 return LeasedStream(chunks(), status_code=status, headers=headers, media_type=record['mime'], release=release)
+        except NotReadyForPlayback:
+            release()
+            return Response(status_code=423, headers={'X-NightOps-Reason': 'This item is not ready for playback; rescan or re-import it'})
         except BaseException:
             release()
             raise
@@ -512,12 +524,17 @@ def register_device_routes(app, device_api, identity, admit, coordinator, jobs, 
         volume = await asyncio.to_thread(identity)
         ticket = admit('device_read', volume)
         def read():
+            rows = None if refresh else cache.get(volume.volume_id)
+            if rows is not None:
+                # A hit touches neither the device nor the shim, so it must not queue behind an
+                # in-flight write; write_and_invalidate clears the cache once that write ends.
+                return rows
             with coordinator.device_session(ticket) as mount:
-                rows = cache.get(volume.volume_id)
-                if rows is None or refresh:
-                    rows = device_api.list_tracks(mount)
-                    cache.clear()
-                    cache[volume.volume_id] = rows
+                # Cache a private copy: the engine may keep mutating its own list while a transfer
+                # is in flight. deepcopy keeps DeviceRows and its probe warnings.
+                rows = copy.deepcopy(device_api.list_tracks(mount))
+                cache.clear()
+                cache[volume.volume_id] = rows
                 return rows
         try:
             rows = await asyncio.to_thread(read)
