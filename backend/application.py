@@ -9,7 +9,7 @@ import secrets
 import shutil
 import threading
 import uuid
-from contextlib import ExitStack, asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager, suppress
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
@@ -136,8 +136,12 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
             if playback_lease and (media_id is None or playback_lease[0] == media_id):
                 _, lease, ticket = playback_lease
                 playback_lease = None
-                lease.close()
-                coordinator.finish(ticket)
+                try:
+                    lease.close()
+                finally:
+                    # A cache cleanup that fails (a locked file on Windows) must not strand the
+                    # session ticket: drain waits on every admitted ticket.
+                    coordinator.finish(ticket)
 
     def acquire_playback(media_id):
         nonlocal playback_lease
@@ -152,8 +156,10 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
                     release_playback(playback_lease[0])
                 playback_lease = (media_id, lease, ticket)
             except BaseException:
-                lease.close()
-                coordinator.finish(ticket)
+                try:
+                    lease.close()
+                finally:
+                    coordinator.finish(ticket)
                 raise
     @asynccontextmanager
     async def lifespan(app):
@@ -321,11 +327,17 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
             background.add_task(service.run, job_id, ids, ticket, leases, kind)
             return {'job_id': job_id}
         except BaseException:
-            if leases:
-                leases.close()
-            for media_id in ids:
-                store.remove(media_id)
-            coordinator.finish(ticket)
+            # Attempt every release even if one fails, and always free the import slot;
+            # the caller sees the original failure rather than a cleanup error.
+            try:
+                with suppress(Exception):
+                    if leases:
+                        leases.close()
+                for media_id in ids:
+                    with suppress(Exception):
+                        store.remove(media_id)
+            finally:
+                coordinator.finish(ticket)
             raise
         finally:
             if form:
@@ -397,9 +409,11 @@ def create_app(*, product=None, data_dir=None, token=None, origin=None, scanner=
             background.add_task(service.run, job_id, ids, ticket, leases, kind)
             return {'job_id': job_id}
         except BaseException:
-            if leases:
-                leases.close()
-            coordinator.finish(ticket)
+            try:
+                if leases:
+                    leases.close()
+            finally:
+                coordinator.finish(ticket)
             raise
 
     @app.post('/api/media/{media_id}/rescan')
@@ -569,8 +583,15 @@ def register_device_routes(app, device_api, identity, admit, coordinator, jobs, 
         volume = await asyncio.to_thread(identity)
         job_id = uuid.uuid4().hex
         ticket = admit('delete', volume, job_id)
-        job = jobs.create(job_id, 1, kind='delete')
-        job.set_files([dict(file_id=track_id, name=track_id, volume_id=volume.volume_id, state='queued')])
+        try:
+            job = jobs.create(job_id, 1, kind='delete')
+            job.set_files([dict(file_id=track_id, name=track_id, volume_id=volume.volume_id, state='queued')])
+        except Exception as exc:
+            # No device session was opened, so nothing was written. An unrecorded delete must not
+            # keep its device ticket admitted: that would block drain and reconciliation for good.
+            coordinator.finish(ticket)
+            raise HTTPException(409, {'code': 'delete_failed', 'job_id': None, 'fatal_code': None, 'recovery_action': None,
+                                      'message': 'Could not record the delete operation; nothing was written'}) from exc
         def remove():
             with coordinator.device_session(ticket) as mount:
                 rows = device_api.list_tracks(mount)

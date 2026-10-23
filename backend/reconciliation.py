@@ -15,6 +15,8 @@ from typing import Literal
 from fastapi import HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from media_store import public_scan
+
 
 
 class Acknowledgement(BaseModel):
@@ -47,6 +49,10 @@ def register_reconciliation_routes(app, device_api, identity, admit, coordinator
         warnings += list(getattr(playlists, 'warnings', ()) or ())
         pending = jobs.pending_reconciliation()
         for job in pending:
+            # Rows are deep copies. Project scans like /api/jobs: nonces, helper PIDs and cache
+            # paths stay in the backend, and the ETag hashes the same view inspect and confirm use.
+            for row in job['files']:
+                row['scan'] = public_scan(row.get('scan'))
             job['same_device'] = bool(job['files']) and all(
                 row.get('volume_id') == volume.volume_id for row in job['files'])
         return {'volume_id': volume.volume_id, 'journal': journal, 'tracks': list(tracks),
