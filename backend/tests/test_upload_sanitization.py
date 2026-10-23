@@ -206,3 +206,27 @@ def test_zero_byte_import_is_not_served_as_complete(tmp_path, monkeypatch):
         stream = client.get(f'/api/media/{media_id}/stream')
         assert stream.status_code != 200
         assert stream.content == b''
+
+
+def test_rescan_of_failed_zero_byte_import_stays_refused(tmp_path, monkeypatch):
+    def reject_empty(path):
+        raise AudioError('Audio format could not be decoded')
+
+    monkeypatch.setattr(media_service, 'analyze_cleared_audio', reject_empty)
+    app = create_app(product='player', data_dir=tmp_path / 'state', token=TOKEN,
+                     origin=ORIGIN, scanner=HashScanner())
+    with TestClient(app, base_url=ORIGIN, headers={'X-NightOps-Token': TOKEN}) as client:
+        response = client.post('/api/media/import', files={'files': ('empty.mp3', b'', 'audio/mpeg')})
+        media_id = client.get('/api/jobs/' + response.json()['job_id']).json()['files'][0]['media_id']
+        # The stored clearance still binds to the empty bytes, so the rescan republishes
+        # 'ready' before analysis fails again; the record must not stay playable.
+        rescan = client.post(f'/api/media/{media_id}/rescan').json()
+        job = client.get('/api/jobs/' + rescan['job_id']).json()
+        assert job['status'] == 'failed'
+        assert job['files'][0]['state'] == 'failed'
+        record = app.state.store.get(media_id)
+        assert record['status'] == 'failed'
+        assert not record.get('analyzed')
+        stream = client.get(f'/api/media/{media_id}/stream')
+        assert stream.status_code != 200
+        assert stream.content == b''

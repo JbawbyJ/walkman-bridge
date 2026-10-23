@@ -506,3 +506,11 @@ def test_progress_callback_exception_reaps_owned_worker(tmp_path, monkeypatch):
     assert FakeContainment.instance.killed and FakeContainment.instance.closed
     assert process.waited
     assert process.stdin.closed and process.stdout.closed
+
+
+def test_safe_name_strips_every_control_character():
+    import unicodedata
+
+    name = link_import._safe_name("bad\x00\x1f\x7f\x85title", "mp3")
+    assert name == "bad____title.mp3"
+    assert not any(unicodedata.category(char) == "Cc" for char in name)

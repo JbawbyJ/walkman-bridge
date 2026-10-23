@@ -311,7 +311,8 @@ def _open_https(request: Any, *, budget: _TransportBudget):
 
 
 def _safe_name(title: str, extension: str) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title).strip(" .")[:180] or "Imported track"
+    # Every C0, DEL and C1 control: the media store refuses control characters in a queue name.
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f-\x9f]', "_", title).strip(" .")[:180] or "Imported track"
     return f"{cleaned}.{extension}"
 
 
