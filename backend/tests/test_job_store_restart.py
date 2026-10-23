@@ -283,12 +283,6 @@ def test_duplicate_job_id_does_not_replace_the_original(tmp_path):
         _close(store)
 
 
-@pytest.mark.xfail(reason=(
-    'BUG: JobStore.create after close() returns a job and does not raise, but _upsert '
-    'drops the write because the connection is already None. A caller observes success '
-    'for a job that does not survive reopen '
-    '(test_closed_job_store_does_not_report_a_persisted_create).'
-))
 def test_closed_job_store_does_not_report_a_persisted_create(tmp_path):
     db = tmp_path / 'jobs.sqlite'
     store = JobStore(db)
@@ -304,12 +298,6 @@ def test_closed_job_store_does_not_report_a_persisted_create(tmp_path):
         _close(reopened)
 
 
-@pytest.mark.xfail(reason=(
-    'BUG: crash recovery on a second JobStore marks an in-progress device write interrupted, '
-    'then a stale touch() from the original store overwrites that row and the job looks '
-    'running/transferring again. Concurrent writers can discard recovered state '
-    '(test_stale_store_cannot_overwrite_crash_recovery).'
-))
 def test_stale_store_cannot_overwrite_crash_recovery(tmp_path):
     db = tmp_path / 'jobs.sqlite'
     original = JobStore(db)

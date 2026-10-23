@@ -50,6 +50,8 @@ class Job:
     needs_reconcile: bool = False
     files: list[dict] = field(default_factory=list)
     _lock: RLock = field(default_factory=RLock, repr=False, compare=False)
+    # Row revision this process last observed; a write must match it to land.
+    _revision: int = field(default=0, repr=False, compare=False)
 
     def _guard(self):
         return self._store._lock if self._store is not None else self._lock
@@ -119,6 +121,12 @@ class Job:
             self._store.save(self)
 
 
+_SELECT_JOBS = (
+    "SELECT job_id, total_files, status, progress, message, created_at, log, "
+    "kind, phase, needs_reconcile, files, revision FROM jobs"
+)
+
+
 class JobStore:
     def __init__(self, db_path: Path | str | None = None) -> None:
         self._jobs: dict[str, Job] = {}
@@ -150,6 +158,7 @@ class JobStore:
                 "phase": "TEXT NOT NULL DEFAULT 'queued'",
                 "needs_reconcile": "INTEGER NOT NULL DEFAULT 0",
                 "files": "TEXT NOT NULL DEFAULT '[]'",
+                "revision": "INTEGER NOT NULL DEFAULT 0",
             }
             for name, declaration in additions.items():
                 if name not in columns:
@@ -163,8 +172,11 @@ class JobStore:
                 raise ValueError("Job identity already exists")
             job = Job(job_id=job_id, total_files=total_files, kind=kind)
             job._store = self
+            # Register only a persisted job: a closed store raises, and a row another
+            # process already owns must surface here rather than vanish on restart.
+            if not self._upsert(job):
+                raise ValueError("Job identity already exists")
             self._jobs[job_id] = job
-            self._upsert(job)
             return job
 
     def get(self, job_id: str) -> Job | None:
@@ -180,32 +192,33 @@ class JobStore:
         count = 0
         with self._lock:
             for job in self._jobs.values():
-                if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
-                    continue
-                possibly_mutating = job.phase in {"transferring", "device_writing", "deleting", "updating", "reconciling"}
-                legacy_running = not job.files and job.status == JobStatus.RUNNING and job.kind in {"upload", "transfer", "delete"}
-                job.needs_reconcile = job.needs_reconcile or possibly_mutating or legacy_running
-                for row in job.files:
-                    state = row.get("state", "queued")
-                    if state in {"transferring", "unknown"}:
-                        row.update(state="unknown", detail="Device outcome is unknown after interruption; verify before retrying", reason_code="interrupted_device_write")
-                        job.needs_reconcile = True
-                    elif state in {"queued", "downloading", "analyzing", "scanning", "awaiting_permission", "transcoding"}:
-                        row.update(state="interrupted", detail="Interrupted when the application stopped", reason_code="process_interrupted")
-                job.status = JobStatus.INTERRUPTED
-                job.phase = "interrupted"
-                job.message = "Interrupted when the application stopped"
-                job._log.append(f"[{time.strftime('%H:%M:%S')}] {job.message}")
-                self._upsert(job, commit=False)
-                count += 1
+                # A superseded process may still write progress between _load and this
+                # UPDATE; recompute from the reloaded row until the recovery lands.
+                while job.status in (JobStatus.PENDING, JobStatus.RUNNING):
+                    possibly_mutating = job.phase in {"transferring", "device_writing", "deleting", "updating", "reconciling"}
+                    legacy_running = not job.files and job.status == JobStatus.RUNNING and job.kind in {"upload", "transfer", "delete"}
+                    job.needs_reconcile = job.needs_reconcile or possibly_mutating or legacy_running
+                    for row in job.files:
+                        state = row.get("state", "queued")
+                        if state in {"transferring", "unknown"}:
+                            row.update(state="unknown", detail="Device outcome is unknown after interruption; verify before retrying", reason_code="interrupted_device_write")
+                            job.needs_reconcile = True
+                        elif state in {"queued", "downloading", "analyzing", "scanning", "awaiting_permission", "transcoding"}:
+                            row.update(state="interrupted", detail="Interrupted when the application stopped", reason_code="process_interrupted")
+                    job.status = JobStatus.INTERRUPTED
+                    job.phase = "interrupted"
+                    job.message = "Interrupted when the application stopped"
+                    job._log.append(f"[{time.strftime('%H:%M:%S')}] {job.message}")
+                    if self._upsert(job, commit=False):
+                        count += 1
             self._conn.commit()
         return count
 
     def save(self, job: Job) -> None:
         with self._lock:
             job._store = self
-            self._jobs[job.job_id] = job
             self._upsert(job)
+            self._jobs[job.job_id] = job
 
     def uncertain_media_ids(self) -> set[str]:
         """Durable uncertainty survives a crash between job and media updates."""
@@ -237,7 +250,8 @@ class JobStore:
             media_db = media_store._db.execute('PRAGMA database_list').fetchone()[2]
             if Path(media_db).resolve() != self._db_path.resolve():
                 raise ValueError('Media and job stores do not share a database')
-            rows, old_message, old_log = deepcopy(job.files), job.message, deque(job._log, maxlen=200)
+            rows, old_message, old_log, old_revision = deepcopy(job.files), job.message, deque(job._log, maxlen=200), job._revision
+            adopted = False
             try:
                 with self._conn:
                     job.needs_reconcile = False
@@ -245,7 +259,10 @@ class JobStore:
                         row['reconciliation'] = deepcopy(evidence)
                     job.message = 'Device inspected by owner; original outcome remains recorded. No automatic retry.'
                     job._log.append(f"[{time.strftime('%H:%M:%S')}] {job.message}")
-                    self._upsert(job, commit=False)
+                    if not self._upsert(job, commit=False):
+                        # The reloaded row is the truth now; restoring the snapshot would re-stale it.
+                        adopted = True
+                        raise ValueError('Operation changed in another process; inspect the device again')
                     other_uncertain = self.uncertain_media_ids()
                     for media_id in {row.get('media_id') for row in job.files} - {None}:
                         saved = self._conn.execute('SELECT record FROM media WHERE id=?', (media_id,)).fetchone()
@@ -254,8 +271,9 @@ class JobStore:
                             record['needs_reconcile'] = media_id in other_uncertain
                             self._conn.execute('UPDATE media SET record=? WHERE id=?', (json.dumps(record), media_id))
             except BaseException:
-                job.needs_reconcile = True
-                job.files, job.message, job._log = rows, old_message, old_log
+                if not adopted:  # the rollback undid the row, so memory follows it back
+                    job.needs_reconcile = True
+                    job.files, job.message, job._log, job._revision = rows, old_message, old_log, old_revision
                 raise
 
     def close(self) -> None:
@@ -265,10 +283,7 @@ class JobStore:
                 self._conn = None
 
     def _load(self) -> None:
-        rows = self._conn.execute(
-            "SELECT job_id, total_files, status, progress, message, created_at, log, kind, phase, needs_reconcile, files "
-            "FROM jobs"
-        )
+        rows = self._conn.execute(_SELECT_JOBS)
         for row in rows:
             job = self._job_from_row(row)
             self._jobs[job.job_id] = job
@@ -298,47 +313,71 @@ class JobStore:
             phase=row["phase"],
             needs_reconcile=bool(row["needs_reconcile"]),
             files=files,
+            _revision=int(row["revision"]),
         )
         job._store = self
         return job
 
-    def _upsert(self, job: Job, commit: bool = True) -> None:
+    def _reload(self, job: Job, row: sqlite3.Row) -> None:
+        """Adopt the persisted row; identity, kind, total and creation time never move."""
+        fresh = self._job_from_row(row)
+        job.status, job.progress, job.message, job.phase = fresh.status, fresh.progress, fresh.message, fresh.phase
+        job.needs_reconcile, job.files, job._log, job._revision = fresh.needs_reconcile, fresh.files, fresh._log, fresh._revision
+
+    def _upsert(self, job: Job, commit: bool = True) -> bool:
+        """Persist the job unless its row moved under us; return whether it was written.
+
+        The revision is a fence: a writer may only replace the row it last observed.
+        A superseded process (still finishing after a restart recovered its job)
+        therefore loses and adopts the recovered row instead of overwriting it.
+        """
         if self._conn is None:
-            return
-        self._conn.execute(
-            """
-            INSERT INTO jobs (
-                job_id, total_files, status, progress, message, created_at, log,
-                kind, phase, needs_reconcile, files
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(job_id) DO UPDATE SET
-                total_files = excluded.total_files,
-                status = excluded.status,
-                progress = excluded.progress,
-                message = excluded.message,
-                created_at = excluded.created_at,
-                log = excluded.log,
-                kind = excluded.kind,
-                phase = excluded.phase,
-                needs_reconcile = excluded.needs_reconcile,
-                files = excluded.files
-            """,
-            (
-                job.job_id,
-                job.total_files,
-                job.status.value,
-                job.progress,
-                job.message,
-                job.created_at,
-                json.dumps(list(job._log), ensure_ascii=False),
-                job.kind,
-                job.phase,
-                int(job.needs_reconcile),
-                json.dumps(job.files, ensure_ascii=False),
-            ),
+            raise RuntimeError("Job store is closed")
+        values = (
+            job.total_files,
+            job.status.value,
+            job.progress,
+            job.message,
+            job.created_at,
+            json.dumps(list(job._log), ensure_ascii=False),
+            job.kind,
+            job.phase,
+            int(job.needs_reconcile),
+            json.dumps(job.files, ensure_ascii=False),
         )
+        revision = job._revision + 1
+        written = self._conn.execute(
+            """
+            UPDATE jobs SET
+                total_files = ?, status = ?, progress = ?, message = ?, created_at = ?,
+                log = ?, kind = ?, phase = ?, needs_reconcile = ?, files = ?, revision = ?
+            WHERE job_id = ? AND revision = ?
+            """,
+            (*values, revision, job.job_id, job._revision),
+        ).rowcount
+        stale = False
+        if not written:
+            row = self._conn.execute(_SELECT_JOBS + " WHERE job_id = ?", (job.job_id,)).fetchone()
+            stale = row is not None
+            if stale:
+                self._reload(job, row)
+            else:
+                self._conn.execute(
+                    """
+                    INSERT INTO jobs (
+                        job_id, total_files, status, progress, message, created_at, log,
+                        kind, phase, needs_reconcile, files, revision
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (job.job_id, *values, revision),
+                )
         if commit:
+            # Also after a refused write: the UPDATE opened a transaction whose lock must go.
             self._conn.commit()
+        if not stale:
+            # Only once committed, so a failed commit leaves memory matching the row.
+            job._revision = revision
+        return not stale
 
 
 # Each application factory owns its store; importing this module never creates state.
