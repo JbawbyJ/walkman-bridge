@@ -220,7 +220,8 @@ def probe_link(backend, url):
         result['artwork'] = {'bytes': len(image), 'artwork_scan': record_scan(backend.state, media_id, 'artwork')}
         with sqlite3.connect(backend.state / 'nightops.sqlite') as database:
             artifacts = json.loads(database.execute('SELECT record FROM media WHERE id=?', (media_id,)).fetchone()[0])['artifacts']
-        if 'thumbnail' in artifacts:
+        # Embedded art wins, and then the provider cover is kept but never scanned or decoded.
+        if (artifacts.get('thumbnail') or {}).get('scan') is not None:
             result['artwork']['provider_cover_scan'] = record_scan(backend.state, media_id, 'thumbnail')
     status, headers, source = backend.call(f'/api/media/{media_id}/stream', raw=True,
         headers={'Range': 'bytes=0-63'})

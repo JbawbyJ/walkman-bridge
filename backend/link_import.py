@@ -424,11 +424,32 @@ def _read_cover(response: Any) -> bytes | None:
     return bytes(data)
 
 
+def _download_cover(candidates: list[str], budget: _TransportBudget, module_open) -> bytes | None:
+    """The first available candidate's JPEG bytes, or None. Only a 404 or 410 tries the next one."""
+    for url in candidates:
+        try:
+            response = module_open(SimpleNamespace(url=url, headers={"Accept": "image/jpeg"}), budget=budget)
+        except Exception as exc:
+            failed = getattr(exc, "response", None)
+            if failed is not None:
+                failed.close()
+            if getattr(exc, "status", None) in (404, 410):
+                continue
+            return None
+        try:
+            return _read_cover(response)
+        finally:
+            response.close()
+    return None
+
+
 def _fetch_cover(canonical: str, info: dict[str, Any], directory: Path, budget: _TransportBudget, module_open) -> None:
     """Write one provider cover to directory/COVER_NAME, or nothing. Never raises.
 
     Runs after the audio is complete, through the same allow-listed transport and
-    budget, with a shortened deadline. Only a 404 or 410 moves to the next candidate.
+    budget. A blocked DNS lookup, connect or read cannot outlast the cover window:
+    the fetch runs on a helper thread that is abandoned at the deadline, and only
+    this thread writes the file.
     """
     try:
         candidates = _cover_candidates(canonical, info)
@@ -436,33 +457,23 @@ def _fetch_cover(canonical: str, info: dict[str, Any], directory: Path, budget: 
         if not candidates or budget.deadline - now < _COVER_MIN_REMAINING:
             return
         budget.deadline = min(budget.deadline, now + _COVER_SECONDS)
-        for url in candidates:
-            try:
-                response = module_open(SimpleNamespace(url=url, headers={"Accept": "image/jpeg"}), budget=budget)
-            except Exception as exc:
-                failed = getattr(exc, "response", None)
-                if failed is not None:
-                    failed.close()
-                if getattr(exc, "status", None) in (404, 410):
-                    continue
-                return
-            try:
-                data = _read_cover(response)
-            finally:
-                response.close()
-            if data is None:
-                return
-            target = directory / COVER_NAME
-            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
-            try:
-                with os.fdopen(descriptor, "wb") as stream:
-                    stream.write(data)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-            except BaseException:
-                target.unlink(missing_ok=True)
-                raise
+        found: list[bytes | None] = []
+        fetch = threading.Thread(target=lambda: found.append(_download_cover(candidates, budget, module_open)),
+                                 name="cover-fetch", daemon=True)
+        fetch.start()
+        fetch.join(max(0.0, budget.deadline - time.monotonic()))
+        if fetch.is_alive() or not found or found[0] is None:
             return
+        target = directory / COVER_NAME
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(found[0])
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            target.unlink(missing_ok=True)
+            raise
     except Exception:
         return
 
