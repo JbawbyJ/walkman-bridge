@@ -167,7 +167,7 @@ class MediaStore:
                 shutil.rmtree(folder)
                 continue
             retained = {value['name'] for value in known[folder.name]['artifacts'].values()}
-            for name in ('playback.flac', 'transfer.mp3', 'artwork.jpg'):
+            for name in ('playback.flac', 'transfer.mp3', 'artwork.jpg', 'thumbnail.jpg'):
                 path = folder / name
                 if name not in retained and path.exists():
                     no_links(path, self.root)
@@ -388,6 +388,48 @@ class MediaStore:
                 shutil.rmtree(folder)
                 raise
 
+    _IMPORTED_ARTIFACTS = {'thumbnail': 'thumbnail.jpg'}
+
+    def import_artifact(self, media_id, artifact, src, max_bytes, **fields):
+        """Copy one opaque file into a fixed artifact name. Nothing decodes it before its own scan."""
+        name = self._IMPORTED_ARTIFACTS[artifact]
+        no_links(src, self.root)
+        info = src.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not 5 <= info.st_size <= max_bytes:
+            raise MediaError('Imported artifact is not a bounded regular file')
+        target = self.root / self._id(media_id) / name
+        with self._lock:
+            if artifact in self.get(media_id)['artifacts']:
+                raise MediaError('Artifact already exists')
+        with self.reserve(info.st_size):
+            created = False
+            try:
+                digest = hashlib.sha256()
+                count = 0
+                with locked_read(src, self.root) as stream, target.open('xb') as copy:
+                    created = True
+                    while chunk := stream.read(1024 * 1024):
+                        count += len(chunk)
+                        if count > info.st_size:
+                            raise MediaError('Artifact changed size during copy')
+                        digest.update(chunk)
+                        copy.write(chunk)
+                    copy.flush()
+                    os.fsync(copy.fileno())
+                if count != info.st_size:
+                    raise MediaError('Artifact ended before the expected size')
+                with self._lock:
+                    record = self.get(media_id)
+                    if artifact in record['artifacts']:
+                        raise MediaError('Artifact already exists')
+                    record['artifacts'][artifact] = dict(fields, name=name, size_bytes=count,
+                                                         sha256=digest.hexdigest(), scan=None)
+                    return self.update(media_id, artifacts=record['artifacts'])
+            except BaseException:
+                if created:
+                    target.unlink(missing_ok=True)
+                raise
+
     def update(self, media_id, **changes):
         with self._lock:
             record = self.get(media_id)
@@ -456,7 +498,7 @@ class MediaStore:
         artifacts = record.get('artifacts') or {}
         refused = (artifacts.get('source', {}).get('purged') or artifacts.get('artwork', {}).get('purged')
                    or (artifacts.get('source', {}).get('scan') or {}).get('reason_code') == 'defender_threat')
-        if record.get('artwork_status') == 'ready' and not refused:
+        if record.get('artwork_status') == 'ready' and 'artwork' in artifacts and not refused:
             result['artwork_url'] = f'/api/media/{record["id"]}/artwork'
         return result
 

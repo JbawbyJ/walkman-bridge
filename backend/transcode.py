@@ -259,3 +259,53 @@ def extract_cleared_artwork(src: Path, out: Path, max_bytes: int = 1024 * 1024) 
     except BaseException:
         out.unlink(missing_ok=True)
         raise
+
+
+_COVER_CROPS = {
+    'square': "crop=w='min(iw,ih)':h='min(iw,ih)'",
+    # YouTube sd/hq thumbnails pad 16:9 frames to 4:3; drop the bars before squaring.
+    'letterbox': "crop=w=iw:h='min(ih,trunc(iw*9/16/2)*2)',crop=w='min(iw,ih)':h='min(iw,ih)'",
+}
+
+
+def convert_cleared_image(src: Path, out: Path, crop: str = 'square', max_bytes: int = 1024 * 1024) -> Path:
+    """Re-encode one cleared provider JPEG into the bounded square artwork JPEG.
+
+    The caller holds the cleared input's lease and must scan this derivative before
+    exposing it. The demuxer and decoder are forced to JPEG, so no other format is
+    probed. Every failure raises and removes any partial derivative.
+    """
+    if src.resolve() == out.resolve():
+        raise AudioError('Artwork output must not overwrite its source')
+    if max_bytes < 1024 or max_bytes > 1024 * 1024:
+        raise AudioError('Artwork size limit must be between 1 KiB and 1 MiB')
+    if crop not in _COVER_CROPS:
+        raise AudioError('Unknown artwork crop')
+    cmd = [_ensure_ffmpeg(), '-hide_banner', '-nostdin', '-nostats', '-v', 'error', '-y',
+           '-protocol_whitelist', 'file,pipe', '-max_alloc', '67108864', '-threads', '1',
+           '-max_pixels', '16777216', '-filter_threads', '1',
+           '-f', 'jpeg_pipe', '-format_whitelist', 'jpeg_pipe', '-c:v', 'mjpeg', '-codec_whitelist', 'mjpeg',
+           '-i', str(src), '-map', '0:v:0', '-an', '-sn', '-dn',
+           '-map_metadata', '-1', '-map_chapters', '-1', '-frames:v', '1',
+           '-vf', _COVER_CROPS[crop] + ",scale=w='min(512,iw)':h='min(512,ih)':force_original_aspect_ratio=decrease,setsar=1",
+           '-threads', '1', '-c:v', 'mjpeg', '-q:v', '3', '-pix_fmt', 'yuvj420p',
+           '-f', 'image2', '-update', '1', '-fs', str(max_bytes), str(out)]
+    try:
+        result = _run_bounded(cmd, timeout=30, output_limit=128 * 1024)
+        if result.returncode:
+            raise AudioError('Provider artwork could not be decoded')
+        if not out.is_file() or not 0 < out.stat().st_size < max_bytes:
+            raise AudioError('Provider artwork exceeds the processing limit')
+        with out.open('rb') as image:
+            start = image.read(2)
+            image.seek(-2, os.SEEK_END)
+            end = image.read(2)
+        if start != b'\xff\xd8' or end != b'\xff\xd9':
+            raise AudioError('Provider artwork derivative is not a complete JPEG')
+        return out
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        out.unlink(missing_ok=True)
+        raise AudioError('Artwork converter was unavailable or timed out') from exc
+    except BaseException:
+        out.unlink(missing_ok=True)
+        raise

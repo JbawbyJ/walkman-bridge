@@ -153,7 +153,7 @@ def scan_audio(path: Path) -> ScanResult:
 
 
 def scan_artwork(path: Path) -> ScanResult:
-    """Narrow generated-JPEG gate; never makes an image valid as audio."""
+    """Narrow managed-JPEG gate (generated artwork and the provider cover); never makes an image valid as audio."""
     path = Path(os.path.abspath(path))
     pid = begin(str(path))
     result = _scan(path, pid, artwork=True)
@@ -359,7 +359,7 @@ def _validate_audio_format(path: Path, size: int) -> str | None:
 
 
 def _validate_artwork_format(path: Path, size: int) -> str | None:
-    if path.name != 'artwork.jpg' or not 5 <= size <= 1024 * 1024:
+    if path.name not in ('artwork.jpg', 'thumbnail.jpg') or not 5 <= size <= 1024 * 1024:
         return 'Artwork must be a managed JPEG no larger than 1 MiB'
     try:
         with path.open('rb') as stream:

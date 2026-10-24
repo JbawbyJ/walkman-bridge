@@ -22,6 +22,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 
@@ -61,6 +62,16 @@ _OUTBOUND_EXACT = _PROVIDER_HOSTS | {
     "cf-media.sndcdn.com",
     "cf-hls-media.sndcdn.com",
 }
+# One provider cover, fetched after the audio as opaque bytes and decoded only
+# after its own Defender scan (media_service.prepare_artwork).
+COVER_NAME = "cover.jpg"
+COVER_MAX_BYTES = 1024 * 1024
+_COVER_SECONDS = 20
+_COVER_MIN_REMAINING = 60
+_YOUTUBE_COVERS = ("maxresdefault.jpg", "sddefault.jpg", "hqdefault.jpg")
+# SoundCloud's t500x500 rendition is a JPEG; "original" may be PNG and the
+# avatars- fallback is the uploader, not the track.
+_SOUNDCLOUD_COVER = re.compile(r"^https://i1\.sndcdn\.com/artworks-[A-Za-z0-9_-]{1,200}-t500x500\.jpg$")
 _DENO_ENVIRONMENT_LOCK = threading.RLock()
 _RUNTIME_ENV_KEYS = ("SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC", "PATHEXT")
 
@@ -372,6 +383,90 @@ def _secure_ydl_class(base, budget: _TransportBudget, module_open):
     return SecureYoutubeDL
 
 
+def _cover_candidates(canonical: str, info: dict[str, Any]) -> list[str]:
+    """Cover URLs for this track only; YouTube URLs come from the validated id, not provider data."""
+    parts = urlsplit(canonical)
+    if parts.hostname == "www.youtube.com":
+        video_id = parse_qs(parts.query).get("v", [""])[0]
+        if not _VIDEO_ID.fullmatch(video_id) or info.get("id") != video_id:
+            return []
+        return [f"https://i.ytimg.com/vi/{video_id}/{name}" for name in _YOUTUBE_COVERS]
+    thumbnails = info.get("thumbnails")
+    for thumbnail in thumbnails if isinstance(thumbnails, list) else []:
+        if not isinstance(thumbnail, dict) or thumbnail.get("id") != "t500x500":
+            continue
+        url = thumbnail.get("url")
+        if isinstance(url, str) and _SOUNDCLOUD_COVER.fullmatch(url):
+            return [url]
+    return []
+
+
+def _read_cover(response: Any) -> bytes | None:
+    """At most COVER_MAX_BYTES of a JPEG response, compared but never decoded."""
+    headers = response.headers
+    content_type = (headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    if content_type and content_type != "image/jpeg":
+        return None
+    length = headers.get("Content-Length")
+    expected = int(length) if isinstance(length, str) and length.isdigit() else None
+    if expected is not None and expected > COVER_MAX_BYTES:
+        return None
+    data = bytearray()
+    while len(data) <= COVER_MAX_BYTES:
+        chunk = response.read(min(64 * 1024, COVER_MAX_BYTES + 1 - len(data)))
+        if not chunk:
+            break
+        data += chunk
+        if expected is not None and len(data) >= expected:
+            break
+    if not 5 <= len(data) <= COVER_MAX_BYTES or data[:3] != b"\xff\xd8\xff" or data[-2:] != b"\xff\xd9":
+        return None
+    return bytes(data)
+
+
+def _fetch_cover(canonical: str, info: dict[str, Any], directory: Path, budget: _TransportBudget, module_open) -> None:
+    """Write one provider cover to directory/COVER_NAME, or nothing. Never raises.
+
+    Runs after the audio is complete, through the same allow-listed transport and
+    budget, with a shortened deadline. Only a 404 or 410 moves to the next candidate.
+    """
+    try:
+        candidates = _cover_candidates(canonical, info)
+        now = time.monotonic()
+        if not candidates or budget.deadline - now < _COVER_MIN_REMAINING:
+            return
+        budget.deadline = min(budget.deadline, now + _COVER_SECONDS)
+        for url in candidates:
+            try:
+                response = module_open(SimpleNamespace(url=url, headers={"Accept": "image/jpeg"}), budget=budget)
+            except Exception as exc:
+                failed = getattr(exc, "response", None)
+                if failed is not None:
+                    failed.close()
+                if getattr(exc, "status", None) in (404, 410):
+                    continue
+                return
+            try:
+                data = _read_cover(response)
+            finally:
+                response.close()
+            if data is None:
+                return
+            target = directory / COVER_NAME
+            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except BaseException:
+                target.unlink(missing_ok=True)
+                raise
+            return
+    except Exception:
+        return
+
+
 def _download_link_inprocess(
     url: str,
     directory: Path,
@@ -475,6 +570,7 @@ def _download_link_inprocess(
         os.chmod(path, 0o600)
     except OSError:
         pass
+    _fetch_cover(canonical, info, resolved_directory, budget, module_open)
     extension = path.suffix.lower().lstrip(".")
     provider = "youtube" if is_youtube else "soundcloud"
     def bounded(value: Any, limit: int = 512) -> str:

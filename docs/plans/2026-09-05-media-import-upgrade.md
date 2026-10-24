@@ -94,7 +94,8 @@ Existing seams verified when this handoff was written:
 
 ## Out of scope / Later
 
-- Additional providers, playlists, authenticated libraries, provider thumbnail fetching, device artwork support, and automatic metadata lookup need separate scope and security review.
+- Additional providers, playlists, authenticated libraries, device artwork support, and automatic metadata lookup need separate scope and security review.
+- Provider cover art was brought into scope on 2026-10-24 with these bounds. yt-dlp thumbnail writing and postprocessors stay disabled. After the audio download, the isolated worker requests one cover through the same allow-listed, DNS-pinned, budgeted transport: a YouTube `i.ytimg.com/vi/<id>/{maxresdefault,sddefault,hqdefault}.jpg` URL built from the already validated video id, or the SoundCloud `t500x500` JPEG whose URL fully matches `i1.sndcdn.com/artworks-…-t500x500.jpg`. It has a 20 s window and a 1 MiB cap. Only a 404/410 tries the next candidate. Bytes are kept only when they start `FF D8 FF` and end `FF D9`; nothing decodes them. The managed copy, `thumbnail.jpg`, gets its own Defender scan. Only then does FFmpeg re-encode it with a forced `jpeg_pipe` demuxer and `mjpeg` decoder into `artwork.jpg`, which is scanned again before it is served. Any cover failure leaves the audio import unaffected.
 - Signing, clean Windows/Sandbox policy compatibility, human listening comparison, and physical NW-S705F playback remain separate existing acceptance/release obligations.
 
 ## Report back must include

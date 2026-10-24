@@ -18,6 +18,13 @@ request for link importing supersedes the original exclusion of remote imports.
   per dimension and 1 MiB. The JPEG needs its own clearance and authenticated
   endpoint before rendering. The official lotus remains the fallback. Sony
   jacket-picture database writing is outside this version.
+- Link imports without embedded art use the provider cover (added 2026-10-24).
+  The isolated worker fetches one bounded JPEG after the audio. The managed
+  `thumbnail.jpg` is scanned on its own before FFmpeg re-encodes it, with the
+  demuxer and decoder forced to JPEG, into a square `artwork.jpg` that is
+  scanned again. YouTube letterbox bars are cropped first. Embedded art wins
+  when both exist. Tracks imported before this change have no stored cover;
+  remove and import the link again to get one.
 - Both interfaces have an accessible Import link dialog. Public single-track
   YouTube/SoundCloud downloads share the existing queue, processing, playback,
   and Bridge transfer services. Provider music fields supplement embedded tags;
@@ -26,6 +33,8 @@ request for link importing supersedes the original exclusion of remote imports.
   fixed restricted Deno, bounded output/bytes and a ten-minute deadline. It rejects
   private-network destinations, unapproved redirects, external downloaders and
   all yt-dlp postprocessors, including implicit FFmpeg fixups before scanning.
+  yt-dlp thumbnail writing stays disabled; the provider cover is a separate,
+  bounded request described above.
 - Downloads count toward cache/admission limits, participate in shutdown drain,
   clean up partial files, and recover interrupted jobs without replaying writes.
 

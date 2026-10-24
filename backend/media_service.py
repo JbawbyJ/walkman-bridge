@@ -5,11 +5,14 @@ from contextlib import ExitStack
 from pathlib import Path
 from jobs import JobStatus
 from media_store import MAX_FILE, BlockedBytesRemoved, MediaError, locked_read, no_links
-from transcode import convert_managed, analyze_cleared_audio, extract_cleared_artwork
+from transcode import convert_managed, analyze_cleared_audio, extract_cleared_artwork, convert_cleared_image
 from metadata import normalize_metadata, TRANSFER_TAGS
 from scan_bridge import ELEVATION_WAIT_SECONDS
 
 METADATA_POLICY = 3
+# Image artifacts use the JPEG scan gate and report through artwork_status only.
+# 'thumbnail' is the provider cover; only the generated 'artwork' makes art ready.
+IMAGE_ARTIFACTS = ('artwork', 'thumbnail')
 
 
 class MediaService:
@@ -40,26 +43,27 @@ class MediaService:
         path = self.store.path(record, artifact)  # raises BlockedBytesRemoved for purged threat bytes
         previous = record['artifacts'][artifact].get('scan')
         if previous and self.scanner.clearance_valid(path, previous):
-            if artifact == 'artwork':
-                self.store.update(media_id, artwork_status='ready')
+            if artifact in IMAGE_ARTIFACTS:
+                if artifact == 'artwork':
+                    self.store.update(media_id, artwork_status='ready')
                 return previous
             self.store.update(media_id, status='ready', scan=previous)
             if job:
                 job.update_file(media_id, state='ready', scan=previous, detail='Cleared')
             return previous
-        if artifact == 'artwork':
+        if artifact in IMAGE_ARTIFACTS:
             self.store.update(media_id, artwork_status='scanning')
         else:
             self.store.update(media_id, status='scanning')
         if job:
             job.set_phase('scanning')
             job.update_file(media_id, state='scanning')
-        scan_file = self.scanner.scan_artwork if artifact == 'artwork' else self.scanner.scan_audio
+        scan_file = self.scanner.scan_artwork if artifact in IMAGE_ARTIFACTS else self.scanner.scan_audio
         result = scan_file(path).to_dict()
         trusted_status = None
         if result.get('reason_code') == 'defender_elevation_required':
             request = self.bridge.request(media_id, path, result['sha256'], result['size_bytes'], batch_id=batch_id)
-            if artifact == 'artwork':
+            if artifact in IMAGE_ARTIFACTS:
                 self.store.update(media_id, artwork_status='awaiting_permission')
             else:
                 self.store.update(media_id, status='awaiting_permission', scan=result)
@@ -85,14 +89,19 @@ class MediaService:
         record = self.store.get(media_id)
         record['artifacts'][artifact]['scan'] = result
         status = 'ready' if valid else ('blocked' if result.get('state') in ('THREAT', 'BLOCKED', 'REJECTED') else 'failed')
-        if artifact == 'artwork':
+        if artifact == 'thumbnail' and valid:
+            # A cleared provider cover is still raw input; art is ready only after artwork.jpg clears.
+            self.store.update(media_id, artifacts=record['artifacts'])
+        elif artifact in IMAGE_ARTIFACTS:
             self.store.update(media_id, artifacts=record['artifacts'], artwork_status=status)
         else:
             self.store.update(media_id, artifacts=record['artifacts'], status=status, scan=result)
         if result.get('reason_code') == 'defender_threat':
             # Refuse the bytes the moment Defender reports, before the rest of the batch is processed;
-            # purge_threats deletes them once every read lock has been released.
-            self.store.refuse_artifacts(media_id, None if artifact == 'source' else [artifact])
+            # purge_threats deletes them once every read lock has been released. Artwork derived
+            # from a refused provider cover is refused with it.
+            refused = None if artifact == 'source' else ['thumbnail', 'artwork'] if artifact == 'thumbnail' else [artifact]
+            self.store.refuse_artifacts(media_id, refused)
         if job:
             job.update_file(media_id, state=status, scan=result,
                             reason_code=result.get('reason_code'), detail=result.get('reason', ''))
@@ -241,7 +250,7 @@ class MediaService:
 
     def prepare_artwork(self, media_id):
         record = self.store.get(media_id)
-        if not record.get('has_artwork'):
+        if not (record.get('has_artwork') or 'thumbnail' in record['artifacts'] or 'artwork' in record['artifacts']):
             return
         out = self.store.path(record).parent / 'artwork.jpg'
         with locked_read(self.store.path(record), self.store.root):
@@ -253,7 +262,16 @@ class MediaService:
                     record = self.store.purge_artifact(media_id, 'artwork')
                 if 'artwork' not in record['artifacts']:
                     with self.store.reserve(1024 * 1024):
-                        generated = extract_cleared_artwork(self.store.path(record), out)
+                        generated = None
+                        if record.get('has_artwork'):
+                            generated = extract_cleared_artwork(self.store.path(record), out)
+                        if generated is None and 'thumbnail' in record['artifacts']:
+                            # Embedded art wins; the provider cover is decoded only after its own clearance.
+                            cover = self.store.path(record, 'thumbnail')
+                            with locked_read(cover, self.store.root):
+                                self.clear(media_id, 'thumbnail')
+                                generated = convert_cleared_image(cover, out,
+                                    record['artifacts']['thumbnail'].get('crop', 'square'))
                         if generated is None:
                             self.store.update(media_id, artwork_status='none')
                             return
@@ -294,6 +312,14 @@ class MediaService:
                 # Provider metadata is text, never instructions/HTML or a filesystem path.
                 hints = normalize_metadata(downloaded.metadata, record['name'])
                 self.store.update(media_id, metadata_hints=hints, import_source='link')
+                cover = folder / link_import.COVER_NAME
+                if cover.is_symlink() or cover.exists():
+                    try:
+                        # YouTube sd/hq covers are letterboxed 16:9 frames; SoundCloud art is square.
+                        crop = 'letterbox' if downloaded.metadata.get('provider') == 'youtube' else 'square'
+                        self.store.import_artifact(media_id, 'thumbnail', cover, link_import.COVER_MAX_BYTES, crop=crop)
+                    except Exception:
+                        job.log('Provider cover art was not kept')
                 job.update_file(media_id, name=record['name'], state='queued', detail='Downloaded; awaiting Defender clearance')
             delegated = True
             self.run(job_id, [media_id], ticket, leases, kind='import')
