@@ -85,6 +85,9 @@ jobs:
           & $bin.FullName -version
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Backend, browser logic and broker tests
+        timeout-minutes: 20
+        env:
+          WALKMAN_TEST_HANG_SECONDS: '180'
         run: |
           python -m pytest backend/tests -q -p no:cacheprovider -rs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
