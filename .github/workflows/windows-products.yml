@@ -400,3 +400,62 @@ jobs:
           path: |
             frontend/test-output/zoom-matrix/report.json
             !frontend/test-output/zoom-matrix/profile/**
+
+  # TEMPORARY: locates the Windows hang in the backend step. Each group runs on its own
+  # runner, so a group that wedges its VM cannot hide the logs of the others.
+  backend-hang-bisect:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: cover-fetch
+            args: backend/tests/test_provider_cover.py -k "youtube_cover_is_fetched or only_missing_covers or other_cover_failures or cover_bytes_are_compared or cover_read_stops or audio_budget_inside or stalled_cover_request or no_cover_request or existing_cover_file or soundcloud_uses_only"
+          - group: cover-store
+            args: backend/tests/test_provider_cover.py -k "import_artifact_ or startup_removes or artwork_url_needs or jpeg_scan_gate or cover_conversion"
+          - group: cover-api
+            args: backend/tests/test_provider_cover.py -k "link_import_cover_is_scanned or soundcloud_covers_are_squared or threat_on_the_provider or bad_cover_from_the_worker or clean_provider_cover_alone or retry_reuses or elevation_only or without_a_cover or embedded_art_wins or rescan_re_clears"
+          - group: cover-file
+            args: backend/tests/test_provider_cover.py
+          - group: rest
+            args: backend/tests --ignore=backend/tests/test_provider_cover.py
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13.15'
+      - name: Install backend dependencies
+        run: |
+          python -m pip install -r backend/requirements.txt -c packaging/python-runtime-constraints.txt -r backend/requirements-dev.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Install pinned ffmpeg and put it on PATH
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $lock = Get-Content -Raw packaging/runtime-lock.json | ConvertFrom-Json
+          $record = $lock.ffmpeg
+          $zip = Join-Path $env:RUNNER_TEMP $record.filename
+          Invoke-WebRequest -Uri $record.url -OutFile $zip -UseBasicParsing -Headers @{ 'User-Agent' = 'RedLotus-Packaging/0.4.1' }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($hash -ne $record.sha256) { throw "ffmpeg sha256 mismatch: $hash" }
+          $dest = Join-Path $env:RUNNER_TEMP 'ffmpeg-essentials'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
+          $bin = Get-ChildItem -LiteralPath $dest -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $bin) { throw 'pinned ffmpeg archive did not contain ffmpeg.exe' }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin.DirectoryName
+          "WALKMAN_BRIDGE_FFMPEG=$($bin.FullName)" | Add-Content -Path $env:GITHUB_ENV
+      - name: Backend tests (${{ matrix.group }})
+        timeout-minutes: 10
+        env:
+          WALKMAN_TEST_HANG_SECONDS: '120'
+        run: |
+          Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory, TotalVisibleMemorySize | Format-List
+          python -m pytest ${{ matrix.args }} -v -p no:cacheprovider -rs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
