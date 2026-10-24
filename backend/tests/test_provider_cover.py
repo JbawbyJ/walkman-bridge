@@ -311,13 +311,15 @@ def test_artwork_url_needs_the_artwork_entry_not_just_the_status(tmp_path):
     assert "artwork_url" not in store.public(record)
 
 
+# Explicit ids: pytest would otherwise put the 1 MiB value in the test id, which
+# Windows cannot hold in PYTEST_CURRENT_TEST and the Actions log cannot print.
 @pytest.mark.parametrize("name, data, accepted", [
-    ("thumbnail.jpg", COVER, True),
-    ("artwork.jpg", COVER, True),
-    ("cover.jpg", COVER, False),
-    ("thumbnail.png", COVER, False),
-    ("thumbnail.jpg", b"\x89PNG\r\n\x1a\n\x00\x00", False),
-    ("thumbnail.jpg", b"\xff\xd8\xff" + b"x" * (1024 * 1024) + b"\xff\xd9", False),
+    pytest.param("thumbnail.jpg", COVER, True, id="thumbnail"),
+    pytest.param("artwork.jpg", COVER, True, id="artwork"),
+    pytest.param("cover.jpg", COVER, False, id="unmanaged-name"),
+    pytest.param("thumbnail.png", COVER, False, id="png-name"),
+    pytest.param("thumbnail.jpg", b"\x89PNG\r\n\x1a\n\x00\x00", False, id="png-bytes"),
+    pytest.param("thumbnail.jpg", b"\xff\xd8\xff" + b"x" * (1024 * 1024) + b"\xff\xd9", False, id="over-1-mib"),
 ])
 def test_jpeg_scan_gate_names_both_managed_images(tmp_path, name, data, accepted):
     path = tmp_path / name
@@ -359,7 +361,8 @@ def test_cover_conversion_forces_the_jpeg_decoder_and_removes_failed_output(tmp_
         transcode.convert_cleared_image(source, source)
 
 
-@pytest.mark.parametrize("written", [b"", b"\xff\xd8" + b"x" * 2048 + b"\xff\xd9", b"\xff\xd8not a complete jpeg"])
+@pytest.mark.parametrize("written", [b"", b"\xff\xd8" + b"x" * 2048 + b"\xff\xd9", b"\xff\xd8not a complete jpeg"],
+                         ids=["empty", "over-limit", "truncated"])
 def test_cover_conversion_rejects_bad_output_and_removes_it(tmp_path, monkeypatch, written):
     source, output = tmp_path / "thumbnail.jpg", tmp_path / "artwork.jpg"
     source.write_bytes(COVER)
