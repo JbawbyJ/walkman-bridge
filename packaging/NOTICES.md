@@ -7,7 +7,7 @@ machine-readable `runtime-manifest.json` listing the actual bundled file hashes.
 
 | Component | License / bundled notice | Source |
 | --- | --- | --- |
-| Electron, Chromium, Node.js | Installed `LICENSE.electron.txt` and `LICENSES.chromium.html` | https://github.com/electron/electron/tree/v44.2.0 |
+| Electron, Chromium, Node.js | Installed `LICENSE.electron.txt` and `LICENSES.chromium.html` | https://github.com/electron/electron/tree/v44.9.3 |
 | CPython 3.13.15 | Python PSF license, `python/LICENSE.txt` | https://www.python.org/downloads/release/python-31315/ |
 | Python packages | Individual `python/Lib/site-packages/*.dist-info` license and metadata files | Locked PyPI versions in `python-wheels.lock.json` |
 | yt-dlp 2026.8.19 and yt-dlp-ejs 0.8.0 | Wheel license files and metadata under `python/Lib/site-packages/` | https://github.com/yt-dlp/yt-dlp and https://github.com/yt-dlp/ejs |

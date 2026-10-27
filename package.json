@@ -20,7 +20,7 @@
     "dist:player": "powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-products.ps1 -Product player"
   },
   "devDependencies": {
-    "electron": "44.2.0",
+    "electron": "44.9.3",
     "electron-builder": "26.15.3"
   },
   "overrides": {
